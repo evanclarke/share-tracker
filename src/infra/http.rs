@@ -1,17 +1,23 @@
 //! HTTP helpers shared by entity and report handlers.
 
+use crate::infra::db::WriteMode;
 use crate::infra::extract::Json;
 use crate::infra::extract::Query;
+use crate::infra::fx::FxError;
 use crate::infra::respond::NoContent;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
+use serde::de::DeserializeOwned;
+use sqlx::error::DatabaseError;
 use sqlx::error::ErrorKind;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
+use std::any::Any;
+use std::error;
 
 /// A boxed error source carried by [`ApiError::Internal`].
-pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
+pub type BoxError = Box<dyn error::Error + Send + Sync + 'static>;
 
 /// The error type every handler returns: it implements `IntoResponse`, so a
 /// handler is `Result<_, ApiError>` and propagates failures with `?` instead
@@ -353,11 +359,11 @@ pub struct DryRunQuery {
 
 impl DryRunQuery {
     /// How the write's transaction ends.
-    pub fn mode(&self) -> crate::infra::db::WriteMode {
+    pub fn mode(&self) -> WriteMode {
         if self.dry_run {
-            crate::infra::db::WriteMode::DryRun
+            WriteMode::DryRun
         } else {
-            crate::infra::db::WriteMode::Commit
+            WriteMode::Commit
         }
     }
 }
@@ -433,7 +439,7 @@ impl IntoResponse for ApiError {
     clippy::needless_pass_by_value,
     reason = "`CatchPanicLayer::custom` hands the payload over as an owned `Box`"
 )]
-pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
+pub fn panic_response(err: Box<dyn Any + Send + 'static>) -> Response {
     // The payload of `panic!("…")` / `unwrap()` on a `&str` or `String`; any
     // other payload type has no readable form, so it is named as such rather
     // than lost.
@@ -466,7 +472,7 @@ pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response 
 /// already made. That half is the compiler's to keep, not a convention: the
 /// handle is all a filter is given and it exposes no raw push, so there is no
 /// spelling of `apply_filter` that can put a value into the SQL text.
-pub trait CrudListFilter: Default + serde::de::DeserializeOwned + Send + 'static {
+pub trait CrudListFilter: Default + DeserializeOwned + Send + 'static {
     /// Narrow the list. Called once per request on a builder opened with
     /// `WHERE 1=1`; an all-`None` filter appends nothing.
     fn apply_filter(&self, clauses: &mut FilterClauses<'_>);
@@ -606,7 +612,7 @@ pub trait CrudEntity:
     /// `currencies`, `mic_registry`). `Clone` because a blocked delete binds
     /// it a second time, to count the rows that blocked it (see
     /// [`fk_dependants_message`]).
-    type Key: serde::de::DeserializeOwned
+    type Key: DeserializeOwned
         + for<'q> sqlx::Encode<'q, Sqlite>
         + sqlx::Type<Sqlite>
         + Clone
@@ -1065,7 +1071,7 @@ const BUSY_BODY: &str = "the database was busy with another write and this one g
 /// `SQLITE_LOCKED` (6) is deliberately *not* included: it is a shared-cache /
 /// same-connection table lock, which is a coding fault rather than contention
 /// between processes, and it must keep surfacing as the 500 it is.
-fn is_busy(db: &dyn sqlx::error::DatabaseError) -> bool {
+fn is_busy(db: &dyn DatabaseError) -> bool {
     db.code()
         .and_then(|c| c.parse::<i32>().ok())
         .is_some_and(is_busy_code)
@@ -1138,7 +1144,7 @@ impl From<sqlx::Error> for ApiError {
         // itself so it can be recovered here rather than answered as an
         // opaque 500 the user can do nothing with (SCENARIOS M-04).
         if let sqlx::Error::Decode(source) = &err
-            && let Some(fx) = source.downcast_ref::<crate::infra::fx::FxError>()
+            && let Some(fx) = source.downcast_ref::<FxError>()
             && let Some(response) = missing_rate_unprocessable(fx)
         {
             return response;
@@ -1156,8 +1162,8 @@ impl From<sqlx::Error> for ApiError {
 /// *lookup* is a genuine server fault and stays a `500`.
 ///
 /// [report-snapshot generation]: crate::reports::snapshot
-fn missing_rate_unprocessable(err: &crate::infra::fx::FxError) -> Option<ApiError> {
-    let crate::infra::fx::FxError::MissingRate { currency, month } = err else {
+fn missing_rate_unprocessable(err: &FxError) -> Option<ApiError> {
+    let FxError::MissingRate { currency, month } = err else {
         return None;
     };
     // `?` (Debug quoting) rather than `%`: the currency code is stored
@@ -1171,8 +1177,8 @@ fn missing_rate_unprocessable(err: &crate::infra::fx::FxError) -> Option<ApiErro
 
 /// An FX failure raised directly (not through a `sqlx::Error`) classifies the
 /// same way: a missing rate is the user's to close, anything else is a fault.
-impl From<crate::infra::fx::FxError> for ApiError {
-    fn from(err: crate::infra::fx::FxError) -> Self {
+impl From<FxError> for ApiError {
+    fn from(err: FxError) -> Self {
         missing_rate_unprocessable(&err).unwrap_or_else(|| ApiError::Internal(err.into()))
     }
 }
@@ -1334,8 +1340,16 @@ pub(crate) fn documented_error_shapes() -> Vec<(u16, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infra::fx::FxError;
+    use crate::infra::fx::RateMonth;
+    use crate::test_support;
+    use crate::test_support::SourceFile;
     use http_body_util::BodyExt;
+    use std::io;
+    use std::mem;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tracing::subscriber;
 
     /// `over` opens the `WHERE` itself, so a caller hands it the statement
     /// before one and cannot leave its `AND …` clauses with nothing to follow
@@ -1371,9 +1385,9 @@ mod tests {
     /// failure stays the `500` it should be (SCENARIOS M-04).
     #[tokio::test]
     async fn a_missing_fx_rate_is_a_422_naming_the_currency_and_month() {
-        let missing = || crate::infra::fx::FxError::MissingRate {
+        let missing = || FxError::MissingRate {
             currency: "USD".into(),
-            month: "2023-05".parse::<crate::infra::fx::RateMonth>().unwrap(),
+            month: "2023-05".parse::<RateMonth>().unwrap(),
         };
         for (label, error) in [
             ("raised directly", ApiError::from(missing())),
@@ -1415,7 +1429,7 @@ mod tests {
             .filename(dir.path().join("busy.db"))
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::ZERO);
+            .busy_timeout(Duration::ZERO);
         let pool = SqlitePool::connect_with(opts).await.unwrap();
         sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY)")
             .execute(&pool)
@@ -1520,7 +1534,7 @@ mod tests {
     /// 422 quoting the constraint, a decode failure is still a 500).
     #[tokio::test]
     async fn only_a_foreign_key_failure_is_treated_as_a_blocked_delete() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let err = sqlx::Error::Decode("invalid decimal in column quantity".into());
         let message = fk_dependants_message(&pool, &err, "listing", "listings", "id", 1_i64)
             .await
@@ -1644,12 +1658,12 @@ mod tests {
     fn logs_of(err: ApiError) -> String {
         #[derive(Clone, Default)]
         struct Buf(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Buf {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        impl io::Write for Buf {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 self.0.lock().unwrap().extend_from_slice(buf);
                 Ok(buf.len())
             }
-            fn flush(&mut self) -> std::io::Result<()> {
+            fn flush(&mut self) -> io::Result<()> {
                 Ok(())
             }
         }
@@ -1660,7 +1674,7 @@ mod tests {
             .with_max_level(tracing::Level::ERROR)
             .finish();
 
-        tracing::subscriber::with_default(subscriber, || {
+        subscriber::with_default(subscriber, || {
             let _ = err.into_response();
         });
 
@@ -1725,7 +1739,7 @@ mod tests {
 
     #[tokio::test]
     async fn db_constraint_violations_classify_as_422_with_detail() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         sqlx::query("CREATE TABLE check_demo (v TEXT CHECK(v IN ('a', 'b')))")
             .execute(&pool)
             .await
@@ -1748,7 +1762,7 @@ mod tests {
     /// raised it was composed by the server, not the client.
     #[tokio::test]
     async fn constraint_violations_from_a_server_write_classify_as_internal() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         sqlx::query("CREATE TABLE check_demo (v TEXT CHECK(v IN ('a', 'b')))")
             .execute(&pool)
             .await
@@ -1859,7 +1873,7 @@ mod tests {
                 word.push(c);
             } else {
                 if word.starts_with(char::is_uppercase) {
-                    names.push(std::mem::take(&mut word));
+                    names.push(mem::take(&mut word));
                 } else {
                     word.clear();
                 }
@@ -1874,11 +1888,11 @@ mod tests {
     /// Every type in `src` that derives `Deserialize`.
     fn deserialized_types() -> Vec<DeserializedType> {
         let mut types = Vec::new();
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: file,
             raw: body,
             ..
-        } in crate::test_support::rust_sources()
+        } in test_support::rust_sources()
         {
             let lines: Vec<&str> = body.lines().collect();
             for (n, line) in lines.iter().enumerate() {
@@ -1944,7 +1958,7 @@ mod tests {
                         named.push(ScannedField {
                             name,
                             ty,
-                            attrs: std::mem::take(&mut pending),
+                            attrs: mem::take(&mut pending),
                         });
                     }
                     if opened && depth <= 0 {
@@ -1973,8 +1987,7 @@ mod tests {
     /// position (the return side, after `->`, is the response).
     fn extractor_types() -> Vec<String> {
         let mut found = Vec::new();
-        for crate::test_support::SourceFile { raw: body, .. } in crate::test_support::rust_sources()
-        {
+        for SourceFile { raw: body, .. } in test_support::rust_sources() {
             for line in body.lines() {
                 let code = line.trim_start();
                 if code.starts_with("//") {

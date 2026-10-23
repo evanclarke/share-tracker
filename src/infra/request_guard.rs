@@ -40,6 +40,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use std::net::IpAddr;
 
 use super::auth::AuthMode;
 use super::http::ApiError;
@@ -93,7 +94,7 @@ impl RequestGuard {
 /// The `Host` check: `localhost`, any IP address, or a configured name.
 fn host_allowed(host: &str, allowed: &[String]) -> bool {
     let name = normalise_host(host);
-    name == "localhost" || name.parse::<std::net::IpAddr>().is_ok() || allowed.contains(&name)
+    name == "localhost" || name.parse::<IpAddr>().is_ok() || allowed.contains(&name)
 }
 
 /// A `Host` header value (or a configured name) reduced to the bare, lowercase
@@ -151,13 +152,14 @@ pub async fn guard(State(guard): State<RequestGuard>, req: Request, next: Next) 
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
+    use axum::http::HeaderName;
     use axum::http::StatusCode;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in pairs {
             map.insert(
-                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
                 value.parse().unwrap(),
             );
         }

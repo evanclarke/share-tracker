@@ -7,8 +7,15 @@
 //! startup: this is a financial-records server, and silently falling back to a
 //! default database because of a typo is worse than not starting.
 
+use lettre::message::Mailbox;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use serde::de;
+use std::fmt;
+use std::fs;
+use std::net::IpAddr;
+use std::path;
+use std::str::FromStr;
 
 /// Where the config file is looked for when `--config` is not given.
 pub const DEFAULT_CONFIG_PATH: &str = "/usr/local/etc/share-tracker.toml";
@@ -90,7 +97,7 @@ fn percent<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<D
         Text(String),
     }
     let raw = Option::<Raw>::deserialize(deserializer).map_err(|_| {
-        serde::de::Error::custom(
+        de::Error::custom(
             "price_alert_pct must be written as a string (\"2.5\") or a whole number (5), never \
              as a decimal number — a TOML float cannot represent every threshold exactly",
         )
@@ -98,9 +105,11 @@ fn percent<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<D
     match raw {
         None => Ok(None),
         Some(Raw::Int(n)) => Ok(Some(Decimal::from(n))),
-        Some(Raw::Text(text)) => text.trim().parse::<Decimal>().map(Some).map_err(|e| {
-            serde::de::Error::custom(format!("invalid price_alert_pct {text:?}: {e}"))
-        }),
+        Some(Raw::Text(text)) => text
+            .trim()
+            .parse::<Decimal>()
+            .map(Some)
+            .map_err(|e| de::Error::custom(format!("invalid price_alert_pct {text:?}: {e}"))),
     }
 }
 
@@ -196,7 +205,7 @@ impl Settings {
                         .unwrap_or_default()
                         .iter()
                         .map(|address| {
-                            address.parse::<std::net::IpAddr>().map_err(|e| {
+                            address.parse::<IpAddr>().map_err(|e| {
                                 format!("invalid auth.trusted_proxies entry {address:?}: {e}")
                             })
                         })
@@ -243,7 +252,7 @@ fn validate_allowed_host(raw: &str) -> Result<String, String> {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'))
-        && name.parse::<std::net::IpAddr>().is_err();
+        && name.parse::<IpAddr>().is_err();
     if valid {
         Ok(name)
     } else {
@@ -264,7 +273,7 @@ fn resolve_email(config: EmailConfig) -> Result<super::email::EmailSettings, Str
     use super::email::{EmailSettings, Encryption};
 
     let mailbox = |raw: &str, field: &str| {
-        raw.parse::<lettre::message::Mailbox>()
+        raw.parse::<Mailbox>()
             .map_err(|e| format!("invalid email {field} {raw:?}: {e}"))
     };
     let encryption = match &config.encryption {
@@ -372,7 +381,7 @@ pub enum InvalidBasePath {
     RelativeSegment(String),
 }
 
-impl std::str::FromStr for BasePath {
+impl FromStr for BasePath {
     type Err = InvalidBasePath;
 
     /// Normalise a configured reverse-proxy path prefix to the one form a
@@ -413,8 +422,8 @@ impl std::str::FromStr for BasePath {
     }
 }
 
-impl std::fmt::Display for BasePath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for BasePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -431,7 +440,7 @@ impl PartialEq<&str> for BasePath {
 pub fn load(explicit: Option<&str>) -> Result<ConfigFile, String> {
     match explicit {
         Some(path) => read(path),
-        None if std::path::Path::new(DEFAULT_CONFIG_PATH).exists() => read(DEFAULT_CONFIG_PATH),
+        None if path::Path::new(DEFAULT_CONFIG_PATH).exists() => read(DEFAULT_CONFIG_PATH),
         None => Ok(ConfigFile::default()),
     }
 }
@@ -439,9 +448,9 @@ pub fn load(explicit: Option<&str>) -> Result<ConfigFile, String> {
 fn read(path: &str) -> Result<ConfigFile, String> {
     use std::os::unix::fs::PermissionsExt;
 
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read config file {path}: {e}"))?;
-    let warning = std::fs::metadata(path)
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("failed to read config file {path}: {e}"))?;
+    let warning = fs::metadata(path)
         .ok()
         .and_then(|metadata| mode_warning(path, metadata.permissions().mode()));
     if let Some(warning) = warning {
@@ -478,7 +487,14 @@ fn mode_warning(path: &str, mode: u32) -> Option<String> {
 mod tests {
     use super::*;
     use crate::infra::args::Args;
+    use crate::infra::auth::Auth;
+    use crate::infra::auth::CookieSecurity;
+    use crate::infra::email::EmailSettings;
+    use crate::infra::email::Encryption;
+    use crate::test_support;
     use clap::Parser;
+    use std::fs;
+    use std::net::IpAddr;
 
     /// The sample config the FreeBSD package installs. Parsing it here means a
     /// renamed or removed setting breaks the build instead of the deployment.
@@ -510,7 +526,7 @@ mod tests {
         );
         // The default host must parse to a bindable address (the server has no
         // authentication, so the safe default is loopback only).
-        assert!(settings.host.parse::<std::net::IpAddr>().is_ok());
+        assert!(settings.host.parse::<IpAddr>().is_ok());
     }
 
     /// `allowed_hosts` entries are normalised to bare lowercase names, and an
@@ -722,8 +738,7 @@ mod tests {
 
     #[test]
     fn auth_table_resolves_into_settings() {
-        let hash =
-            crate::infra::auth::Auth::hash_password(&crate::test_support::TEST_PASSWORD).unwrap();
+        let hash = Auth::hash_password(&test_support::TEST_PASSWORD).unwrap();
         let file = parse(&format!(
             r#"
             [auth]
@@ -732,7 +747,7 @@ mod tests {
             api_token = "{token}"
             secure_cookie = false
             "#,
-            token = *crate::test_support::TEST_TOKEN,
+            token = *test_support::TEST_TOKEN,
         ));
         let settings =
             Settings::resolve(Args::parse_from(["share-tracker"]), file).expect("resolves");
@@ -769,8 +784,7 @@ mod tests {
     /// fix).
     #[test]
     fn auth_trusted_proxies_are_parsed_and_a_bad_entry_aborts() {
-        let hash =
-            crate::infra::auth::Auth::hash_password(&crate::test_support::TEST_PASSWORD).unwrap();
+        let hash = Auth::hash_password(&test_support::TEST_PASSWORD).unwrap();
         let settings = Settings::resolve(
             Args::parse_from(["share-tracker"]),
             parse(&format!(
@@ -786,13 +800,8 @@ mod tests {
         let auth = settings.auth.expect("[auth] resolved");
         // Equality is over configuration, so an `Auth` with the same credential
         // and no proxy list is a *different* configuration.
-        let without = crate::infra::auth::Auth::new(
-            "evan".into(),
-            hash.clone(),
-            None,
-            crate::infra::auth::CookieSecurity::Secure,
-        )
-        .expect("the same credential");
+        let without = Auth::new("evan".into(), hash.clone(), None, CookieSecurity::Secure)
+            .expect("the same credential");
         assert_ne!(auth, without, "the proxy list is part of the configuration");
         assert_eq!(
             auth,
@@ -855,7 +864,7 @@ mod tests {
     fn load_reads_an_explicit_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "port = 4444\n").expect("write");
+        fs::write(&path, "port = 4444\n").expect("write");
         let file = load(Some(path.to_str().expect("utf-8 path"))).expect("loads");
         assert_eq!(file.port, Some(4444));
     }
@@ -864,7 +873,7 @@ mod tests {
     fn load_rejects_bad_file_with_path_in_message() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "not toml at all [").expect("write");
+        fs::write(&path, "not toml at all [").expect("write");
         let err = load(Some(path.to_str().expect("utf-8 path"))).unwrap_err();
         assert!(err.contains("config.toml"), "names the file: {err}");
     }
@@ -987,7 +996,7 @@ mod tests {
 
     // ---- [email] -------------------------------------------------------
 
-    fn email_settings(table: &str) -> Result<crate::infra::email::EmailSettings, String> {
+    fn email_settings(table: &str) -> Result<EmailSettings, String> {
         Settings::resolve(Args::parse_from(["share-tracker"]), parse(table))
             .map(|s| s.email.expect("an [email] table resolves"))
     }
@@ -1005,7 +1014,7 @@ mod tests {
         assert_eq!(email.smtp_host, "smtp.example.com");
         // Implicit TLS on submissions, and the 5% threshold — the two defaults
         // the sample and the README both state.
-        assert_eq!(email.encryption, crate::infra::email::Encryption::Implicit);
+        assert_eq!(email.encryption, Encryption::Implicit);
         assert_eq!(email.smtp_port, 465);
         assert_eq!(email.price_alert_pct, Decimal::from(5));
         assert_eq!(email.credentials, None);

@@ -13,9 +13,30 @@
 //! Rust syntax (SCENARIOS T-06). `scheduler::tests::
 //! no_registered_job_records_its_failure_as_a_debug_string` pins it.
 
+use crate::entities::closing_price;
+use crate::entities::closing_price::SharedFetcher;
+use crate::entities::currencies;
+use crate::entities::distribution_event;
+use crate::entities::distribution_event::SharedDistributionFetcher;
+use crate::entities::mic_registry;
+use crate::entities::price_alert;
+use crate::entities::rba_fx_rate;
+use crate::entities::trade;
+use crate::infra::db;
+use crate::infra::email::Notifier;
+use crate::reports::snapshot;
+use crate::reports::weekly_summary;
+use serde::de;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::future;
+#[cfg(test)]
+use std::sync::atomic;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
 
 /// What one run of a job returns: `Ok(None)` for a run that did the whole of
 /// its work, `Ok(Some(note))` for one that succeeded while doing **less** than
@@ -78,7 +99,7 @@ fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Er
     match raw.to_ascii_lowercase().as_str() {
         "" | "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
-        other => Err(serde::de::Error::custom(format!(
+        other => Err(de::Error::custom(format!(
             "'{other}' is not a flag value (use true or false)"
         ))),
     }
@@ -111,13 +132,13 @@ pub enum JobTrigger {
 pub struct RegisteredJob {
     pub(super) work: Job,
     pub(super) trigger: JobTrigger,
-    pub(super) lock: tokio::sync::Mutex<()>,
+    pub(super) lock: Mutex<()>,
     /// How many runs found [`Self::lock`] already held and had to wait for it
     /// ([`Self::serialise`]) — so a test can observe a second run *blocked*
     /// behind an in-flight one instead of sleeping a guessed interval for it
     /// to get there.
     #[cfg(test)]
-    pub(super) blocked: std::sync::atomic::AtomicUsize,
+    pub(super) blocked: AtomicUsize,
 }
 
 impl RegisteredJob {
@@ -132,26 +153,25 @@ impl RegisteredJob {
         Arc::new(Self {
             work: Arc::new(move |params| Box::pin(work(params))),
             trigger,
-            lock: tokio::sync::Mutex::new(()),
+            lock: Mutex::new(()),
             #[cfg(test)]
-            blocked: std::sync::atomic::AtomicUsize::new(0),
+            blocked: AtomicUsize::new(0),
         })
     }
 
     /// Take the per-job lock for a run, waiting for any run of this job
     /// already in flight. A test build also counts, in [`Self::blocked`], each
     /// acquisition whose first poll found the lock held.
-    pub(super) async fn serialise(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(super) async fn serialise(&self) -> MutexGuard<'_, ()> {
         let mut acquire = std::pin::pin!(self.lock.lock());
         #[cfg(test)]
         let mut counted = false;
-        std::future::poll_fn(|cx| {
+        future::poll_fn(|cx| {
             let polled = acquire.as_mut().poll(cx);
             #[cfg(test)]
             if polled.is_pending() && !counted {
                 counted = true;
-                self.blocked
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.blocked.fetch_add(1, atomic::Ordering::SeqCst);
             }
             polled
         })
@@ -210,9 +230,9 @@ pub fn registry(
     db_path: String,
     backup_dir: Option<String>,
     backup_command: Option<String>,
-    fetcher: crate::entities::closing_price::SharedFetcher,
-    distribution_fetcher: crate::entities::distribution_event::SharedDistributionFetcher,
-    notifier: Option<crate::infra::email::Notifier>,
+    fetcher: SharedFetcher,
+    distribution_fetcher: SharedDistributionFetcher,
+    notifier: Option<Notifier>,
 ) -> JobRegistry {
     let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
 
@@ -232,7 +252,7 @@ pub fn registry(
                     tracing::info!("post-backup command skipped at the caller's request");
                 }
                 let backup_command = backup_command.filter(|_| !params.skip_command);
-                crate::infra::db::backup(
+                db::backup(
                     &pool,
                     &db_path,
                     backup_dir.as_deref(),
@@ -257,7 +277,7 @@ pub fn registry(
         move |_| {
             let pool = pool.clone();
             async move {
-                let summary = crate::entities::mic_registry::run_import(&pool)
+                let summary = mic_registry::run_import(&pool)
                     .await
                     .map_err(|e| e.to_string())?;
                 tracing::info!(imported = summary.imported, "MIC registry import complete");
@@ -271,7 +291,7 @@ pub fn registry(
         move |_| {
             let pool = pool.clone();
             async move {
-                let summary = crate::entities::currencies::run_import(&pool)
+                let summary = currencies::run_import(&pool)
                     .await
                     .map_err(|e| e.to_string())?;
                 // Per feed, not one total: an import that fetched only the free
@@ -296,13 +316,9 @@ pub fn registry(
         move |_| {
             let (pool, fetcher) = (pool.clone(), fetcher.clone());
             async move {
-                crate::entities::closing_price::run_collection(
-                    &pool,
-                    fetcher.as_ref(),
-                    chrono::Utc::now(),
-                )
-                .await
-                .map(|()| None)
+                closing_price::run_collection(&pool, fetcher.as_ref(), chrono::Utc::now())
+                    .await
+                    .map(|()| None)
             }
         }
     });
@@ -317,11 +333,7 @@ pub fn registry(
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
-            async move {
-                crate::entities::closing_price::run_rebase(&pool)
-                    .await
-                    .map(|()| None)
-            }
+            async move { closing_price::run_rebase(&pool).await.map(|()| None) }
         }
     });
 
@@ -338,11 +350,7 @@ pub fn registry(
         let pool = pool.clone();
         move |_| {
             let pool = pool.clone();
-            async move {
-                crate::entities::trade::run_recompute(&pool)
-                    .await
-                    .map(|()| None)
-            }
+            async move { trade::run_recompute(&pool).await.map(|()| None) }
         }
     });
 
@@ -355,12 +363,7 @@ pub fn registry(
                 // some provider event on its market's calendar succeeded while
                 // doing less than the whole of its work, which is what the note
                 // is for (SCENARIOS T-09).
-                crate::entities::distribution_event::run_refresh(
-                    &pool,
-                    fetcher.as_ref(),
-                    chrono::Utc::now(),
-                )
-                .await
+                distribution_event::run_refresh(&pool, fetcher.as_ref(), chrono::Utc::now()).await
             }
         }
     });
@@ -370,7 +373,7 @@ pub fn registry(
         move |_| {
             let pool = pool.clone();
             async move {
-                crate::reports::snapshot::run_snapshot_job(&pool, chrono::Utc::now())
+                snapshot::run_snapshot_job(&pool, chrono::Utc::now())
                     .await
                     .map(|()| None)
             }
@@ -389,12 +392,8 @@ pub fn registry(
                 // Returns the note directly: a run with no transport, or with
                 // fewer than two stored snapshots in the window, succeeded
                 // while doing less than the whole of its work (SCENARIOS T-09).
-                crate::reports::weekly_summary::run_weekly_summary(
-                    &pool,
-                    notifier.as_ref(),
-                    chrono::Utc::now(),
-                )
-                .await
+                weekly_summary::run_weekly_summary(&pool, notifier.as_ref(), chrono::Utc::now())
+                    .await
             }
         }
     });
@@ -403,21 +402,14 @@ pub fn registry(
         let pool = pool.clone();
         move |_| {
             let (pool, notifier) = (pool.clone(), notifier.clone());
-            async move {
-                crate::entities::price_alert::run_alert(
-                    &pool,
-                    notifier.as_ref(),
-                    chrono::Utc::now(),
-                )
-                .await
-            }
+            async move { price_alert::run_alert(&pool, notifier.as_ref(), chrono::Utc::now()).await }
         }
     });
 
     register(&mut jobs, "rba-fx-import", move |_| {
         let pool = pool.clone();
         async move {
-            let summary = crate::entities::rba_fx_rate::run_import(&pool)
+            let summary = rba_fx_rate::run_import(&pool)
                 .await
                 .map_err(|e| e.to_string())?;
             tracing::info!(
@@ -428,8 +420,7 @@ pub fn registry(
             // New rates may finalise provisional snapshots in this same run; a
             // blocked true-up date fails the job so the Jobs UI surfaces it (the
             // import itself succeeded and is idempotent).
-            match crate::entities::rba_fx_rate::true_up_provisional_snapshots(&pool, &summary).await
-            {
+            match rba_fx_rate::true_up_provisional_snapshots(&pool, &summary).await {
                 Ok(None) => Ok(None),
                 Ok(Some(t)) if t.blocked.is_empty() => Ok(None),
                 Ok(Some(t)) => Err(format!(

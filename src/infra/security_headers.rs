@@ -22,6 +22,7 @@
 //! leaves them alone: the attachment content route is framed by the app's own
 //! document pane, so it answers [`FRAME_SAME_ORIGIN`] /
 //! [`FRAME_ANCESTORS_SELF`] instead.
+use crate::web;
 use std::sync::LazyLock;
 
 use axum::http::{HeaderValue, header};
@@ -51,7 +52,7 @@ fn policy() -> String {
 /// The text between `THEME_BOOT_SCRIPT`'s `<script>` tags — what a browser
 /// hashes to match a `'sha256-…'` source.
 fn theme_boot_body() -> &'static str {
-    let script = crate::web::THEME_BOOT_SCRIPT;
+    let script = web::THEME_BOOT_SCRIPT;
     let (_, rest) = script
         .split_once("<script>")
         .expect("the theme boot script opens with <script>");
@@ -101,6 +102,7 @@ pub async fn apply(mut response: Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web;
 
     /// RFC 4648 §10's test vectors, covering every padding length.
     #[test]
@@ -127,7 +129,7 @@ mod tests {
         assert!(!body.contains("<script") && !body.contains("</script"));
         assert_eq!(
             format!("<script>{body}</script>"),
-            crate::web::THEME_BOOT_SCRIPT.trim_start()
+            web::THEME_BOOT_SCRIPT.trim_start()
         );
         // SHA-256 is 32 bytes: 44 base64 characters, one `=` of padding.
         let hash = base64(&Sha256::digest(body.as_bytes()));

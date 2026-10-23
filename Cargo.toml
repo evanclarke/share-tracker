@@ -173,3 +173,11 @@ undocumented_unsafe_blocks = "warn"
 # name: a variant added later would silently take it. Name the variant.
 # Test code is held to it too.
 match_wildcard_for_single_variants = "warn"
+# A type, trait or macro reached through a crate-rooted path
+# (`crate::infra::http::ApiError`, `std::collections::HashMap`) is imported
+# and used unqualified, and a function is called through its imported module
+# (`fx::to_aud`), per the Google Rust style guide: more than two segments from
+# a crate root is flagged (`absolute-paths-max-segments` in `clippy.toml`).
+# Where a name would clash, its module is imported instead (`io::Error`,
+# `fmt::Write`). Test code is held to it too.
+absolute_paths = "warn"

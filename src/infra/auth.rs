@@ -121,10 +121,12 @@
 use crate::infra::config::BasePath;
 use crate::infra::http::ApiError;
 use crate::infra::respond::{Html as HtmlPage, Payload, SeeOther};
+use crate::web;
 use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
+use axum::extract;
 use axum::{
     Extension,
     extract::{ConnectInfo, FromRequest, Request, State},
@@ -135,11 +137,21 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use sqlx::SqlitePool;
+use std::collections::BTreeMap;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
+use std::sync::MutexGuard;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Semaphore;
+use tokio::task;
+use tokio::time;
+use utoipa::openapi::RefOr;
+use utoipa::openapi::ResponseBuilder;
+use utoipa::openapi::response;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 const LOGIN_HTML: &str = include_str!("auth/login.html");
@@ -218,15 +230,15 @@ const VERIFY_QUEUE_WAIT: Duration = Duration::from_secs(5);
 /// The verify slots [`MAX_CONCURRENT_VERIFIES`] hands out. Process-wide rather
 /// than per-`Auth`: the bound being protected is the host's memory and blocking
 /// pool, which every router in the process shares.
-static VERIFY_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
-    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_VERIFIES));
+static VERIFY_SLOTS: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_VERIFIES));
 
 /// Verifies running right now, and the most that ever ran at once — the
 /// concurrency bound as the process actually observed it, which is what
 /// `the_concurrent_verifies_are_bounded` asserts on. Two relaxed atomics on a
 /// path that already costs 30 ms of Argon2.
-static VERIFIES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-static VERIFIES_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static VERIFIES_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+static VERIFIES_PEAK: AtomicUsize = AtomicUsize::new(0);
 
 // ---------------------------------------------------------------------------
 // Per-source failed-login lockout
@@ -348,8 +360,8 @@ async fn login_handler(auth: Auth, base_path: BasePath, req: Request) -> Respons
     let client = LoginClient::of(req.headers());
     // The form body is decoded through axum's own extractor, so an absent or
     // malformed body is answered exactly as it is on every other form route.
-    let form = match axum::extract::Form::<LoginForm>::from_request(req, &()).await {
-        Ok(axum::extract::Form(form)) => form,
+    let form = match extract::Form::<LoginForm>::from_request(req, &()).await {
+        Ok(extract::Form(form)) => form,
         Err(rejection) => return rejection.into_response(),
     };
     login_submit(auth, base_path, source, client, form).await
@@ -508,7 +520,7 @@ impl LockoutTracker {
     /// than panicking: a panic in an unrelated handler must not make the whole
     /// surface permanently unservable, and the tracker's own operations cannot
     /// leave its invariants broken half-way.
-    fn lock(&self) -> std::sync::MutexGuard<'_, TrackerState> {
+    fn lock(&self) -> MutexGuard<'_, TrackerState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -902,14 +914,14 @@ impl Auth {
     /// source's guesses, and a flood's whole point is to arrive from many.
     async fn verify_password_bounded(&self, username: &str, password: &str) -> Option<bool> {
         use std::sync::atomic::Ordering::Relaxed;
-        let permit = tokio::time::timeout(VERIFY_QUEUE_WAIT, VERIFY_SLOTS.acquire())
+        let permit = time::timeout(VERIFY_QUEUE_WAIT, VERIFY_SLOTS.acquire())
             .await
             .ok()?
             .ok()?;
         let username_matches = username == self.username;
         let hash = self.password_hash.clone();
         let password = password.to_owned();
-        let verified = tokio::task::spawn_blocking(move || {
+        let verified = task::spawn_blocking(move || {
             let in_flight = VERIFIES_IN_FLIGHT.fetch_add(1, Relaxed) + 1;
             VERIFIES_PEAK.fetch_max(in_flight, Relaxed);
             // The same two steps `verify_password` takes, in the same order —
@@ -1206,14 +1218,11 @@ impl IntoResponse for LoginOutcome {
 }
 
 impl utoipa::IntoResponses for LoginOutcome {
-    fn responses() -> std::collections::BTreeMap<
-        String,
-        utoipa::openapi::RefOr<utoipa::openapi::response::Response>,
-    > {
+    fn responses() -> BTreeMap<String, RefOr<response::Response>> {
         let mut responses = <SeeOther as utoipa::IntoResponses>::responses();
         responses.insert(
             "429".to_owned(),
-            utoipa::openapi::ResponseBuilder::new()
+            ResponseBuilder::new()
                 .description(
                     "This source has exhausted its failed-attempt budget: the body is the \
                      plain-text reason and Retry-After names the remaining whole seconds, rounded \
@@ -1240,7 +1249,7 @@ fn render_login(base_path: &BasePath, error: Option<&str>) -> Html<String> {
     Html(
         // One pass (`fill_template`), so nothing substituted — the error
         // paragraph included — is ever re-scanned for another placeholder.
-        crate::web::fill_template(
+        web::fill_template(
             LOGIN_HTML,
             &[
                 ("BASE", base_path.as_str()),
@@ -1250,7 +1259,7 @@ fn render_login(base_path: &BasePath, error: Option<&str>) -> Html<String> {
                 // with the app it leads to about which scheme is in force. It
                 // is also the only JavaScript this page has: it loads no
                 // modules.
-                ("THEME", crate::web::THEME_BOOT_SCRIPT),
+                ("THEME", web::THEME_BOOT_SCRIPT),
             ],
         ),
     )
@@ -1410,7 +1419,10 @@ fn build_set_cookie(auth: &Auth, base_path: &BasePath, value: Option<String>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
+    use crate::test_support::SourceFile;
     use crate::test_support::{TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN};
+    use std::ops::Range;
 
     fn auth() -> Auth {
         Auth::new(
@@ -1547,18 +1559,18 @@ mod tests {
             ("login_body(", 0),
         ];
         let mut offenders = Vec::new();
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: file,
             raw,
             code,
             ..
-        } in crate::test_support::rust_sources()
+        } in test_support::rust_sources()
         {
             let (code_b, raw_b) = (code.as_bytes(), raw.as_bytes());
             let line_of = |at: usize| raw[..at].matches('\n').count() + 1;
             // A non-empty literal in `range`: a byte the lexer blanked that is
             // neither the quote delimiting it nor whitespace.
-            let literal_in = |range: std::ops::Range<usize>| {
+            let literal_in = |range: Range<usize>| {
                 range.into_iter().any(|i| {
                     code_b[i] == b' ' && raw_b[i] != b'"' && !raw_b[i].is_ascii_whitespace()
                 })
@@ -1718,6 +1730,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use proptest::char;
         use proptest::prelude::*;
         use std::sync::LazyLock;
 
@@ -1743,7 +1756,7 @@ mod tests {
             fn a_cookie_changed_anywhere_no_longer_verifies(
                 at in any::<prop::sample::Index>(),
                 edit in 0u8..3,
-                c in proptest::char::any(),
+                c in char::any(),
             ) {
                 let cookie = AUTH.mint_cookie();
                 let mut chars: Vec<char> = cookie.chars().collect();
@@ -1764,9 +1777,15 @@ mod tests {
 #[cfg(test)]
 mod api_tests {
     use super::{Auth, CookieSecurity};
+    use crate::app;
+    use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::distribution_event::test_support::DistributionStub;
+    use crate::infra::config::BasePath;
+    use crate::infra::scheduler;
     use crate::test_support::{
         ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN, test_pool,
     };
+    use crate::web;
     use axum::http::{StatusCode, header};
     use sqlx::SqlitePool;
 
@@ -1789,18 +1808,18 @@ mod api_tests {
     /// `auth: None` default and a reverse-proxy `base_path`; this covers the
     /// gate itself.
     fn client(pool: &SqlitePool, auth: Auth) -> ApiClient {
-        let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
-        let registry = crate::infra::scheduler::registry(
+        let fetcher = QuoteStub::default().shared();
+        let registry = scheduler::registry(
             pool.clone(),
             ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
-            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            DistributionStub::default().shared(),
             None,
         );
-        ApiClient::over(crate::app::router(
-            &crate::infra::config::BasePath::ROOT,
+        ApiClient::over(app::router(
+            &BasePath::ROOT,
             pool.clone(),
             registry,
             fetcher,
@@ -1864,7 +1883,7 @@ mod api_tests {
         let c = client(&pool, auth());
         let resp = c.get("/login").await;
         let body = resp.text();
-        assert!(body.contains(crate::web::THEME_BOOT_SCRIPT));
+        assert!(body.contains(web::THEME_BOOT_SCRIPT));
         assert!(!body.contains("{{THEME}}"));
     }
 
@@ -1978,6 +1997,11 @@ mod api_tests {
 #[cfg(test)]
 mod lockout_tests {
     use super::*;
+    use crate::app;
+    use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::distribution_event::test_support::DistributionStub;
+    use crate::infra::scheduler;
+    use crate::test_support::ApiResponse;
     use crate::test_support::{ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, test_pool};
     use axum::http::HeaderValue;
     use sqlx::SqlitePool;
@@ -2728,18 +2752,18 @@ mod lockout_tests {
     /// The whole application, auth on, over the tracker's small policy — as
     /// `main` builds it when `[auth]` is configured, except for the policy.
     fn client(pool: &SqlitePool, auth: Auth) -> ApiClient {
-        let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
-        let registry = crate::infra::scheduler::registry(
+        let fetcher = QuoteStub::default().shared();
+        let registry = scheduler::registry(
             pool.clone(),
             ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
-            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            DistributionStub::default().shared(),
             None,
         );
-        ApiClient::over(crate::app::router(
-            &crate::infra::config::BasePath::ROOT,
+        ApiClient::over(app::router(
+            &BasePath::ROOT,
             pool.clone(),
             registry,
             fetcher,
@@ -2757,7 +2781,7 @@ mod lockout_tests {
 
     /// `POST /login` for the password given, as a person's browser sends it
     /// (`Accept: text/html`).
-    async fn browser_login(c: &ApiClient, password: &str) -> crate::test_support::ApiResponse {
+    async fn browser_login(c: &ApiClient, password: &str) -> ApiResponse {
         c.clone()
             .with_header("Accept", "text/html")
             .post_bytes("/login", Some(FORM_CONTENT_TYPE), login_body(password))
@@ -2766,7 +2790,7 @@ mod lockout_tests {
 
     /// `POST /login` as a script or LLM client sends it: no `Accept:
     /// text/html`, so a refusal is the machine-readable `429`.
-    async fn script_login(c: &ApiClient, password: &str) -> crate::test_support::ApiResponse {
+    async fn script_login(c: &ApiClient, password: &str) -> ApiResponse {
         c.post_bytes("/login", Some(FORM_CONTENT_TYPE), login_body(password))
             .await
     }

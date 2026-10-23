@@ -67,10 +67,17 @@ falls under the existing rules.
   backfill), since a missing one cannot be fetched reliably years later
 
 ## Google Rust style guide pass (2026-10-23) — imports, module layout and docs
-- [ ] 656 inline fully-qualified paths where the guide wants types imported and used unqualified
+- [x] 656 inline fully-qualified paths where the guide wants types imported and used unqualified
   (hotspots: `api_spec.rs` 121, `infra/db.rs` 37, `scheduler/registry.rs` 20, `inheritance.rs` 19,
   `app.rs` 19; mostly `crate::infra::http::…`, `crate::domain::cost_base::…`,
   `crate::infra::fx::…`). Keep *functions* module-qualified (`fx::to_aud`); import types
+  - Done 2026-10-23: enforced by `clippy::absolute_paths` (Cargo.toml `[lints.clippy]`,
+    `absolute-paths-max-segments = 2` in `clippy.toml`, no crate exempt, test code included),
+    which counts every crate-rooted path deeper than two segments — `std::…` and third-party
+    ones as well as `crate::…`: 1684 sites before, 0 after. Types/traits/macros imported, functions
+    and consts called through their imported module; a clashing name keeps its module
+    (`io::Error`, `fmt::Write`, `process::Command`), and two test-module renames
+    (`StdInstant`, `AsyncMutex` in `scheduler.rs`) where the std and tokio types meet
 - [ ] 84 `use` lines nesting a path inside braces (`use utoipa_axum::{router::OpenApiRouter,
   routes};`) → one module per `use` statement. Needs a scan test, since the rustfmt option that
   would enforce it is nightly-only

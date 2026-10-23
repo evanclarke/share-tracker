@@ -23,6 +23,9 @@ use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use sqlx::sqlite::{SqliteArgumentsBuffer, SqliteTypeInfo, SqliteValueRef};
 use sqlx::{Row, Sqlite, ValueRef, sqlite::SqliteRow};
+use std::collections::HashMap;
+use std::fmt;
+use std::hash::Hash;
 
 /// A `Decimal` that encodes to, and decodes from, a TEXT column.
 ///
@@ -194,14 +197,12 @@ where
 ///
 /// Spell it as
 /// `#[serde(default, deserialize_with = "crate::infra::decimal::strict_aud_map")]`.
-pub fn strict_aud_map<'de, D, K>(
-    deserializer: D,
-) -> Result<std::collections::HashMap<K, Aud>, D::Error>
+pub fn strict_aud_map<'de, D, K>(deserializer: D) -> Result<HashMap<K, Aud>, D::Error>
 where
     D: Deserializer<'de>,
-    K: serde::Deserialize<'de> + Eq + std::hash::Hash,
+    K: serde::Deserialize<'de> + Eq + Hash,
 {
-    let map = std::collections::HashMap::<K, StrictDecimalValue>::deserialize(deserializer)?;
+    let map = HashMap::<K, StrictDecimalValue>::deserialize(deserializer)?;
     Ok(map
         .into_iter()
         .map(|(k, v)| (k, Aud::stated(v.0)))
@@ -223,7 +224,7 @@ struct StrictDecimal;
 impl Visitor<'_> for StrictDecimal {
     type Value = Decimal;
 
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> fmt::Result {
         f.write_str("a decimal amount as a string")
     }
 
@@ -261,7 +262,7 @@ struct StrictOptionalDecimal;
 impl<'de> Visitor<'de> for StrictOptionalDecimal {
     type Value = Option<Decimal>;
 
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> fmt::Result {
         f.write_str("a decimal amount as a string, or null")
     }
 
@@ -447,10 +448,13 @@ mod tests {
     use super::*;
     use crate::infra::id::ListingId;
     use crate::reports::open_parcels::OpenParcel;
+    use crate::test_support;
+    use crate::test_support::SourceFile;
     use crate::test_support::{buy, test_pool};
     use chrono::NaiveDate;
     use serde_json::Value;
     use sqlx::SqlitePool;
+    use std::collections::HashMap;
 
     // -----------------------------------------------------------------------
     // The serde half: a request's decimal fields
@@ -469,7 +473,7 @@ mod tests {
         #[serde(default, deserialize_with = "strict_optional_decimal")]
         statement_total: Option<Decimal>,
         #[serde(default, deserialize_with = "strict_aud_map")]
-        prices: std::collections::HashMap<i64, Aud>,
+        prices: HashMap<i64, Aud>,
     }
 
     fn parse(json: &str) -> Result<MoneyFields, serde_json::Error> {
@@ -684,8 +688,7 @@ mod tests {
         let bind = format!(".{}(", "bind");
         let stringified = format!(".to_{}())", "string");
         let mut offenders = Vec::new();
-        for crate::test_support::SourceFile { path, raw, .. } in crate::test_support::rust_sources()
-        {
+        for SourceFile { path, raw, .. } in test_support::rust_sources() {
             for (n, line) in raw.lines().enumerate() {
                 let code = line.trim_start();
                 if code.starts_with("//") {
@@ -732,9 +735,9 @@ mod tests {
         let floats = [format!("f{}", 64), format!("f{}", 32)];
         let mut offenders = Vec::new();
         let mut allowed_hits = vec![0usize; FLOATS_ALLOWED.len()];
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: file, code, ..
-        } in crate::test_support::rust_sources()
+        } in test_support::rust_sources()
         {
             for (n, line) in code.lines().enumerate() {
                 let hit = floats.iter().any(|f| {
@@ -790,9 +793,9 @@ mod tests {
         let signature = format!("(s: &str) -> {}", "Decimal");
         let mut found_shared = false;
         let mut offenders = Vec::new();
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: file, code, ..
-        } in crate::test_support::rust_sources()
+        } in test_support::rust_sources()
         {
             for (n, line) in code.lines().enumerate() {
                 let code = line.trim();
@@ -836,7 +839,7 @@ mod tests {
                    /* block\n   f64 in it */\n\
                    let c = '\"';\n\
                    fn f<'a>(x: &'a str) -> f64 { 0.0 }\n";
-        let code = crate::test_support::code_only(src);
+        let code = test_support::code_only(src);
         let lines: Vec<&str> = code.lines().collect();
         assert_eq!(src.lines().count(), lines.len(), "line count preserved");
         assert_eq!(src.len(), code.len(), "byte offsets preserved");
@@ -1242,7 +1245,7 @@ mod tests {
     #[test]
     fn money_arithmetic_and_builders_are_must_use() {
         let code_of = |path: &str| {
-            &crate::test_support::rust_sources()
+            &test_support::rust_sources()
                 .iter()
                 .find(|source| source.path == path)
                 .unwrap_or_else(|| panic!("{path} is under src"))

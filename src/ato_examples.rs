@@ -161,14 +161,17 @@
 //! brokerage. The CGT arithmetic the examples demonstrate is identical.
 
 use crate::entities::trade::{Trade, TradeType};
+use crate::infra::decimal;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use crate::reports::net_capital_gain::NetCapitalGainYear;
+use crate::reports::open_parcels::OpenParcel;
 use crate::reports::portfolio::HoldingOverview;
 use crate::reports::realised_gains::{DisposalId, RealisedGainLoss};
 use crate::reports::tax_summary::TaxYearSummary;
 use axum::http::StatusCode;
 use rust_decimal::Decimal;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 
@@ -181,7 +184,7 @@ async fn api_put(pool: &SqlitePool, path: &str, body: Value) {
 
 /// POST a JSON body (action/report endpoints) and deserialize the JSON response,
 /// requiring the given success status.
-async fn api_post<T: serde::de::DeserializeOwned>(
+async fn api_post<T: DeserializeOwned>(
     pool: &SqlitePool,
     path: &str,
     body: Value,
@@ -195,7 +198,7 @@ async fn api_post<T: serde::de::DeserializeOwned>(
 }
 
 /// GET a report endpoint and deserialize the JSON response.
-async fn api_get<T: serde::de::DeserializeOwned>(pool: &SqlitePool, path: &str) -> T {
+async fn api_get<T: DeserializeOwned>(pool: &SqlitePool, path: &str) -> T {
     ApiClient::full(pool).get_json(path).await
 }
 
@@ -988,8 +991,7 @@ async fn td_2000_10_example_1_john_share_split() {
     )
     .await;
 
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     // 2,000 → 4,000 shares, acquisition date preserved across the split
     // (the stand-in for the determination's September 1984 date).
@@ -1042,8 +1044,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
     )
     .await;
 
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     // 2,000 → 1,000 shares, acquisition date preserved.
     assert_eq!(parcels[0].remaining_quantity, dec("1000"));
@@ -1102,8 +1103,7 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
     )
     .await;
 
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     // 100 → 200 shares, acquisition date preserved (the ATO's pre-CGT
     // exemption for this parcel is out of scope; its 1 June 1985 date is
@@ -1203,8 +1203,7 @@ async fn rights_issues_example_39_shanti_sale_of_rights() {
     assert_eq!(gains[0].discount_eligible_gain, dec("50"));
 
     // Selling the rights does not touch the original shares.
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].remaining_quantity, dec("1000"));
     assert_eq!(parcels[0].remaining_cost_base, dec("2000"));
@@ -1269,8 +1268,7 @@ async fn rights_issues_example_40_shanti_rights_exercised() {
 
     // The 250 shares are a new parcel acquired at the time of exercise, with
     // a cost base of the amount paid to exercise: 250 × $1.80 = $450.
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 2);
     assert_eq!(
         parcels[0].remaining_quantity,
@@ -1499,8 +1497,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     // 5.063% goes to the 56 BHP Steel shares; both keep the 15 Aug 2001
     // acquisition date (steps 3–4 divide these by 280 and 56 — the ATO's
     // $8.48 and $2.26 are those quotients rounded to the cent).
-    let mut parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let mut parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     parcels.sort_by_key(|p| p.listing_id);
     assert_eq!(parcels.len(), 2);
     assert_eq!(parcels[0].ticker, "BHP");
@@ -1610,8 +1607,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
 
     // The rollover carries the rest: 100 Regal shares at $600 total — the
     // ATO's $6 each — with the original acquisition date.
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].ticker, "RGL");
     assert_eq!(parcels[0].remaining_quantity, dec("100"));
@@ -1819,8 +1815,7 @@ async fn crypto_wrapping_examples_5_6_kal_wrap_and_unwrap() {
 
     // "The cost base of the 5 ETH that Kal receives is $28,000" — the only
     // parcel left open, acquired at the unwrap.
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].trade_id, 5);
     assert_eq!(parcels[0].remaining_cost_base, dec("28000"));
@@ -1879,8 +1874,7 @@ async fn crypto_defi_reward_example_craig_stablecoin_tokens() {
 
     // "The cost base of the newly issued tokens is their market value at the
     // time Craig acquires them" — a $10 parcel of its own, clock from receipt.
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     let reward = parcels.iter().find(|p| p.trade_id == 2).unwrap();
     assert_eq!(reward.remaining_quantity, dec("1"));
     assert_eq!(reward.remaining_cost_base, dec("10"));
@@ -2112,8 +2106,7 @@ async fn crypto_airdrop_draft_tr_2026_d1_example_6_francisco() {
         summary.is_empty(),
         "an airdrop simply received is not income"
     );
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels[0].remaining_cost_base, dec("250"), "ATO: $250");
 
     put_sell(
@@ -2186,8 +2179,7 @@ async fn crypto_airdrop_example_2_bobbi_reward_for_services() {
     );
     assert_eq!(summary[0].dividends_assessable, Decimal::ZERO);
 
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels[0].remaining_quantity, dec("100000"));
     assert_eq!(
         parcels[0].remaining_cost_base,
@@ -2466,8 +2458,7 @@ async fn inherited_assets_example_maria_antonio_lpr_expenditure() {
     // Antonio's parcel: Maria's $300,000 cost base at death + the $5,000
     // conveyancing, acquired (for the 12-month discount clock) when Maria
     // acquired it.
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].original_cost_base, dec("305000"));
     assert_eq!(parcels[0].remaining_quantity, dec("1"));
@@ -3349,8 +3340,7 @@ async fn takeovers_example_26_desiree_takeover_without_rollover() {
 
     // The replacement holding: 500 XYZ shares at $1.25 = $625, acquired at the
     // takeover (no rollover, so no carried acquisition date).
-    let parcels: Vec<crate::reports::open_parcels::OpenParcel> =
-        api_get(&pool, "/portfolio/open_parcels").await;
+    let parcels: Vec<OpenParcel> = api_get(&pool, "/portfolio/open_parcels").await;
     assert_eq!(parcels.len(), 1);
     assert_eq!(parcels[0].ticker, "XYZ");
     assert_eq!(parcels[0].remaining_quantity, dec("500"));
@@ -3724,7 +3714,7 @@ async fn personal_investors_guide_example_18_clare_split() {
     );
     assert_eq!(year.loss_aware_net_capital_gain, dec("521.8875"));
     assert_eq!(
-        crate::infra::decimal::to_cents(year.loss_aware_net_capital_gain),
+        decimal::to_cents(year.loss_aware_net_capital_gain),
         dec("521.89"),
         "not the ATO's $523"
     );

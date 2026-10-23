@@ -22,6 +22,15 @@ mod web;
 use clap::Parser;
 use infra::args::{Args, Command};
 use infra::{config, db, logging, scheduler};
+use std::fs;
+use std::io;
+use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::process;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::TcpListener;
+use tokio::signal;
 
 /// How long a live quote is reused before the provider is asked again.
 ///
@@ -33,7 +42,7 @@ use infra::{config, db, logging, scheduler};
 /// (`price_as_of`) rather than the time it was served. It also bounds how
 /// long a listing re-pointed at a new symbol keeps answering from the old
 /// one (see `CachingFetcher`).
-const QUOTE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const QUOTE_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() {
@@ -52,11 +61,11 @@ async fn main() {
     // wrong database is worse than not starting.
     let file = config::load(args.config.as_deref()).unwrap_or_else(|e| {
         eprintln!("{e}");
-        std::process::exit(1);
+        process::exit(1);
     });
     let settings = config::Settings::resolve(args, file).unwrap_or_else(|e| {
         eprintln!("{e}");
-        std::process::exit(1);
+        process::exit(1);
     });
     if settings.auth.is_none() && settings.host != "127.0.0.1" {
         tracing::warn!(
@@ -89,7 +98,7 @@ async fn main() {
     // Recurring maintenance jobs are scheduled from a cron file (see `schedule.cron`),
     // not hard-coded durations. The built-in default is overridable with --schedule.
     let schedule = match &settings.schedule {
-        Some(path) => std::fs::read_to_string(path).expect("failed to read schedule file"),
+        Some(path) => fs::read_to_string(path).expect("failed to read schedule file"),
         None => include_str!("../schedule.cron").to_owned(),
     };
     // The live price source, constructed once and shared by the scheduled
@@ -101,8 +110,8 @@ async fn main() {
     // cached — the price-import job's history fetches pass straight through
     // (see `CachingFetcher`).
     let fetcher: entities::closing_price::SharedFetcher =
-        std::sync::Arc::new(entities::closing_price::CachingFetcher::new(
-            std::sync::Arc::new(entities::closing_price::YahooFetcher::default()),
+        Arc::new(entities::closing_price::CachingFetcher::new(
+            Arc::new(entities::closing_price::YahooFetcher::default()),
             QUOTE_CACHE_TTL,
         ));
     // The live distribution source, for the weekly calendar refresh. Its own
@@ -111,7 +120,7 @@ async fn main() {
     // never the router. Not wrapped in the quote cache — nothing asks it the
     // same question twice in a window.
     let distribution_fetcher: entities::distribution_event::SharedDistributionFetcher =
-        std::sync::Arc::new(entities::distribution_event::YahooDistributionFetcher::default());
+        Arc::new(entities::distribution_event::YahooDistributionFetcher::default());
     // The outbound-email transport, built here and nowhere else (the same rule
     // the price fetcher follows), so no test path can reach a mail server. The
     // settings have already been validated by `Settings::resolve`; what can
@@ -120,10 +129,10 @@ async fn main() {
     let notifier = settings.email.as_ref().map(|email| {
         let mailer = infra::email::SmtpMailer::new(email).unwrap_or_else(|e| {
             eprintln!("{e}");
-            std::process::exit(1);
+            process::exit(1);
         });
         infra::email::Notifier {
-            mailer: std::sync::Arc::new(mailer),
+            mailer: Arc::new(mailer),
             price_alert_pct: email.price_alert_pct,
         }
     });
@@ -153,11 +162,9 @@ async fn main() {
         settings.auth.clone(),
         &settings.allowed_hosts,
     );
-    let ip: std::net::IpAddr = settings.host.parse().expect("invalid host address");
-    let addr = std::net::SocketAddr::new(ip, settings.port);
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .expect("failed to bind");
+    let ip: IpAddr = settings.host.parse().expect("invalid host address");
+    let addr = SocketAddr::new(ip, settings.port);
+    let listener = TcpListener::bind(addr).await.expect("failed to bind");
     // The base path is part of the URL every request must use, so log it with
     // the address: a misconfigured reverse-proxy prefix is then diagnosable
     // from the startup line rather than only from 404s.
@@ -181,7 +188,7 @@ async fn main() {
     // README states the caveat beside its `limit_req` example).
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
@@ -199,7 +206,7 @@ fn run_command(command: &Command) {
         Command::HashPassword => {
             use std::io::Read;
             let mut password = String::new();
-            std::io::stdin()
+            io::stdin()
                 .read_to_string(&mut password)
                 .expect("failed to read password from stdin");
             // Trailing newline from an interactive Enter or `echo` (not
@@ -209,7 +216,7 @@ fn run_command(command: &Command) {
                 Ok(hash) => println!("{hash}"),
                 Err(e) => {
                     eprintln!("{e}");
-                    std::process::exit(1);
+                    process::exit(1);
                 }
             }
         }
@@ -218,7 +225,7 @@ fn run_command(command: &Command) {
 }
 
 async fn shutdown_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
+    let ctrl_c = signal::ctrl_c();
 
     #[cfg(unix)]
     {

@@ -1,3 +1,5 @@
+use std::env;
+use std::io;
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
@@ -14,18 +16,19 @@ fn build_filter(rust_log: Option<&str>) -> EnvFilter {
 pub fn init() {
     tracing_subscriber::fmt()
         .with_env_filter(build_filter(
-            std::env::var(EnvFilter::DEFAULT_ENV).ok().as_deref(),
+            env::var(EnvFilter::DEFAULT_ENV).ok().as_deref(),
         ))
         // Color only when stdout is a terminal. Under daemon(8) stdout is a
         // pipe into the log file (-o), and tracing's default-on ANSI would
         // litter it with escape codes.
-        .with_ansi(std::io::stdout().is_terminal())
+        .with_ansi(io::stdout().is_terminal())
         .init();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
     use tracing_subscriber::filter::LevelFilter;
 
     #[tracing_test::traced_test]
@@ -68,7 +71,7 @@ mod tests {
     /// could be written for it.
     #[test]
     fn unsafe_code_is_confined_to_test_support() {
-        let offenders: Vec<&str> = crate::test_support::rust_sources()
+        let offenders: Vec<&str> = test_support::rust_sources()
             .iter()
             .filter(|source| source.path != "test_support.rs")
             .filter(|source| {

@@ -9,23 +9,58 @@
 //! `tower::ServiceExt::oneshot` so a test says `client.put_json(path, &body)`
 //! rather than open-coding `Request::builder()` and the body decode.
 
+use crate::app;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::ActionKind;
+use crate::entities::corporate_action::CorporateAction;
+use crate::entities::corporate_action::WorthlessEvent;
+use crate::entities::distribution_event::test_support::DistributionStub;
+use crate::entities::listing::SecurityType;
+use crate::entities::worthless;
 use crate::entities::{
     amit_adjustment, amma, closing_price, ess_statement, income, listing, parcel_allocation, trade,
 };
 use crate::infra::auth::Auth;
+use crate::infra::config::BasePath;
 use crate::infra::db;
 use crate::infra::decimal::Money;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use crate::infra::scheduler;
 use axum::body::{Body, Bytes};
+use axum::extract::ConnectInfo;
+use axum::http::HeaderName;
+use axum::http::HeaderValue;
 use axum::http::{HeaderMap, Request, StatusCode};
 use chrono::NaiveDate;
 use http_body_util::BodyExt;
+use proptest::strategy::Strategy;
+use proptest::test_runner::Config;
 use rust_decimal::Decimal;
+use serde::de::DeserializeOwned;
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
+use std::collections::BTreeMap;
+use std::env;
+use std::ffi;
 use std::fmt::Write as _;
+use std::fs;
+use std::future::Future;
+use std::net::SocketAddr;
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::ptr;
+use std::str;
+use std::sync::atomic;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, LazyLock};
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+use tokio::runtime::Builder;
+use tokio::sync::OnceCell;
+use tokio::time;
 use tower::ServiceExt;
 
 /// Fresh in-memory database with migrations and seed data applied.
@@ -58,8 +93,8 @@ pub async fn test_pool() -> SqlitePool {
 /// database builds a current-thread runtime per case and drives its async body
 /// — a fresh [`test_pool`] and all — on it. The schema cache is a plain string,
 /// not a pool, so it outlives each case's runtime.
-pub fn block_on<F: std::future::Future>(case: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
+pub fn block_on<F: Future>(case: F) -> F::Output {
+    Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a current-thread runtime")
@@ -72,12 +107,12 @@ pub fn block_on<F: std::future::Future>(case: F) -> F::Output {
 /// hand-picked cases beside them pin. A property over pure arithmetic keeps
 /// the default. `PROPTEST_CASES` still wins, for a deliberate deep run
 /// (`PROPTEST_CASES=2000 cargo test properties`).
-pub fn db_proptest_config() -> proptest::test_runner::Config {
-    let config = proptest::test_runner::Config::default();
-    if std::env::var_os("PROPTEST_CASES").is_some() {
+pub fn db_proptest_config() -> Config {
+    let config = Config::default();
+    if env::var_os("PROPTEST_CASES").is_some() {
         config
     } else {
-        proptest::test_runner::Config {
+        Config {
             cases: 32,
             ..config
         }
@@ -87,7 +122,7 @@ pub fn db_proptest_config() -> proptest::test_runner::Config {
 /// A property-test strategy for one to four parcels of one listing:
 /// `(quantity, price)`, the price carrying up to ten decimal places so a
 /// parcel's cost is rarely a round figure. [`insert_parcel_costs`] buys them.
-pub fn parcel_costs() -> impl proptest::strategy::Strategy<Value = Vec<(Decimal, Decimal)>> {
+pub fn parcel_costs() -> impl Strategy<Value = Vec<(Decimal, Decimal)>> {
     use proptest::prelude::*;
     prop::collection::vec((1i64..=10_000, 1i64..10_000_000_000, 0u32..=10), 1..=4).prop_map(
         |parcels| {
@@ -110,11 +145,11 @@ pub async fn insert_parcel_costs(
     pool: &SqlitePool,
     listing_id: i64,
     parcels: &[(Decimal, Decimal)],
-) -> std::collections::BTreeMap<NaiveDate, Decimal> {
+) -> BTreeMap<NaiveDate, Decimal> {
     const DATES: [(i32, u32, u32); 4] =
         [(2020, 10, 1), (2021, 3, 15), (2022, 1, 10), (2023, 5, 10)];
     assert!(parcels.len() <= DATES.len(), "one buy date per parcel");
-    let mut costs = std::collections::BTreeMap::new();
+    let mut costs = BTreeMap::new();
     for (i, ((qty, price), (y, m, d))) in parcels.iter().zip(DATES).enumerate() {
         let date = ymd(y, m, d);
         buy(i as i64 + 1, listing_id)
@@ -198,7 +233,7 @@ pub async fn race_pool_with_busy_probe(dir: &tempfile::TempDir) -> (SqlitePool, 
     // handler: the probe changes how a connection waits, never the schema.
     file_pool(&path).await.close().await;
     let waits: &'static AtomicUsize = Box::leak(Box::new(AtomicUsize::new(0)));
-    let options = sqlx::sqlite::SqlitePoolOptions::new().after_connect(move |conn, _| {
+    let options = SqlitePoolOptions::new().after_connect(move |conn, _| {
         Box::pin(async move {
             let mut handle = conn.lock_handle().await?;
             // SAFETY: `as_raw_handle` is the live `sqlite3*` this connection
@@ -214,7 +249,7 @@ pub async fn race_pool_with_busy_probe(dir: &tempfile::TempDir) -> (SqlitePool, 
                 libsqlite3_sys::sqlite3_busy_handler(
                     handle.as_raw_handle().as_ptr(),
                     Some(counting_busy_handler),
-                    std::ptr::from_ref(waits).cast_mut().cast(),
+                    ptr::from_ref(waits).cast_mut().cast(),
                 )
             };
             if rc == libsqlite3_sys::SQLITE_OK {
@@ -236,28 +271,28 @@ pub async fn race_pool_with_busy_probe(dir: &tempfile::TempDir) -> (SqlitePool, 
 /// consultation, then retry after 1 ms until [`db::BUSY_TIMEOUT`]'s worth of
 /// retries is spent.
 unsafe extern "C" fn counting_busy_handler(
-    waits: *mut std::ffi::c_void,
-    retries: std::ffi::c_int,
-) -> std::ffi::c_int {
+    waits: *mut ffi::c_void,
+    retries: ffi::c_int,
+) -> ffi::c_int {
     // SAFETY: SQLite passes back exactly the argument registered with this
     // handler, and `race_pool_with_busy_probe` is its only registrant, which
     // registers a pointer from a leaked `&'static AtomicUsize` — so it is
     // non-null, aligned and live, and a shared `&` to an atomic is sound from
     // whichever thread SQLite runs the handler on.
-    let waits = unsafe { &*waits.cast::<std::sync::atomic::AtomicUsize>() };
-    waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let waited = std::time::Duration::from_millis(u64::try_from(retries).unwrap_or(0));
+    let waits = unsafe { &*waits.cast::<AtomicUsize>() };
+    waits.fetch_add(1, atomic::Ordering::SeqCst);
+    let waited = Duration::from_millis(u64::try_from(retries).unwrap_or(0));
     if waited >= db::BUSY_TIMEOUT {
         return 0;
     }
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(1));
     1
 }
 
 /// What [`race_pool_with_busy_probe`] hands back beside its pool: whether any
 /// of the pool's connections has waited on a lock another connection held.
 pub struct BusyProbe {
-    waits: &'static std::sync::atomic::AtomicUsize,
+    waits: &'static AtomicUsize,
 }
 
 impl BusyProbe {
@@ -269,7 +304,7 @@ impl BusyProbe {
     /// the competing task started, in a test whose setup writes without
     /// contention (every test using it does — the setup runs on one task).
     pub async fn blocked(&self) {
-        await_condition(|| self.waits.load(std::sync::atomic::Ordering::SeqCst) > 0).await;
+        await_condition(|| self.waits.load(atomic::Ordering::SeqCst) > 0).await;
     }
 }
 
@@ -277,13 +312,13 @@ impl BusyProbe {
 /// 10 s — for waiting on an event another task or thread signals, never for
 /// guessing how long something takes.
 pub async fn await_condition(mut condition: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !condition() {
         assert!(
-            std::time::Instant::now() < deadline,
+            Instant::now() < deadline,
             "the condition never held within the deadline"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        time::sleep(Duration::from_millis(1)).await;
     }
 }
 
@@ -292,7 +327,7 @@ pub async fn await_condition(mut condition: impl FnMut() -> bool) {
 ///
 /// Held as an `Arc<str>` because that is the one shape `sqlx::AssertSqlSafe`
 /// takes without copying the whole script on every call.
-static SCHEMA_TEMPLATE: tokio::sync::OnceCell<Arc<str>> = tokio::sync::OnceCell::const_new();
+static SCHEMA_TEMPLATE: OnceCell<Arc<str>> = OnceCell::const_new();
 
 async fn schema_template() -> Arc<str> {
     SCHEMA_TEMPLATE
@@ -420,14 +455,14 @@ pub struct ApiResponse {
 impl ApiResponse {
     /// The body as JSON. Panics with the body text on a decode failure — a
     /// test that mis-types its response should say what actually came back.
-    pub fn json<T: serde::de::DeserializeOwned>(&self) -> T {
+    pub fn json<T: DeserializeOwned>(&self) -> T {
         serde_json::from_slice(&self.body)
             .unwrap_or_else(|e| panic!("decoding {:?} failed: {e}", self.text()))
     }
 
     /// The body as text — the plain-text reason on a 4xx.
     pub fn text(&self) -> &str {
-        std::str::from_utf8(&self.body).expect("response body is not UTF-8")
+        str::from_utf8(&self.body).expect("response body is not UTF-8")
     }
 
     /// Status plus body text, the pair the rejection tests assert on.
@@ -454,7 +489,7 @@ pub struct ApiClient {
     headers: Vec<(String, String)>,
     /// The peer address installed as the request's `ConnectInfo` extension on
     /// every request — see [`Self::with_peer`].
-    peer: Option<std::net::SocketAddr>,
+    peer: Option<SocketAddr>,
 }
 
 impl ApiClient {
@@ -491,7 +526,7 @@ impl ApiClient {
     /// specifically, so only the wrapped type it actually reads is installed
     /// here.
     #[must_use = "a builder does nothing until it is used"]
-    pub fn with_peer(mut self, addr: std::net::SocketAddr) -> Self {
+    pub fn with_peer(mut self, addr: SocketAddr) -> Self {
         self.peer = Some(addr);
         self
     }
@@ -509,20 +544,20 @@ impl ApiClient {
     /// [`Self::full`] with a caller-supplied price fetcher, for the tests that
     /// need canned quotes or a failing provider.
     pub fn full_with(pool: &SqlitePool, fetcher: closing_price::SharedFetcher) -> Self {
-        let registry = crate::infra::scheduler::registry(
+        let registry = scheduler::registry(
             pool.clone(),
             ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
-            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            DistributionStub::default().shared(),
             None,
         );
         // Mounted at the root, auth off — the default. `app::router`'s own
         // tests cover a router nested under a reverse-proxy base path;
         // `infra::auth`'s own tests cover one with `[auth]` configured.
-        ApiClient::over(crate::app::router(
-            &crate::infra::config::BasePath::ROOT,
+        ApiClient::over(app::router(
+            &BasePath::ROOT,
             pool.clone(),
             registry,
             fetcher,
@@ -534,13 +569,12 @@ impl ApiClient {
     async fn send(&self, mut req: Request<Body>) -> ApiResponse {
         for (name, value) in &self.headers {
             req.headers_mut().insert(
-                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("valid header name"),
-                axum::http::HeaderValue::from_str(value).expect("valid header value"),
+                HeaderName::from_bytes(name.as_bytes()).expect("valid header name"),
+                HeaderValue::from_str(value).expect("valid header value"),
             );
         }
         if let Some(addr) = self.peer {
-            req.extensions_mut()
-                .insert(axum::extract::ConnectInfo(addr));
+            req.extensions_mut().insert(ConnectInfo(addr));
         }
         let resp = self.app.clone().oneshot(req).await.unwrap();
         let status = resp.status();
@@ -721,7 +755,7 @@ impl ApiClient {
     }
 
     /// GET, require 200, decode the JSON body — the read half of most tests.
-    pub async fn get_json<T: serde::de::DeserializeOwned>(&self, path: impl AsRef<str>) -> T {
+    pub async fn get_json<T: DeserializeOwned>(&self, path: impl AsRef<str>) -> T {
         self.get(path).await.expect_status(StatusCode::OK).json()
     }
 
@@ -751,7 +785,7 @@ impl ApiClient {
     }
 
     /// POST a JSON body, require 200, decode the JSON body.
-    pub async fn post_json<T: serde::de::DeserializeOwned>(
+    pub async fn post_json<T: DeserializeOwned>(
         &self,
         path: impl AsRef<str>,
         body: &impl serde::Serialize,
@@ -774,7 +808,7 @@ impl ApiClient {
 /// combined (to pin that they AND, not OR), and at least one matching nothing
 /// — an empty `200` array, never a `404`, which `get_json` decodes as an empty
 /// `Vec` and would have failed on for any other status.
-pub async fn assert_list_filters<T: serde::de::DeserializeOwned>(
+pub async fn assert_list_filters<T: DeserializeOwned>(
     client: &ApiClient,
     path: &str,
     id_of: impl Fn(&T) -> i64,
@@ -808,7 +842,7 @@ pub fn dec(s: &str) -> Decimal {
 /// conventions). Used by the import tests that pin what an unreachable feed
 /// records (SCENARIOS T-06).
 pub fn unreachable_url(path: &str) -> String {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
+    let port = TcpListener::bind("127.0.0.1:0")
         .expect("an ephemeral loopback port should bind")
         .local_addr()
         .expect("a bound listener should have an address")
@@ -993,7 +1027,7 @@ pub async fn recognised_worthless_listing(
 ) {
     listing(listing_id)
         .ticker(ticker)
-        .security_type(crate::entities::listing::SecurityType::Share)
+        .security_type(SecurityType::Share)
         .insert(pool)
         .await;
     buy(listing_id * 1000, listing_id)
@@ -1001,22 +1035,20 @@ pub async fn recognised_worthless_listing(
         .settlement(parcel_date)
         .insert(pool)
         .await;
-    crate::entities::corporate_action::db_upsert(
+    corporate_action::db_upsert(
         pool,
-        &crate::entities::corporate_action::CorporateAction {
+        &CorporateAction {
             id: action_id,
             listing_id: ListingId(listing_id),
             date: event_date,
-            kind: crate::entities::corporate_action::ActionKind::WorthlessShares {
-                worthless_event: crate::entities::corporate_action::WorthlessEvent::C2Cancellation,
+            kind: ActionKind::WorthlessShares {
+                worthless_event: WorthlessEvent::C2Cancellation,
             },
         },
     )
     .await
     .unwrap();
-    crate::entities::worthless::db_recognise(pool, action_id)
-        .await
-        .unwrap();
+    worthless::db_recognise(pool, action_id).await.unwrap();
 }
 
 /// A Buy written **straight into `trades`**, bypassing `trade::db_upsert` and
@@ -1689,11 +1721,11 @@ pub fn rust_sources() -> &'static [SourceFile] {
 }
 
 fn read_rust_sources() -> Vec<(String, String)> {
-    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     let mut walk = vec![src.clone()];
     while let Some(dir) = walk.pop() {
-        for entry in std::fs::read_dir(&dir)
+        for entry in fs::read_dir(&dir)
             .expect("src should be readable")
             .flatten()
         {
@@ -1708,7 +1740,7 @@ fn read_rust_sources() -> Vec<(String, String)> {
                     .map(|c| c.as_os_str().to_string_lossy().into_owned())
                     .collect::<Vec<_>>()
                     .join("/");
-                let body = std::fs::read_to_string(&path).expect("source should be readable");
+                let body = fs::read_to_string(&path).expect("source should be readable");
                 found.push((rel, body));
             }
         }
@@ -1942,6 +1974,7 @@ pub fn code_only(source: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities;
     use crate::entities::exchange::Exchange;
     use serde_json::json;
 
@@ -2254,7 +2287,7 @@ mod tests {
     #[tokio::test]
     async fn over_wraps_a_narrower_router_than_the_whole_app() {
         let pool = test_pool().await;
-        let client = ApiClient::over(crate::entities::router().with_state(pool));
+        let client = ApiClient::over(entities::router().with_state(pool));
         // The entity routes are served…
         assert_eq!(client.get("/exchanges").await.status, StatusCode::OK);
         // …and the report routes, which this router does not carry, are not.

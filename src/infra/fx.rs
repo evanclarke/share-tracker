@@ -32,8 +32,16 @@
 
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
+use sqlx::encode::IsNull;
+use sqlx::error::BoxDynError;
+use sqlx::sqlite::SqliteArgumentsBuffer;
+use sqlx::sqlite::SqliteTypeInfo;
+use sqlx::sqlite::SqliteValueRef;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
+use std::fmt;
+use std::iter;
+use std::str::FromStr;
 
 use crate::infra::currency::{Aud, CurrencyCode};
 use crate::infra::decimal::parse_dec;
@@ -81,7 +89,7 @@ impl RateMonth {
 pub struct NotARateMonth(String);
 
 /// A stored `'YYYY-MM'` key, refused when it is not one.
-impl std::str::FromStr for RateMonth {
+impl FromStr for RateMonth {
     type Err = NotARateMonth;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
@@ -101,27 +109,24 @@ impl std::str::FromStr for RateMonth {
 /// Stored as the `'YYYY-MM'` TEXT key `rba_fx_rates.month` holds; a stored
 /// value that is not one is a decode error, never a key that matches nothing.
 impl sqlx::Type<sqlx::Sqlite> for RateMonth {
-    fn type_info() -> sqlx::sqlite::SqliteTypeInfo {
+    fn type_info() -> SqliteTypeInfo {
         <String as sqlx::Type<sqlx::Sqlite>>::type_info()
     }
 
-    fn compatible(ty: &sqlx::sqlite::SqliteTypeInfo) -> bool {
+    fn compatible(ty: &SqliteTypeInfo) -> bool {
         <String as sqlx::Type<sqlx::Sqlite>>::compatible(ty)
     }
 }
 
 impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for RateMonth {
-    fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
+    fn decode(value: SqliteValueRef<'r>) -> Result<Self, BoxDynError> {
         let text = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
         Ok(text.parse::<RateMonth>()?)
     }
 }
 
 impl sqlx::Encode<'_, sqlx::Sqlite> for RateMonth {
-    fn encode_by_ref(
-        &self,
-        buf: &mut sqlx::sqlite::SqliteArgumentsBuffer,
-    ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
+    fn encode_by_ref(&self, buf: &mut SqliteArgumentsBuffer) -> Result<IsNull, BoxDynError> {
         <String as sqlx::Encode<sqlx::Sqlite>>::encode(self.to_string(), buf)
     }
 }
@@ -141,8 +146,8 @@ impl PartialEq<str> for RateMonth {
     }
 }
 
-impl std::fmt::Display for RateMonth {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for RateMonth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}", self.year, self.month)
     }
 }
@@ -382,7 +387,7 @@ pub struct Parts<T> {
 /// The valuation month of `date` and its fallback predecessors, newest first:
 /// `1 + VALUATION_FALLBACK_MONTHS` of them.
 fn valuation_months(date: NaiveDate) -> impl Iterator<Item = RateMonth> {
-    std::iter::successors(Some(RateMonth::of(date)), |m| Some(m.previous()))
+    iter::successors(Some(RateMonth::of(date)), |m| Some(m.previous()))
         .take(1 + VALUATION_FALLBACK_MONTHS as usize)
 }
 
@@ -589,6 +594,8 @@ pub async fn to_aud(
 mod tests {
     use super::*;
     use crate::entities::rba_fx_rate;
+    use crate::test_support;
+    use crate::test_support::SourceFile;
     use crate::test_support::test_pool;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
@@ -1092,11 +1099,11 @@ mod tests {
         let call = format!("{}(", "resolve_valuation_rate");
         let mut offenders = Vec::new();
         let mut seen_in_allowed: Vec<&str> = Vec::new();
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: rel,
             raw: body,
             ..
-        } in crate::test_support::rust_sources()
+        } in test_support::rust_sources()
         {
             let allowed = VALUATION_RATE_CALLERS_ALLOWED
                 .iter()

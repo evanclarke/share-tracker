@@ -26,10 +26,13 @@
 //! whole body. The seam ([`FeedFetcher`]) exists so the stalled and oversized
 //! paths are testable without a socket.
 
+use std::error;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time;
 
 /// Render an error and everything beneath it as one line, outermost first,
 /// joined with `": "` — e.g.
@@ -41,7 +44,7 @@ use std::time::Duration;
 /// A layer whose own message merely re-renders what it wraps (several wrapper
 /// error types delegate `Display` straight to their source) is not repeated.
 /// The walk is depth-bounded so a self-referencing `source()` cannot spin.
-pub fn cause_chain(error: &dyn std::error::Error) -> String {
+pub fn cause_chain(error: &dyn error::Error) -> String {
     /// Deeper than any transport error stack in practice; a guard, not a limit
     /// anything real is expected to reach.
     const MAX_DEPTH: usize = 12;
@@ -103,8 +106,8 @@ pub enum FetchError {
     TooLarge { limit: usize },
 }
 
-impl std::fmt::Display for FetchError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for FetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Transport(rendered) => f.write_str(rendered),
             Self::Timeout { timeout } => {
@@ -117,7 +120,7 @@ impl std::fmt::Display for FetchError {
     }
 }
 
-impl std::error::Error for FetchError {}
+impl error::Error for FetchError {}
 
 /// The result of one [`FeedFetcher::fetch`], boxed so the trait stays
 /// object-safe (`dyn FeedFetcher`) exactly as `closing_price`'s `PriceFetcher`
@@ -203,7 +206,7 @@ pub async fn fetch_feed(
     url: &str,
     basic_auth: Option<(&str, &str)>,
 ) -> Result<String, FetchError> {
-    let body = tokio::time::timeout(FEED_TIMEOUT, fetcher.fetch(url, basic_auth))
+    let body = time::timeout(FEED_TIMEOUT, fetcher.fetch(url, basic_auth))
         .await
         .map_err(|_| FetchError::Timeout {
             timeout: FEED_TIMEOUT,
@@ -239,6 +242,7 @@ fn append_bounded(body: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), 
 #[cfg(test)]
 pub mod test_support {
     use super::*;
+    use tokio::time;
 
     /// A feed that never answers inside [`FEED_TIMEOUT`]: the shared deadline
     /// replies, not the stub. Sleeping four times the deadline (rather than
@@ -261,7 +265,7 @@ pub mod test_support {
             _basic_auth: Option<(&'a str, &'a str)>,
         ) -> FetchFuture<'a> {
             Box::pin(async move {
-                tokio::time::sleep(FEED_TIMEOUT * 4).await;
+                time::sleep(FEED_TIMEOUT * 4).await;
                 Ok(String::new())
             })
         }
@@ -290,8 +294,10 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::unreachable_url;
     use std::error::Error;
     use std::fmt;
+    use tokio::time;
 
     /// A minimal error with an optional source, for building a chain by hand.
     #[derive(Debug)]
@@ -381,7 +387,7 @@ mod tests {
     /// connection's `Display` names only the URL, and the cause is a layer down.
     #[tokio::test]
     async fn a_reqwest_failure_renders_the_cause_its_own_display_hides() {
-        let error = reqwest::get(crate::test_support::unreachable_url("f11-data.csv"))
+        let error = reqwest::get(unreachable_url("f11-data.csv"))
             .await
             .expect_err("nothing is listening on that port");
 
@@ -453,7 +459,7 @@ mod tests {
     /// completed fetch rather than a hung test.
     #[tokio::test]
     async fn a_stalled_fetch_is_cut_off_by_the_deadline() {
-        tokio::time::pause();
+        time::pause();
 
         let error = fetch_feed(
             &test_support::StalledFeedFetcher,

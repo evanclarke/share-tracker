@@ -4,7 +4,9 @@
 use super::db::{JobRunRecord, JobRunStatus, db_next_runs, db_run_histories};
 use super::registry::{JobParams, JobRegistry, JobTrigger};
 use super::run::run_job;
+use crate::infra::db;
 use crate::infra::extract::{Json, Query};
+use crate::infra::http::ApiError;
 use crate::infra::respond::NoContent;
 use axum::{
     Extension,
@@ -70,7 +72,7 @@ pub struct JobStatus {
 async fn list(
     State(pool): State<SqlitePool>,
     Extension(registry): Extension<JobRegistry>,
-) -> Result<Json<Vec<JobStatus>>, crate::infra::http::ApiError> {
+) -> Result<Json<Vec<JobStatus>>, ApiError> {
     let mut histories = db_run_histories(&pool).await?;
     let mut next_runs = db_next_runs(&pool).await?;
 
@@ -116,15 +118,14 @@ async fn trigger(
     // rejection — the shared `Query` refuses it `400` naming it, so a
     // misspelt `?sufix=` cannot take an unlabelled backup.
     Query(params): Query<JobParams>,
-) -> Result<NoContent, crate::infra::http::ApiError> {
+) -> Result<NoContent, ApiError> {
     // Reject an invalid suffix before the registry lookup or run_job: a
     // malformed request must not be recorded as a failed job run (only the
     // backup job reads it — as it does `skip_command`, which needs no
     // validation beyond the flag parsing — but the query string is shared
     // across all names).
     if let Some(suffix) = &params.suffix {
-        crate::infra::db::validate_backup_suffix(suffix)
-            .map_err(crate::infra::http::ApiError::unprocessable)?;
+        db::validate_backup_suffix(suffix).map_err(ApiError::unprocessable)?;
     }
     match registry.get(&name) {
         // The `deleted(found, noun)` convention, one endpoint over: name what
@@ -133,7 +134,7 @@ async fn trigger(
         None => {
             let mut known: Vec<&str> = registry.keys().map(String::as_str).collect();
             known.sort_unstable();
-            Err(crate::infra::http::ApiError::not_found(format!(
+            Err(ApiError::not_found(format!(
                 "no job named '{name}'; registered jobs are {}",
                 known.join(", ")
             )))
@@ -142,7 +143,7 @@ async fn trigger(
             Ok(()) => Ok(NoContent),
             // The job's own error text (what `job_runs.error` records) rides
             // out in the 500's body, so the toast says what went wrong.
-            Err(e) => Err(crate::infra::http::ApiError::job_failed(&name, e)),
+            Err(e) => Err(ApiError::job_failed(&name, e)),
         },
     }
 }

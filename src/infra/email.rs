@@ -27,8 +27,13 @@
 //! entirely, so the graph's information travels here as the dated table behind
 //! it (see REQUIREMENTS, "Emailed portfolio reports").
 
+use lettre::error;
+use lettre::message::Mailbox;
+use lettre::transport::smtp;
 use rust_decimal::Decimal;
 use std::fmt::Write as _;
+use std::mem;
+use std::str::FromStr;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 // ---------------------------------------------------------------------------
@@ -56,14 +61,14 @@ pub enum MailError {
     Send(String),
 }
 
-impl From<lettre::error::Error> for MailError {
-    fn from(error: lettre::error::Error) -> Self {
+impl From<error::Error> for MailError {
+    fn from(error: error::Error) -> Self {
         Self::Build(error.to_string())
     }
 }
 
-impl From<lettre::transport::smtp::Error> for MailError {
-    fn from(error: lettre::transport::smtp::Error) -> Self {
+impl From<smtp::Error> for MailError {
+    fn from(error: smtp::Error) -> Self {
         Self::Send(error.to_string())
     }
 }
@@ -142,7 +147,7 @@ pub struct UnknownEncryption(String);
 
 /// The config file's `encryption` value, case-insensitively, with the common
 /// aliases (`tls`/`ssl` for implicit, `plain` for none).
-impl std::str::FromStr for Encryption {
+impl FromStr for Encryption {
     type Err = UnknownEncryption;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
@@ -168,8 +173,8 @@ pub struct EmailSettings {
     pub smtp_port: u16,
     pub encryption: Encryption,
     pub credentials: Option<(String, String)>,
-    pub from: lettre::message::Mailbox,
-    pub to: Vec<lettre::message::Mailbox>,
+    pub from: Mailbox,
+    pub to: Vec<Mailbox>,
     /// Prepended to every subject, e.g. `[share-tracker]`, so the mail can be
     /// filtered on one string. Absent by default — the subjects already say
     /// what they are.
@@ -180,8 +185,8 @@ pub struct EmailSettings {
 /// The live transport. Built only in `main`.
 pub struct SmtpMailer {
     transport: lettre::AsyncSmtpTransport<lettre::Tokio1Executor>,
-    from: lettre::message::Mailbox,
-    to: Vec<lettre::message::Mailbox>,
+    from: Mailbox,
+    to: Vec<Mailbox>,
     subject_prefix: Option<String>,
 }
 
@@ -570,7 +575,7 @@ fn wrap(text: &str, width: usize) -> String {
     let mut current = String::new();
     for word in text.split_whitespace() {
         if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
-            lines.push(std::mem::take(&mut current));
+            lines.push(mem::take(&mut current));
         }
         if !current.is_empty() {
             current.push(' ');

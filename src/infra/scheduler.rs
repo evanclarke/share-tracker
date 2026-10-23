@@ -57,27 +57,51 @@ use schedule::{ScheduleEntry, parse};
 mod tests {
     use super::registry::JobParams;
     use super::*;
+    use crate::entities::closing_price::SharedFetcher;
+    use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::distribution_event::SharedDistributionFetcher;
+    use crate::entities::distribution_event::test_support::DistributionStub;
+    use crate::entities::rba_fx_rate::ImportError;
+    use crate::infra::fetch;
+    use crate::reports::health;
+    use crate::test_support;
     use crate::test_support::{ApiClient, await_condition, file_pool, test_pool};
     use axum::Extension;
     use axum::http::StatusCode;
     use chrono::{DateTime, Local, TimeZone, Utc};
+    use chrono_tz::America;
+    use chrono_tz::Australia;
     use chrono_tz::Tz;
     use croner::Cron;
     use sqlx::SqlitePool;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path;
+    use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
+    use std::time::Instant as StdInstant;
+    use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::Semaphore;
+    use tokio::sync::oneshot;
+    use tokio::task;
+    use tokio::time;
+    use tokio::time::Instant;
 
     /// An offline price-source stub so building a registry never constructs the
     /// live `YahooFetcher` (these tests trigger only the `backup` job, but the
     /// stub guarantees no test path can reach the network).
-    fn stub_fetcher() -> crate::entities::closing_price::SharedFetcher {
-        crate::entities::closing_price::test_support::QuoteStub::default().shared()
+    fn stub_fetcher() -> SharedFetcher {
+        QuoteStub::default().shared()
     }
 
-    fn stub_distributions() -> crate::entities::distribution_event::SharedDistributionFetcher {
-        crate::entities::distribution_event::test_support::DistributionStub::default().shared()
+    fn stub_distributions() -> SharedDistributionFetcher {
+        DistributionStub::default().shared()
     }
 
     async fn test_registry() -> (JobRegistry, SqlitePool, tempfile::TempDir, String) {
@@ -113,7 +137,7 @@ mod tests {
     fn parse_accepts_timezone_field() {
         let entries = parse("30 16 * * 1-5  America/New_York  price-import\n").unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].tz, Some(chrono_tz::America::New_York));
+        assert_eq!(entries[0].tz, Some(America::New_York));
         assert_eq!(entries[0].name, "price-import");
     }
 
@@ -223,8 +247,8 @@ mod tests {
             .map(|e| e.tz)
             .collect();
         assert_eq!(zones.len(), 3, "ASX, NYSE, and crypto-UTC runs expected");
-        assert!(zones.contains(&Some(chrono_tz::Australia::Sydney)));
-        assert!(zones.contains(&Some(chrono_tz::America::New_York)));
+        assert!(zones.contains(&Some(Australia::Sydney)));
+        assert!(zones.contains(&Some(America::New_York)));
         assert!(zones.contains(&Some(chrono_tz::UTC)));
     }
 
@@ -328,11 +352,11 @@ mod tests {
         // fires*, not what it records.
         let pool = test_pool().await;
         pool.close().await;
-        tokio::time::pause();
+        time::pause();
         let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
-        let start = tokio::time::Instant::now();
+        let start = Instant::now();
         let clock = move || {
-            let elapsed = tokio::time::Instant::now() - start;
+            let elapsed = Instant::now() - start;
             let mut now = t0 + chrono::Duration::from_std(elapsed).unwrap();
             if elapsed >= Duration::from_secs(90 * 60) {
                 now += chrono::Duration::hours(1); // the wall-clock shift
@@ -340,7 +364,7 @@ mod tests {
             now
         };
 
-        let fired_at = Arc::new(std::sync::Mutex::new(Vec::<DateTime<Utc>>::new()));
+        let fired_at = Arc::new(Mutex::new(Vec::<DateTime<Utc>>::new()));
         let fired = fired_at.clone();
         let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
             let fired = fired.clone();
@@ -362,7 +386,7 @@ mod tests {
         tokio::spawn(run_entry(pool, entry, job, clock));
         // Paused time auto-advances through the loop's sleeps; run well past
         // the target, then check the fire time against the shifted wall clock.
-        tokio::time::sleep(Duration::from_secs(4 * 3600)).await;
+        time::sleep(Duration::from_secs(4 * 3600)).await;
 
         let fired = fired_at.lock().unwrap();
         assert_eq!(fired.len(), 1, "job must fire exactly once");
@@ -383,13 +407,13 @@ mod tests {
     /// executor needs. Panics rather than hanging if it never holds, so a real
     /// regression is a failure with a name rather than a stuck suite.
     async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = StdInstant::now() + Duration::from_secs(30);
         while !cond() {
             assert!(
-                std::time::Instant::now() < deadline,
+                StdInstant::now() < deadline,
                 "waited 30s for {what} and it never happened"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            time::sleep(Duration::from_millis(1)).await;
         }
     }
 
@@ -503,7 +527,7 @@ mod tests {
             if rows.len() >= expected {
                 return rows;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            time::sleep(Duration::from_millis(10)).await;
         }
         panic!("the spawned schedule entries never stored {expected} row(s)");
     }
@@ -536,7 +560,7 @@ mod tests {
             if holds_a_future_run(&rows) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            time::sleep(Duration::from_millis(10)).await;
             rows = stored_schedule(&pool).await;
         }
 
@@ -578,16 +602,16 @@ mod tests {
 
         // Silent within the grace margin…
         let now = Utc::now();
-        let health = crate::reports::health::db_health(&pool, now.date_naive(), now)
+        let health = health::db_health(&pool, now.date_naive(), now)
             .await
             .unwrap();
         assert!(health.overdue_jobs.is_empty());
 
         // …and past it, the stopped scheduler is named.
         let later = now
-            + chrono::Duration::hours(crate::reports::health::JOB_OVERDUE_GRACE_HOURS)
+            + chrono::Duration::hours(health::JOB_OVERDUE_GRACE_HOURS)
             + chrono::Duration::minutes(1);
-        let health = crate::reports::health::db_health(&pool, later.date_naive(), later)
+        let health = health::db_health(&pool, later.date_naive(), later)
             .await
             .unwrap();
         assert_eq!(health.overdue_jobs.len(), 1);
@@ -627,7 +651,7 @@ mod tests {
         );
 
         let now = Utc::now();
-        let health = crate::reports::health::db_health(&pool, now.date_naive(), now)
+        let health = health::db_health(&pool, now.date_naive(), now)
             .await
             .unwrap();
         assert!(health.overdue_jobs.is_empty());
@@ -807,7 +831,7 @@ mod tests {
         let overlapped = Arc::new(AtomicBool::new(false));
         let started = Arc::new(AtomicUsize::new(0));
         let runs = Arc::new(AtomicUsize::new(0));
-        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate = Arc::new(Semaphore::new(0));
         let (a, o, s, r, g) = (
             active.clone(),
             overlapped.clone(),
@@ -877,7 +901,7 @@ mod tests {
         // The backup job derives its own timestamped name (`t-YYYY-MM-DD-HHMMSS.db`),
         // so re-deriving the path here could land in a later second and miss it.
         // Assert instead that a backup file for this DB was written to the dir.
-        let made_backup = std::fs::read_dir(dir.path())
+        let made_backup = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -912,7 +936,7 @@ mod tests {
         let resp = app.post_empty("/jobs/backup?suffix=pre-0.5.1").await;
 
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
-        let made_backup = std::fs::read_dir(dir.path())
+        let made_backup = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -944,7 +968,7 @@ mod tests {
         // Beside "t.db" itself, WAL-mode sidecars (t.db-wal, t.db-shm) are
         // expected; only a backup-named file would indicate the rejected
         // suffix reached the filesystem.
-        let no_backup = std::fs::read_dir(dir.path())
+        let no_backup = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .all(|e| {
@@ -977,12 +1001,12 @@ mod tests {
             .await
             .unwrap();
 
-        let stem = std::path::Path::new(&db_path)
+        let stem = path::Path::new(&db_path)
             .file_stem()
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let has_suffix = std::fs::read_dir(dir.path())
+        let has_suffix = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -1018,7 +1042,7 @@ mod tests {
             .await
             .unwrap();
 
-        let in_backup_dir = std::fs::read_dir(backup_dir.path())
+        let in_backup_dir = fs::read_dir(backup_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -1026,7 +1050,7 @@ mod tests {
                 name.starts_with("t-") && name.ends_with(".db")
             });
         assert!(in_backup_dir, "backup job must write to the configured dir");
-        let beside_db = std::fs::read_dir(db_dir.path())
+        let beside_db = fs::read_dir(db_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().starts_with("t-"));
@@ -1067,12 +1091,8 @@ mod tests {
     /// A hook-appending registry plus the file it appends to: each run of the
     /// backup job adds one line, so a test can count how many times the
     /// post-backup command actually ran.
-    async fn registry_with_counting_hook() -> (
-        JobRegistry,
-        SqlitePool,
-        tempfile::TempDir,
-        std::path::PathBuf,
-    ) {
+    async fn registry_with_counting_hook() -> (JobRegistry, SqlitePool, tempfile::TempDir, PathBuf)
+    {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("t.db").to_string_lossy().to_string();
         let pool = file_pool(&db_path).await;
@@ -1091,8 +1111,8 @@ mod tests {
     }
 
     /// How many times the counting hook has run.
-    fn hook_runs(log: &std::path::Path) -> usize {
-        std::fs::read_to_string(log).map_or(0, |s| s.lines().count())
+    fn hook_runs(log: &path::Path) -> usize {
+        fs::read_to_string(log).map_or(0, |s| s.lines().count())
     }
 
     #[tokio::test]
@@ -1108,7 +1128,7 @@ mod tests {
             .await;
 
         assert_eq!(resp.status, StatusCode::NO_CONTENT);
-        let made_backup = std::fs::read_dir(dir.path())
+        let made_backup = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -1392,7 +1412,7 @@ mod tests {
             "the 400 must name the parameter it did not understand: {body}"
         );
         // Nothing ran: no backup file, no recorded run.
-        let no_backup = std::fs::read_dir(dir.path())
+        let no_backup = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .all(|e| {
@@ -1605,8 +1625,8 @@ mod tests {
         .await
         .unwrap();
 
-        let (release, parked) = tokio::sync::oneshot::channel::<()>();
-        let parked = Arc::new(tokio::sync::Mutex::new(Some(parked)));
+        let (release, parked) = oneshot::channel::<()>();
+        let parked = Arc::new(AsyncMutex::new(Some(parked)));
         let job = Arc::new(RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
             let parked = parked.clone();
             async move {
@@ -1633,7 +1653,7 @@ mod tests {
             if backup.last_status == Some(JobRunStatus::Running) {
                 break backup;
             }
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         };
         assert!(
             in_flight.last_finished_at.is_none(),
@@ -1706,7 +1726,7 @@ mod tests {
         assert!(backup.last_finished_at.is_none());
 
         // And the health report does not call it a failure: nothing failed.
-        let health = crate::reports::health::db_health(
+        let health = health::db_health(
             &pool,
             chrono::NaiveDate::from_ymd_opt(2026, 6, 8).unwrap(),
             chrono::Utc::now(),
@@ -1970,12 +1990,10 @@ mod tests {
     #[tokio::test]
     async fn a_failed_job_records_its_message_and_its_cause() {
         let (reg, pool, _dir, _path) = test_registry().await;
-        let transport = reqwest::get(crate::test_support::unreachable_url("f11-data.csv"))
+        let transport = reqwest::get(test_support::unreachable_url("f11-data.csv"))
             .await
             .expect_err("nothing is listening on that port");
-        let import_error = crate::entities::rba_fx_rate::ImportError::Fetch(
-            crate::infra::fetch::cause_chain(&transport),
-        );
+        let import_error = ImportError::Fetch(fetch::cause_chain(&transport));
         let message = import_error.to_string();
         let failing = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
             let message = message.clone();
@@ -2030,10 +2048,10 @@ mod tests {
     #[tokio::test]
     async fn a_manual_run_survives_its_client_disconnecting() {
         let pool = test_pool().await;
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-        let channels = Arc::new(std::sync::Mutex::new(Some((started_tx, release_rx))));
-        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (started_tx, started_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let channels = Arc::new(Mutex::new(Some((started_tx, release_rx))));
+        let finished = Arc::new(AtomicBool::new(false));
         let done = finished.clone();
         let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
         jobs.insert(
@@ -2045,7 +2063,7 @@ mod tests {
                     let (started, release) = channels.lock().unwrap().take().expect("runs once");
                     started.send(()).unwrap();
                     release.await.expect("released");
-                    done.store(true, std::sync::atomic::Ordering::SeqCst);
+                    done.store(true, atomic::Ordering::SeqCst);
                     Ok(None)
                 }
             }),
@@ -2064,18 +2082,18 @@ mod tests {
         );
 
         release_tx.send(()).expect("the run outlived its request");
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let deadline = StdInstant::now() + Duration::from_secs(30);
         loop {
             if latest_run(&pool, "slow").await.map(|r| r.0).as_deref() == Some("ok") {
                 break;
             }
             assert!(
-                std::time::Instant::now() < deadline,
+                StdInstant::now() < deadline,
                 "the detached run never recorded its finish"
             );
-            tokio::task::yield_now().await;
+            task::yield_now().await;
         }
-        assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(finished.load(atomic::Ordering::SeqCst));
     }
 
     /// A job that panics is a failed run carrying the panic's message, and
@@ -2083,10 +2101,10 @@ mod tests {
     #[tokio::test]
     async fn a_panicking_run_is_recorded_as_failed_and_releases_the_lock() {
         let pool = test_pool().await;
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
         let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
-            let first = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let first = counted.fetch_add(1, atomic::Ordering::SeqCst) == 0;
             async move {
                 if first {
                     panic!("the feed parser hit an impossible row");
@@ -2105,7 +2123,7 @@ mod tests {
         );
 
         // The lock was released, so this neither deadlocks nor fails.
-        tokio::time::timeout(
+        time::timeout(
             Duration::from_secs(30),
             run_job(&pool, "flaky", &job, JobParams::default()),
         )
@@ -2148,16 +2166,15 @@ mod tests {
     async fn a_panicking_scheduled_run_keeps_the_job_scheduled() {
         let pool = test_pool().await;
         pool.close().await;
-        tokio::time::pause();
+        time::pause();
         let t0 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 30).unwrap();
-        let start = tokio::time::Instant::now();
-        let clock =
-            move || t0 + chrono::Duration::from_std(tokio::time::Instant::now() - start).unwrap();
+        let start = Instant::now();
+        let clock = move || t0 + chrono::Duration::from_std(Instant::now() - start).unwrap();
 
-        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
         let job = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| {
-            let first = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            let first = counted.fetch_add(1, atomic::Ordering::SeqCst) == 0;
             async move {
                 if first {
                     panic!("first run panics");
@@ -2174,10 +2191,10 @@ mod tests {
         };
         let looping = tokio::spawn(run_entry(pool, entry, job, clock));
         // Fires at 00:01 (panics) and 00:02, 00:03 (succeed).
-        tokio::time::sleep(Duration::from_secs(3 * 60)).await;
+        time::sleep(Duration::from_secs(3 * 60)).await;
 
         assert!(
-            calls.load(std::sync::atomic::Ordering::SeqCst) >= 3,
+            calls.load(atomic::Ordering::SeqCst) >= 3,
             "the job stopped being scheduled after its panic"
         );
         assert!(!looping.is_finished(), "the timer loop ended");

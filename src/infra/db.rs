@@ -1,14 +1,25 @@
 use chrono::{DateTime, Local, NaiveDateTime};
+use sqlx::query;
+use sqlx::sqlite::SqliteArguments;
 use sqlx::{
     Connection, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions},
 };
+use std::cmp::Reverse;
+use std::fs;
+use std::fs::File;
+use std::io;
+use std::ops::Deref;
+use std::ops::DerefMut;
+use std::process::Stdio;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
 };
+use tokio::process;
+use tokio::time;
 
 /// How long a queued writer waits for SQLite's single write lock before it
 /// gives up and the request fails.
@@ -233,7 +244,7 @@ impl ReadTx {
     }
 }
 
-impl std::ops::Deref for ReadTx {
+impl Deref for ReadTx {
     type Target = SqliteConnection;
 
     fn deref(&self) -> &SqliteConnection {
@@ -241,7 +252,7 @@ impl std::ops::Deref for ReadTx {
     }
 }
 
-impl std::ops::DerefMut for ReadTx {
+impl DerefMut for ReadTx {
     fn deref_mut(&mut self) -> &mut SqliteConnection {
         &mut self.0
     }
@@ -295,7 +306,7 @@ impl WriteMode {
 pub fn insert_with_optional_id(
     sql: &'static str,
     id: Option<i64>,
-) -> sqlx::query::Query<'static, sqlx::Sqlite, sqlx::sqlite::SqliteArguments> {
+) -> query::Query<'static, sqlx::Sqlite, SqliteArguments> {
     sqlx::query(sql).bind(id)
 }
 
@@ -417,7 +428,7 @@ pub enum BackupError {
     #[error("backup failed: {0}")]
     Db(#[from] sqlx::Error),
     #[error("backup failed: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("backup verification failed for {path}: {reason}")]
     Verification { path: String, reason: String },
     #[error("post-backup command failed ({command}): {reason}")]
@@ -446,7 +457,7 @@ pub async fn backup(
     // create it rather than failing the weekly job. The beside-the-DB default
     // needs no such step — the database file's directory already exists.
     if let Some(dir) = backup_dir {
-        std::fs::create_dir_all(dir)?;
+        fs::create_dir_all(dir)?;
     }
     let dest = backup_path(db_path, backup_dir, suffix);
     let created = backup_to(pool, &dest).await?;
@@ -511,7 +522,7 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
     // long-running process that has not restarted since.
     if Path::new(&staging).exists() {
         tracing::info!(path = staging, "removing a leftover partial backup");
-        std::fs::remove_file(&staging)?;
+        fs::remove_file(&staging)?;
     }
     tracing::info!(path = staging, backup = dest, "starting backup");
     sqlx::query("VACUUM INTO ?")
@@ -527,23 +538,23 @@ async fn backup_to(pool: &SqlitePool, dest: &str) -> Result<bool, BackupError> {
 /// The three filesystem steps that put a verified staging copy in place under
 /// its backup name — a seam so a test can pin their order ([`install`]).
 trait InstallSteps {
-    fn sync_file(&mut self, path: &Path) -> std::io::Result<()>;
-    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()>;
-    fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()>;
+    fn sync_file(&mut self, path: &Path) -> io::Result<()>;
+    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()>;
+    fn sync_dir(&mut self, dir: &Path) -> io::Result<()>;
 }
 
 /// The real filesystem.
 struct Disk;
 
 impl InstallSteps for Disk {
-    fn sync_file(&mut self, path: &Path) -> std::io::Result<()> {
-        std::fs::File::open(path)?.sync_all()
+    fn sync_file(&mut self, path: &Path) -> io::Result<()> {
+        File::open(path)?.sync_all()
     }
-    fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::rename(from, to)
+    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
+        fs::rename(from, to)
     }
-    fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()> {
-        std::fs::File::open(dir)?.sync_all()
+    fn sync_dir(&mut self, dir: &Path) -> io::Result<()> {
+        File::open(dir)?.sync_all()
     }
 }
 
@@ -555,7 +566,7 @@ impl InstallSteps for Disk {
 /// backup that is not there, which pruning would count as a keeper. The
 /// directory fsync after the rename is what makes the rename itself durable
 /// (SCENARIOS T-11). Each step runs only after the previous one succeeded.
-fn install(steps: &mut impl InstallSteps, staging: &Path, dest: &Path) -> std::io::Result<()> {
+fn install(steps: &mut impl InstallSteps, staging: &Path, dest: &Path) -> io::Result<()> {
     steps.sync_file(staging)?;
     steps.rename(staging, dest)?;
     steps.sync_dir(containing_dir(dest))
@@ -613,7 +624,7 @@ async fn run_backup_command_within(
 ) -> Result<(), BackupError> {
     // Absolute so the hook works regardless of the server's working directory
     // (dest may be a relative path when no --backup-dir is configured).
-    let abs_dest = std::fs::canonicalize(dest)
+    let abs_dest = fs::canonicalize(dest)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| dest.to_owned());
     let substituted = command.replace("{BACKUP_FILE}", &shell_quote(&abs_dest));
@@ -625,12 +636,12 @@ async fn run_backup_command_within(
     // Its own process group, so a timeout can kill everything the shell
     // started (`a && scp …` leaves `scp` a grandchild that killing `sh` alone
     // would orphan, still running), not just the shell.
-    let child = tokio::process::Command::new("sh")
+    let child = process::Command::new("sh")
         .arg("-c")
         .arg(&substituted)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true)
         .spawn()
@@ -639,7 +650,7 @@ async fn run_backup_command_within(
             reason: format!("failed to spawn: {e}"),
         })?;
     let group = child.id();
-    let output = match tokio::time::timeout(limit, child.wait_with_output()).await {
+    let output = match time::timeout(limit, child.wait_with_output()).await {
         Ok(output) => output.map_err(|e| BackupError::Command {
             command: redacted.clone(),
             reason: format!("failed to wait for it: {e}"),
@@ -683,11 +694,11 @@ async fn run_backup_command_within(
 /// the negative pid naming the group is never read as one — POSIX leaves that
 /// parse to the implementation, and without it the group can survive silently.
 async fn kill_process_group(group: u32) {
-    let killed = tokio::process::Command::new("kill")
+    let killed = process::Command::new("kill")
         .args(["-s", "KILL", "--", &format!("-{group}")])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .await;
     match killed {
@@ -804,7 +815,7 @@ async fn verify_or_quarantine(
         return Ok(());
     };
     let quarantined = format!("{dest}{QUARANTINE_SUFFIX}");
-    match std::fs::rename(produced, &quarantined) {
+    match fs::rename(produced, &quarantined) {
         Ok(()) => tracing::error!(
             path = dest,
             quarantined,
@@ -917,7 +928,7 @@ fn backup_stem(db_path: &str) -> String {
 pub fn sweep_partial_backups(
     db_path: &str,
     backup_dir: Option<&str>,
-) -> Result<Vec<PathBuf>, std::io::Error> {
+) -> Result<Vec<PathBuf>, io::Error> {
     let stem = backup_stem(db_path);
     let dir = backup_destination(db_path, backup_dir);
     if !dir.is_dir() {
@@ -925,7 +936,7 @@ pub fn sweep_partial_backups(
         return Ok(Vec::new());
     }
     let mut deleted = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
+    for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -935,7 +946,7 @@ pub fn sweep_partial_backups(
             continue;
         }
         let path = entry.path();
-        std::fs::remove_file(&path)?;
+        fs::remove_file(&path)?;
         tracing::info!(
             path = %path.display(),
             "removed an unfinished backup left by an interrupted run"
@@ -952,13 +963,13 @@ pub fn sweep_partial_backups(
 /// `.bad` suffix — in the backup destination are candidates: the live database,
 /// its WAL sidecars, staging `.partial` files (swept at startup instead), and
 /// any other file are never deleted.
-fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>, std::io::Error> {
+fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>, io::Error> {
     let stem = backup_stem(db_path);
     let dir = backup_destination(db_path, backup_dir);
 
     let mut backups: Vec<(NaiveDateTime, PathBuf)> = Vec::new();
     let mut quarantined: Vec<(NaiveDateTime, PathBuf)> = Vec::new();
-    for entry in std::fs::read_dir(&dir)? {
+    for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
             continue;
@@ -970,8 +981,8 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
             quarantined.push((ts, entry.path()));
         }
     }
-    backups.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts)); // newest first
-    quarantined.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts)); // newest first
+    backups.sort_by_key(|(ts, _)| Reverse(*ts)); // newest first
+    quarantined.sort_by_key(|(ts, _)| Reverse(*ts)); // newest first
 
     let mut keep: HashSet<&Path> = backups
         .iter()
@@ -1003,7 +1014,7 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
         if keep.contains(path.as_path()) {
             continue;
         }
-        std::fs::remove_file(path)?;
+        fs::remove_file(path)?;
         tracing::info!(path = %path.display(), "pruned backup outside retention policy");
         deleted.push(path.clone());
     }
@@ -1011,7 +1022,7 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
     // these are not backups and never age into a monthly keeper, so newest-few
     // is the whole policy.
     for (_, path) in quarantined.iter().skip(KEEP_BAD) {
-        std::fs::remove_file(path)?;
+        fs::remove_file(path)?;
         tracing::info!(path = %path.display(), "pruned quarantined backup beyond the newest few");
         deleted.push(path.clone());
     }
@@ -1021,6 +1032,18 @@ fn prune_backups(db_path: &str, backup_dir: Option<&str>) -> Result<Vec<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::infra::http::ApiError;
+    use crate::test_support;
+    use crate::test_support::SourceFile;
+    use std::fs;
+    use std::io;
+    use std::path;
+    use std::process::Command;
+    use std::process::Stdio;
+    use std::time::Instant;
+    use tokio::time;
 
     /// Report files that begin **no** transaction of their own, each with the
     /// reason it needs none. Everything under `src/reports/` must either be
@@ -1102,9 +1125,9 @@ mod tests {
         let opens = format!("{}(", "read_tx");
         let mut report_files: Vec<String> = Vec::new();
         let mut unclassified: Vec<String> = Vec::new();
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: rel, code, ..
-        } in crate::test_support::rust_sources()
+        } in test_support::rust_sources()
         {
             if !rel.starts_with("reports/") {
                 continue;
@@ -1172,7 +1195,7 @@ mod tests {
                 || rel.ends_with("/tests.rs")
                 || rel.contains("/tests/")
         };
-        let offenders: Vec<String> = crate::test_support::rust_sources()
+        let offenders: Vec<String> = test_support::rust_sources()
             .iter()
             .filter(|source| !test_only_file(&source.path))
             .flat_map(|source| {
@@ -1203,7 +1226,7 @@ mod tests {
     /// an error path — hands the pool back a connection that writes again.
     #[tokio::test]
     async fn a_read_transaction_refuses_every_write() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let mut tx = read_tx(&pool).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM holding_accounts")
             .fetch_one(&mut *tx)
@@ -1249,7 +1272,7 @@ mod tests {
     async fn a_deferred_transaction_cannot_upgrade_after_a_concurrent_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("deferred.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&path).await;
+        let pool = test_support::file_pool(&path).await;
 
         // Deferred: this begins as a reader, and the read fixes its snapshot.
         #[allow(clippy::disallowed_methods)] // deliberately deferred: the failure write_tx avoids
@@ -1269,7 +1292,7 @@ mod tests {
         // fail this test loudly rather than hanging it for the busy timeout.
         let attempt = sqlx::query("UPDATE holding_accounts SET name = 'Here' WHERE id = 1")
             .execute(&mut *deferred);
-        let err = tokio::time::timeout(std::time::Duration::from_secs(2), attempt)
+        let err = time::timeout(Duration::from_secs(2), attempt)
             .await
             .expect("the failed upgrade is immediate, not after the busy timeout")
             .expect_err("a deferred transaction cannot upgrade past another connection's write");
@@ -1288,9 +1311,9 @@ mod tests {
         // `write_tx` is meant to make unreachable on a write path — answers the
         // bodied 503 rather than an empty 500 if it ever escapes that guard
         // (`infra::http::is_busy`).
-        let api = crate::infra::http::ApiError::from(err);
+        let api = ApiError::from(err);
         assert!(
-            matches!(api, crate::infra::http::ApiError::Busy { .. }),
+            matches!(api, ApiError::Busy { .. }),
             "a failed upgrade is still a busy database, not an internal fault: {api:?}"
         );
     }
@@ -1312,7 +1335,7 @@ mod tests {
             .join("immediate.db")
             .to_string_lossy()
             .to_string();
-        let pool = crate::test_support::file_pool(&path).await;
+        let pool = test_support::file_pool(&path).await;
 
         // The shape every write path has: begin, read, decide, write, commit.
         let mut tx = write_tx(&pool).await.unwrap();
@@ -1328,8 +1351,7 @@ mod tests {
                 .await
         });
 
-        let ran_anyway =
-            tokio::time::timeout(std::time::Duration::from_millis(500), &mut concurrent).await;
+        let ran_anyway = time::timeout(Duration::from_millis(500), &mut concurrent).await;
         assert!(
             ran_anyway.is_err(),
             "the concurrent writer was not held off — this transaction did not take the \
@@ -1438,7 +1460,7 @@ mod tests {
     async fn backup_creates_file() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         // Capture the destination before backing up: `backup` computes its own
         // timestamp internally, so re-deriving the path afterwards could land in
@@ -1505,13 +1527,13 @@ mod tests {
         // takes before `pkg add` (see pkg/freebsd/update.sh).
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         backup(&pool, &db_path, None, None, Some("pre-0.5.1"))
             .await
             .unwrap();
 
-        let made_backup = std::fs::read_dir(dir.path())
+        let made_backup = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .find(|e| {
@@ -1533,7 +1555,7 @@ mod tests {
         // written for any of them.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let cases: &[&str] = &[
             "",
@@ -1555,7 +1577,7 @@ mod tests {
                 "suffix {suffix:?}: expected InvalidSuffix, got {err:?}"
             );
         }
-        let files: Vec<_> = std::fs::read_dir(dir.path())
+        let files: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -1572,7 +1594,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         // A not-yet-existing subdirectory must be created, not fail the job.
         let dest_dir = backup_dir
@@ -1584,7 +1606,7 @@ mod tests {
             .await
             .unwrap();
 
-        let made_backup = std::fs::read_dir(&dest_dir)
+        let made_backup = fs::read_dir(&dest_dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| {
@@ -1593,7 +1615,7 @@ mod tests {
             });
         assert!(made_backup, "expected a timestamped backup in {dest_dir}");
         // And nothing beside the database file.
-        let beside_db = std::fs::read_dir(db_dir.path())
+        let beside_db = fs::read_dir(db_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().starts_with("test-"));
@@ -1613,7 +1635,7 @@ mod tests {
         // database holding exactly the pre-mutation state.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (100, 'keep')")
             .execute(&pool)
             .await
@@ -1632,7 +1654,7 @@ mod tests {
         // Restore: the backup becomes the database file and the server restarts
         // (init runs migrations against it, exactly like a normal startup).
         let restored_path = dir.path().join("restored.db").to_string_lossy().to_string();
-        std::fs::copy(&dest, &restored_path).unwrap();
+        fs::copy(&dest, &restored_path).unwrap();
         let restored = init(&restored_path).await.unwrap();
 
         let names: Vec<String> =
@@ -1683,7 +1705,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (100, 'committed')")
             .execute(&pool)
             .await
@@ -2746,13 +2768,10 @@ mod tests {
 
         // And the row reads back through the model as a renounceable offer, so
         // an action entered before the column behaves exactly as it did.
-        let action = crate::entities::corporate_action::db_get(&pool, 1)
-            .await
-            .unwrap()
-            .unwrap();
+        let action = corporate_action::db_get(&pool, 1).await.unwrap().unwrap();
         assert!(matches!(
             action.kind,
-            crate::entities::corporate_action::ActionKind::RightsIssue {
+            ActionKind::RightsIssue {
                 renounceable: true,
                 ..
             }
@@ -3204,15 +3223,15 @@ mod tests {
 
     #[test]
     fn migrations_do_not_drop_tables_or_columns() {
-        let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-        let entries = std::fs::read_dir(&migrations_dir)
+        let migrations_dir = path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let entries = fs::read_dir(&migrations_dir)
             .expect("migrations dir should exist")
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|x| x == "sql"));
 
         for entry in entries {
             let path = entry.path();
-            let sql = std::fs::read_to_string(&path)
+            let sql = fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("could not read {}", path.display()));
 
             for line in sql.lines() {
@@ -3255,15 +3274,15 @@ mod tests {
         // (arbitrary-precision Decimal). Guard against a future migration
         // reintroducing a REAL column or a lossy CAST(... AS TEXT), which was the
         // source of the historical pre-0006 float-imprecision problem.
-        let migrations_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-        let entries = std::fs::read_dir(&migrations_dir)
+        let migrations_dir = path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let entries = fs::read_dir(&migrations_dir)
             .expect("migrations dir should exist")
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|x| x == "sql"));
 
         for entry in entries {
             let path = entry.path();
-            let sql = std::fs::read_to_string(&path)
+            let sql = fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("could not read {}", path.display()));
 
             for line in sql.lines() {
@@ -3292,16 +3311,16 @@ mod tests {
     async fn backup_does_not_overwrite_existing() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         // Fixed destination so this exercises the skip-if-exists guard directly
         // rather than depending on two `backup` calls landing in the same second.
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
-        let mtime1 = std::fs::metadata(&dest).unwrap().modified().unwrap();
+        let mtime1 = fs::metadata(&dest).unwrap().modified().unwrap();
 
         backup_to(&pool, &dest).await.unwrap();
-        let mtime2 = std::fs::metadata(&dest).unwrap().modified().unwrap();
+        let mtime2 = fs::metadata(&dest).unwrap().modified().unwrap();
 
         assert_eq!(mtime1, mtime2);
     }
@@ -3312,7 +3331,7 @@ mod tests {
         // file under its backup name — no quarantine artefact.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
@@ -3331,7 +3350,7 @@ mod tests {
         // as is named after the backup it would have become.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let dest = dir
             .path()
@@ -3339,7 +3358,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let staging = format!("{dest}{STAGING_SUFFIX}");
-        std::fs::write(&staging, b"this is not a sqlite database at all").unwrap();
+        fs::write(&staging, b"this is not a sqlite database at all").unwrap();
 
         let err = verify_or_quarantine(&pool, &staging, &dest)
             .await
@@ -3368,7 +3387,7 @@ mod tests {
         // not a restorable copy of this database.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let empty = dir.path().join("empty.db").to_string_lossy().to_string();
         let opts = SqliteConnectOptions::from_str(&format!("sqlite:{empty}"))
@@ -3396,7 +3415,7 @@ mod tests {
         // failing the run (`VACUUM INTO` refuses an existing target).
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let dest = dir
             .path()
@@ -3404,7 +3423,7 @@ mod tests {
             .to_string_lossy()
             .to_string();
         let staging = format!("{dest}{STAGING_SUFFIX}");
-        std::fs::write(&staging, b"debris of an interrupted run").unwrap();
+        fs::write(&staging, b"debris of an interrupted run").unwrap();
 
         assert!(backup_to(&pool, &dest).await.unwrap());
 
@@ -3425,23 +3444,23 @@ mod tests {
     }
 
     impl RecordedSteps {
-        fn take(&mut self, step: &'static str, detail: &str) -> std::io::Result<()> {
+        fn take(&mut self, step: &'static str, detail: &str) -> io::Result<()> {
             self.taken.push(format!("{step} {detail}"));
             if self.fail == Some(step) {
-                return Err(std::io::Error::other(format!("{step} failed")));
+                return Err(io::Error::other(format!("{step} failed")));
             }
             Ok(())
         }
     }
 
     impl InstallSteps for RecordedSteps {
-        fn sync_file(&mut self, path: &Path) -> std::io::Result<()> {
+        fn sync_file(&mut self, path: &Path) -> io::Result<()> {
             self.take("sync_file", &path.display().to_string())
         }
-        fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
+        fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
             self.take("rename", &format!("{} -> {}", from.display(), to.display()))
         }
-        fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()> {
+        fn sync_dir(&mut self, dir: &Path) -> io::Result<()> {
             self.take("sync_dir", &dir.display().to_string())
         }
     }
@@ -3488,10 +3507,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let staging = dir.path().join("db.db.partial");
         let dest = dir.path().join("db.db");
-        std::fs::write(&staging, b"copy").unwrap();
+        fs::write(&staging, b"copy").unwrap();
         install(&mut Disk, &staging, &dest).unwrap();
         assert!(!staging.exists());
-        assert_eq!(std::fs::read(&dest).unwrap(), b"copy");
+        assert_eq!(fs::read(&dest).unwrap(), b"copy");
     }
 
     #[tokio::test]
@@ -3514,7 +3533,7 @@ mod tests {
         // staging file were counted at all it would take that month's keeper
         // slot, and the real backup — outside the newest 8 — would be pruned.
         let partial = dir.path().join("test-2025-06-01-000000.db.partial");
-        std::fs::write(&partial, b"half a database").unwrap();
+        fs::write(&partial, b"half a database").unwrap();
         let keeper = dir.path().join("test-2025-06-15-000000.db");
 
         assert!(
@@ -3560,7 +3579,7 @@ mod tests {
             "some-notes.partial",
         ];
         for name in swept_names.iter().chain(bystanders.iter()) {
-            std::fs::write(dir.path().join(name), b"").unwrap();
+            fs::write(dir.path().join(name), b"").unwrap();
         }
 
         let dir_str = dir.path().to_string_lossy().to_string();
@@ -3588,13 +3607,13 @@ mod tests {
                 let path = dir
                     .path()
                     .join(format!("test-2026-01-{:02}-000000.db.bad", week * 4));
-                std::fs::write(&path, b"").unwrap();
+                fs::write(&path, b"").unwrap();
                 path
             })
             .collect();
         let others = ["other-2026-01-04-000000.db.bad", "test-notes.db.bad"];
         for name in others {
-            std::fs::write(dir.path().join(name), b"").unwrap();
+            fs::write(dir.path().join(name), b"").unwrap();
         }
         // A live backup set alongside, so this is the pruner's ordinary run.
         fake_backup(dir.path(), "2026-02-01-000000");
@@ -3621,7 +3640,7 @@ mod tests {
     /// Touch an empty file named as a backup of `test.db` taken at `ts`.
     fn fake_backup(dir: &Path, ts: &str) -> PathBuf {
         let path = dir.join(format!("test-{ts}.db"));
-        std::fs::write(&path, b"").unwrap();
+        fs::write(&path, b"").unwrap();
         path
     }
 
@@ -3629,7 +3648,7 @@ mod tests {
     /// `ts` (e.g. an update.sh pre-upgrade backup).
     fn fake_backup_suffixed(dir: &Path, ts: &str, suffix: &str) -> PathBuf {
         let path = dir.join(format!("test-{ts}-{suffix}.db"));
-        std::fs::write(&path, b"").unwrap();
+        fs::write(&path, b"").unwrap();
         path
     }
 
@@ -3725,9 +3744,9 @@ mod tests {
             "test-2025-13-40-000000.db", // month 13, day 40: not a timestamp
         ];
         for name in bystanders {
-            std::fs::write(dir.path().join(name), b"").unwrap();
+            fs::write(dir.path().join(name), b"").unwrap();
         }
-        std::fs::create_dir(dir.path().join("test-2027-01-01-000000.db")).unwrap();
+        fs::create_dir(dir.path().join("test-2027-01-01-000000.db")).unwrap();
 
         let dir_str = dir.path().to_string_lossy().to_string();
         let deleted = prune_backups("test.db", Some(&dir_str)).unwrap();
@@ -3791,7 +3810,7 @@ mod tests {
         // the live database or its sidecars.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         for i in 0..14 {
             let month = format!("{}-{:02}", 2020 + (i / 12), 1 + (i % 12));
             fake_backup(dir.path(), &format!("{month}-01-000000"));
@@ -3813,7 +3832,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         // 13 pre-existing monthly backups; with the fresh backup that is 14
         // distinct months, so the two oldest keepers roll off.
         for i in 0..13 {
@@ -3836,7 +3855,7 @@ mod tests {
         assert!(!survives("2025-02"));
         assert!(survives("2025-03"));
         let this_month = Local::now().format("%Y-%m").to_string();
-        let fresh = std::fs::read_dir(backup_dir.path())
+        let fresh = fs::read_dir(backup_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| {
@@ -3857,7 +3876,7 @@ mod tests {
         let db_dir = tempfile::tempdir().unwrap();
         let backup_dir = tempfile::tempdir().unwrap();
         let db_path = db_dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         for id in 100..110 {
             sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (?, ?)")
                 .bind(id)
@@ -3871,7 +3890,7 @@ mod tests {
         backup(&pool, &db_path, Some(&dir_str), None, None)
             .await
             .unwrap();
-        let produced = std::fs::read_dir(backup_dir.path())
+        let produced = fs::read_dir(backup_dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
             .find(|e| backup_timestamp(&e.file_name().to_string_lossy(), "test").is_some())
@@ -3884,7 +3903,7 @@ mod tests {
             .join("restored.db")
             .to_string_lossy()
             .to_string();
-        std::fs::copy(&produced, &restored_path).unwrap();
+        fs::copy(&produced, &restored_path).unwrap();
         let restored = init(&restored_path).await.unwrap();
 
         let tables: Vec<String> = sqlx::query_scalar(
@@ -3923,7 +3942,7 @@ mod tests {
         // it to a marker path and asserting the copy's content matches.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let marker = dir.path().join("offsite-copy.db");
         let command = format!("cp {{BACKUP_FILE}} {}", marker.to_string_lossy());
@@ -3944,7 +3963,7 @@ mod tests {
         // fresh backup is safely within the retention window regardless.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         for i in 0..13 {
             let month = format!("{}-{:02}", 2025 + (i / 12), 1 + (i % 12));
             fake_backup(dir.path(), &format!("{month}-01-000000"));
@@ -3970,7 +3989,7 @@ mod tests {
         // already ran when that file was first created.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
 
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
@@ -3979,7 +3998,7 @@ mod tests {
         let command = format!("touch {}", marker.to_string_lossy());
         run_backup_command(&command, &dest).await.unwrap();
         assert!(marker.exists(), "sanity check: the command itself works");
-        std::fs::remove_file(&marker).unwrap();
+        fs::remove_file(&marker).unwrap();
 
         // Second backup_to against the identical dest is the skip path.
         let created = backup_to(&pool, &dest).await.unwrap();
@@ -3993,7 +4012,7 @@ mod tests {
         // when the backup itself is a relative one.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db").to_string_lossy().to_string();
-        let pool = crate::test_support::file_pool(&db_path).await;
+        let pool = test_support::file_pool(&db_path).await;
         let dest = backup_path(&db_path, None, None);
         backup_to(&pool, &dest).await.unwrap();
 
@@ -4001,7 +4020,7 @@ mod tests {
         let command = format!("echo {{BACKUP_FILE}} > {}", marker.to_string_lossy());
         run_backup_command(&command, &dest).await.unwrap();
 
-        let seen = std::fs::read_to_string(&marker).unwrap();
+        let seen = fs::read_to_string(&marker).unwrap();
         assert!(
             Path::new(seen.trim()).is_absolute(),
             "expected an absolute path, got {seen:?}"
@@ -4025,7 +4044,7 @@ mod tests {
             shell_quote(&marker.to_string_lossy()),
             shell_quote(&pidfile.to_string_lossy())
         );
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let err =
             run_backup_command_within(&command, "/nonexistent/b.db", Duration::from_millis(200))
                 .await
@@ -4045,12 +4064,12 @@ mod tests {
 
         // The grandchild was killed with its group: once it no longer exists
         // it can never write the marker, so its absence now is final.
-        let pid = std::fs::read_to_string(&pidfile).expect("the hook recorded the grandchild");
+        let pid = fs::read_to_string(&pidfile).expect("the hook recorded the grandchild");
         let pid = pid.trim().to_owned();
-        crate::test_support::await_condition(|| {
-            !std::process::Command::new("kill")
+        test_support::await_condition(|| {
+            !Command::new("kill")
                 .args(["-0", &pid])
-                .stderr(std::process::Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .expect("kill runs")
                 .success()
@@ -4075,9 +4094,9 @@ mod tests {
     async fn backup_command_receives_a_path_with_shell_metacharacters_as_one_argument() {
         let dir = tempfile::tempdir().unwrap();
         let odd = dir.path().join("my backups; it's $HOME `x` & \"y\"");
-        std::fs::create_dir_all(&odd).unwrap();
+        fs::create_dir_all(&odd).unwrap();
         let dest = odd.join("test-2026-10-10-000000.db");
-        std::fs::write(&dest, b"backup bytes").unwrap();
+        fs::write(&dest, b"backup bytes").unwrap();
 
         let seen = dir.path().join("args-seen.txt");
         let command = format!(
@@ -4090,13 +4109,13 @@ mod tests {
             .await
             .unwrap();
 
-        let abs = std::fs::canonicalize(&dest).unwrap();
-        let lines = std::fs::read_to_string(&seen).unwrap();
+        let abs = fs::canonicalize(&dest).unwrap();
+        let lines = fs::read_to_string(&seen).unwrap();
         let lines: Vec<&str> = lines.lines().collect();
         assert_eq!(lines[1], abs.to_string_lossy(), "the path arrives verbatim");
         assert_eq!(lines[2], "1", "the path is exactly one argument");
         assert_eq!(
-            std::fs::read(dir.path().join("copy.db")).unwrap(),
+            fs::read(dir.path().join("copy.db")).unwrap(),
             b"backup bytes"
         );
     }
@@ -4177,7 +4196,7 @@ mod tests {
         assert!(!logs_contain("sup3r-s3cret"));
         assert!(logs_contain("https://***@example.invalid/offsite.db"));
         // …while the hook received the credential it was configured with.
-        let executed = std::fs::read_to_string(&seen).unwrap();
+        let executed = fs::read_to_string(&seen).unwrap();
         assert_eq!(
             executed, "https://backup-user:sup3r-s3cret@example.invalid/offsite.db",
             "redaction must not change what actually runs"

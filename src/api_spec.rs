@@ -30,7 +30,125 @@
 //! other one, so `require_auth` gates it and `/openapi.json` is deliberately
 //! *not* on that layer's login-page allowlist.
 
+#[cfg(test)]
+use crate::app;
+use crate::entities::amit_adjustment::AmitAdjustment;
+use crate::entities::amit_adjustment::AmitAdjustmentBody;
+use crate::entities::amit_adjustment_generation::GenerateBody;
+use crate::entities::amit_adjustment_generation::GeneratedAdjustments;
+use crate::entities::amma::AmmaStatement;
+use crate::entities::amma::AmmaStatementBody;
+use crate::entities::attachment::Attachment;
+use crate::entities::buyback_participation::Participation;
+use crate::entities::buyback_participation::ParticipationBody;
+use crate::entities::cgt_settings::CgtSettings;
+use crate::entities::cgt_settings::CgtSettingsBody;
+use crate::entities::closing_price::BackfillBody;
+use crate::entities::closing_price::BackfillSummary;
+use crate::entities::closing_price::ClearBody;
+use crate::entities::closing_price::ClearSummary;
+use crate::entities::closing_price::ClosingPrice;
+use crate::entities::closing_price::FetchBody;
+use crate::entities::closing_price::ManualPriceBody;
+use crate::entities::corporate_action::CorporateAction;
+use crate::entities::corporate_action::CorporateActionBody;
+use crate::entities::currencies::Currency;
+use crate::entities::currencies::ImportSummary;
+use crate::entities::demerger::Demerge;
+use crate::entities::distribution_event::DistributionEvent;
+use crate::entities::drp_enrolment::DrpEnrolment;
+use crate::entities::drp_enrolment::DrpEnrolmentBody;
+use crate::entities::drp_reinvestment::ReinvestBody;
+use crate::entities::ess_statement::EssStatement;
+use crate::entities::ess_statement::EssStatementBody;
+use crate::entities::exchange::Exchange;
+use crate::entities::exchange::ExchangeBody;
+use crate::entities::exchange_holiday::ExchangeHoliday;
+use crate::entities::exchange_holiday::ExchangeHolidayBody;
+use crate::entities::holding_account::HoldingAccount;
+use crate::entities::holding_account::HoldingAccountBody;
+use crate::entities::income::Income;
+use crate::entities::income::IncomeBody;
+use crate::entities::inheritance::Inheritance;
+use crate::entities::inheritance::InheritanceBody;
+use crate::entities::interest_income::InterestIncome;
+use crate::entities::interest_income::InterestIncomeBody;
+use crate::entities::investment_expense::InvestmentExpense;
+use crate::entities::investment_expense::InvestmentExpenseBody;
+use crate::entities::listing::Listing;
+use crate::entities::listing::ListingBody;
+use crate::entities::listing_rename::ListingRename;
+use crate::entities::listing_rename::RenameBody;
+use crate::entities::mic_registry;
+use crate::entities::mic_registry::MicEntry;
+use crate::entities::parcel_allocation::ParcelAllocation;
+use crate::entities::rba_fx_rate;
+use crate::entities::rba_fx_rate::CorrectionBody;
+use crate::entities::rba_fx_rate::ImportOutcome;
+use crate::entities::rba_fx_rate::RbaFxRate;
+use crate::entities::rights_exercise::ExerciseBody;
+use crate::entities::rights_sale::RightsSale;
+use crate::entities::rights_sale::SellRightsBody;
+use crate::entities::scrip_exchange;
+use crate::entities::sell::SellBody;
+use crate::entities::tax_year_settings::TaxYearSettings;
+use crate::entities::tax_year_settings::TaxYearSettingsBody;
+use crate::entities::trade::Trade;
+use crate::entities::trade::TradeBody;
+use crate::entities::transfer::Transfer;
+use crate::entities::transfer::TransferBody;
+use crate::entities::transfer::TransferGroup;
+use crate::entities::worthless::Recognise;
+use crate::infra::auth::LoginForm;
+use crate::infra::respond::JavaScript;
+use crate::infra::scheduler::JobStatus;
+use crate::reports::activity::ActivityResponse;
+use crate::reports::amit_adjustment_cross_check::AmitAdjustmentAlert;
+use crate::reports::amit_cash_cross_check::AmitCashAlert;
+use crate::reports::attachments::AttachmentIndexRow;
+use crate::reports::e4_cross_check::E4CrossCheckAlert;
+use crate::reports::franking_at_risk::FrankingAtRiskAlert;
+use crate::reports::franking_at_risk::FrankingWhatIfAlert;
+use crate::reports::fx_coverage::FxCoverageAlert;
+use crate::reports::health::HealthReport;
+use crate::reports::indexation_cross_check::IndexationCrossCheck;
+use crate::reports::mic_validation::ExchangeMicStatus;
+use crate::reports::net_capital_gain::NetCapitalGainYear;
+use crate::reports::net_capital_gain::WhatIfRequest;
+use crate::reports::net_capital_gain::WhatIfResponse;
+use crate::reports::open_parcels::OpenParcel;
+use crate::reports::parcel_optimiser::OptimiserResponse;
+use crate::reports::performance::HoldingPerformance;
+use crate::reports::performance::PerformanceRequest;
+use crate::reports::period_performance::PeriodPerformance;
+use crate::reports::portfolio::HoldingOverview;
+use crate::reports::portfolio::OverviewRequest;
+use crate::reports::realised_gains::RealisedGainLoss;
+use crate::reports::rollover_consistency::RolloverAlert;
+use crate::reports::row_history::RowHistoryResponse;
+use crate::reports::settlement_coverage::SettlementCoverageAlert;
+use crate::reports::snapshot;
+use crate::reports::snapshot::HoldingSeries;
+use crate::reports::snapshot::RegenerateBody;
+use crate::reports::snapshot::RegenerateRange;
+use crate::reports::snapshot::RegenerateSummary;
+use crate::reports::snapshot::SeriesPoint;
+use crate::reports::snapshot::Snapshot;
+use crate::reports::snapshot::SnapshotMeta;
+use crate::reports::tax_report::TaxReport;
+use crate::reports::tax_summary::TaxYearSummary;
+use crate::reports::unrealised_gains::UnrealisedGain;
+use crate::reports::unrealised_gains::UnrealisedGainsRequest;
+use crate::reports::wash_sales::WashSaleAlert;
+use crate::web;
+use axum::http::header;
+use axum::response;
 use axum::{Router, response::IntoResponse};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::iter;
+use std::sync::Arc;
+use utoipa::openapi::ServerBuilder;
 
 use crate::infra::auth::AuthMode;
 use crate::infra::config::BasePath;
@@ -277,7 +395,7 @@ fn operation_id(verb: Verb, path: &str, statuses: &[u16], answers_array: bool) -
             .map(|word| {
                 let mut chars = word.chars();
                 chars.next().map_or(String::new(), |first| {
-                    std::iter::once(first.to_ascii_uppercase())
+                    iter::once(first.to_ascii_uppercase())
                         .chain(chars)
                         .collect()
                 })
@@ -497,7 +615,7 @@ pub fn document() -> OpenApi {
 /// module's own two.
 #[cfg(test)]
 pub fn document_for(base_path: &BasePath, mode: AuthMode) -> OpenApi {
-    let mut generated = crate::app::api_routes(base_path, mode).into_openapi();
+    let mut generated = app::api_routes(base_path, mode).into_openapi();
     generated.merge(own_routes().into_openapi());
     publish(generated, base_path, mode)
 }
@@ -524,19 +642,19 @@ pub fn document_for(base_path: &BasePath, mode: AuthMode) -> OpenApi {
 ///   `/logout` route, so the document cannot advertise one.
 fn publish(generated: OpenApi, base_path: &BasePath, mode: AuthMode) -> OpenApi {
     let mut paths = generated.paths;
-    for (path, _) in crate::web::JS_MODULES {
+    for (path, _) in web::JS_MODULES {
         paths.add_path_operation(
             path,
             vec![HttpMethod::Get],
             OperationBuilder::new()
                 .summary(Some("A served frontend ES module (JavaScript)."))
-                .responses(ResponsesBuilder::new().responses_from_into_responses::<
-                    crate::infra::respond::Payload<crate::infra::respond::JavaScript>,
-                >())
+                .responses(
+                    ResponsesBuilder::new().responses_from_into_responses::<Payload<JavaScript>>(),
+                )
                 .build(),
         );
     }
-    let mut used_tags = std::collections::BTreeSet::new();
+    let mut used_tags = BTreeSet::new();
     for (path, item) in paths.paths.iter_mut() {
         for verb in Verb::ALL {
             if let Some(op) = verb.of(item) {
@@ -566,11 +684,7 @@ fn publish(generated: OpenApi, base_path: &BasePath, mode: AuthMode) -> OpenApi 
         .paths(paths)
         .tags(Some(tags))
         .components(Some(components(generated.components, mode)))
-        .servers(Some(vec![
-            utoipa::openapi::ServerBuilder::new()
-                .url(server_url)
-                .build(),
-        ]));
+        .servers(Some(vec![ServerBuilder::new().url(server_url).build()]));
     match mode {
         AuthMode::Required => {
             builder = builder.security(Some(vec![
@@ -745,8 +859,7 @@ fn non_success_responses(verb: Verb, path: &str, body: Option<bool>) -> Vec<(u16
 /// covers). The `BTreeMap` also makes the merge O(n log n) rather than the
 /// `Vec::iter().find` scan this replaced.
 fn components(generated: Option<Components>, mode: AuthMode) -> Components {
-    let mut by_name: std::collections::BTreeMap<String, RefOr<Schema>> =
-        std::collections::BTreeMap::new();
+    let mut by_name: BTreeMap<String, RefOr<Schema>> = BTreeMap::new();
     for (name, schema) in component_schemas() {
         by_name.entry(name).or_insert(schema);
     }
@@ -761,7 +874,7 @@ fn components(generated: Option<Components>, mode: AuthMode) -> Components {
         // browser carries, and the bearer token the deployment scripts send
         // (`Authorization: Bearer <api_token>`). Named here so a generated
         // client can be configured rather than guessing.
-        let mut schemes = std::collections::BTreeMap::new();
+        let mut schemes = BTreeMap::new();
         schemes.insert(
             "bearerAuth".to_owned(),
             RefOr::T(SecurityScheme::Http(
@@ -805,115 +918,115 @@ macro_rules! components {
 
 components!(
     // Request bodies.
-    crate::entities::listing::ListingBody,
-    crate::entities::trade::TradeBody,
-    crate::entities::sell::SellBody,
-    crate::entities::income::IncomeBody,
-    crate::entities::interest_income::InterestIncomeBody,
-    crate::entities::investment_expense::InvestmentExpenseBody,
-    crate::entities::amma::AmmaStatementBody,
-    crate::entities::amit_adjustment::AmitAdjustmentBody,
-    crate::entities::holding_account::HoldingAccountBody,
-    crate::entities::inheritance::InheritanceBody,
-    crate::entities::drp_enrolment::DrpEnrolmentBody,
-    crate::entities::ess_statement::EssStatementBody,
-    crate::entities::transfer::TransferBody,
-    crate::entities::corporate_action::CorporateActionBody,
-    crate::entities::exchange::ExchangeBody,
-    crate::entities::exchange_holiday::ExchangeHolidayBody,
-    crate::entities::cgt_settings::CgtSettingsBody,
-    crate::entities::tax_year_settings::TaxYearSettingsBody,
-    crate::entities::closing_price::ManualPriceBody,
-    crate::entities::closing_price::FetchBody,
-    crate::entities::closing_price::BackfillBody,
-    crate::entities::closing_price::ClearBody,
-    crate::entities::rba_fx_rate::CorrectionBody,
-    crate::entities::drp_reinvestment::ReinvestBody,
-    crate::entities::listing_rename::RenameBody,
-    crate::entities::rights_exercise::ExerciseBody,
-    crate::entities::rights_sale::SellRightsBody,
-    crate::entities::buyback_participation::ParticipationBody,
-    crate::entities::amit_adjustment_generation::GenerateBody,
-    crate::reports::snapshot::GenerateBody,
-    crate::reports::snapshot::RegenerateBody,
-    crate::reports::portfolio::OverviewRequest,
-    crate::reports::performance::PerformanceRequest,
-    crate::reports::unrealised_gains::UnrealisedGainsRequest,
-    crate::reports::net_capital_gain::WhatIfRequest,
-    crate::infra::auth::LoginForm,
+    ListingBody,
+    TradeBody,
+    SellBody,
+    IncomeBody,
+    InterestIncomeBody,
+    InvestmentExpenseBody,
+    AmmaStatementBody,
+    AmitAdjustmentBody,
+    HoldingAccountBody,
+    InheritanceBody,
+    DrpEnrolmentBody,
+    EssStatementBody,
+    TransferBody,
+    CorporateActionBody,
+    ExchangeBody,
+    ExchangeHolidayBody,
+    CgtSettingsBody,
+    TaxYearSettingsBody,
+    ManualPriceBody,
+    FetchBody,
+    BackfillBody,
+    ClearBody,
+    CorrectionBody,
+    ReinvestBody,
+    RenameBody,
+    ExerciseBody,
+    SellRightsBody,
+    ParticipationBody,
+    GenerateBody,
+    snapshot::GenerateBody,
+    RegenerateBody,
+    OverviewRequest,
+    PerformanceRequest,
+    UnrealisedGainsRequest,
+    WhatIfRequest,
+    LoginForm,
     // Entity rows and operation results.
-    crate::entities::listing::Listing,
-    crate::entities::trade::Trade,
-    crate::entities::transfer::Transfer,
-    crate::entities::transfer::TransferGroup,
-    crate::entities::income::Income,
-    crate::entities::interest_income::InterestIncome,
-    crate::entities::investment_expense::InvestmentExpense,
-    crate::entities::amma::AmmaStatement,
-    crate::entities::amit_adjustment::AmitAdjustment,
-    crate::entities::holding_account::HoldingAccount,
-    crate::entities::inheritance::Inheritance,
-    crate::entities::drp_enrolment::DrpEnrolment,
-    crate::entities::ess_statement::EssStatement,
-    crate::entities::corporate_action::CorporateAction,
-    crate::entities::exchange::Exchange,
-    crate::entities::exchange_holiday::ExchangeHoliday,
-    crate::entities::closing_price::ClosingPrice,
-    crate::entities::cgt_settings::CgtSettings,
-    crate::entities::tax_year_settings::TaxYearSettings,
-    crate::entities::parcel_allocation::ParcelAllocation,
-    crate::entities::attachment::Attachment,
-    crate::entities::distribution_event::DistributionEvent,
-    crate::entities::currencies::Currency,
-    crate::entities::mic_registry::MicEntry,
-    crate::entities::rba_fx_rate::RbaFxRate,
-    crate::entities::rights_sale::RightsSale,
-    crate::entities::listing_rename::ListingRename,
-    crate::infra::scheduler::JobStatus,
-    crate::entities::buyback_participation::Participation,
-    crate::entities::demerger::Demerge,
-    crate::entities::scrip_exchange::Exchange,
-    crate::entities::worthless::Recognise,
-    crate::entities::amit_adjustment_generation::GeneratedAdjustments,
-    crate::entities::closing_price::BackfillSummary,
-    crate::entities::closing_price::ClearSummary,
-    crate::entities::currencies::ImportSummary,
-    crate::entities::mic_registry::ImportSummary,
-    crate::entities::rba_fx_rate::ImportSummary,
+    Listing,
+    Trade,
+    Transfer,
+    TransferGroup,
+    Income,
+    InterestIncome,
+    InvestmentExpense,
+    AmmaStatement,
+    AmitAdjustment,
+    HoldingAccount,
+    Inheritance,
+    DrpEnrolment,
+    EssStatement,
+    CorporateAction,
+    Exchange,
+    ExchangeHoliday,
+    ClosingPrice,
+    CgtSettings,
+    TaxYearSettings,
+    ParcelAllocation,
+    Attachment,
+    DistributionEvent,
+    Currency,
+    MicEntry,
+    RbaFxRate,
+    RightsSale,
+    ListingRename,
+    JobStatus,
+    Participation,
+    Demerge,
+    scrip_exchange::Exchange,
+    Recognise,
+    GeneratedAdjustments,
+    BackfillSummary,
+    ClearSummary,
+    ImportSummary,
+    mic_registry::ImportSummary,
+    rba_fx_rate::ImportSummary,
     // Report responses.
-    crate::reports::portfolio::HoldingOverview,
-    crate::reports::performance::HoldingPerformance,
-    crate::reports::period_performance::PeriodPerformance,
-    crate::reports::activity::ActivityResponse,
-    crate::reports::open_parcels::OpenParcel,
-    crate::reports::unrealised_gains::UnrealisedGain,
-    crate::reports::realised_gains::RealisedGainLoss,
-    crate::reports::net_capital_gain::NetCapitalGainYear,
-    crate::reports::net_capital_gain::WhatIfResponse,
-    crate::reports::parcel_optimiser::OptimiserResponse,
-    crate::reports::tax_summary::TaxYearSummary,
-    crate::reports::mic_validation::ExchangeMicStatus,
-    crate::reports::settlement_coverage::SettlementCoverageAlert,
-    crate::reports::e4_cross_check::E4CrossCheckAlert,
-    crate::reports::indexation_cross_check::IndexationCrossCheck,
-    crate::reports::amit_adjustment_cross_check::AmitAdjustmentAlert,
-    crate::reports::row_history::RowHistoryResponse,
-    crate::reports::rollover_consistency::RolloverAlert,
-    crate::reports::amit_cash_cross_check::AmitCashAlert,
-    crate::reports::wash_sales::WashSaleAlert,
-    crate::reports::franking_at_risk::FrankingAtRiskAlert,
-    crate::reports::franking_at_risk::FrankingWhatIfAlert,
-    crate::reports::fx_coverage::FxCoverageAlert,
-    crate::reports::health::HealthReport,
-    crate::reports::tax_report::TaxReport,
-    crate::reports::attachments::AttachmentIndexRow,
-    crate::reports::snapshot::SnapshotMeta,
-    crate::reports::snapshot::SeriesPoint,
-    crate::reports::snapshot::HoldingSeries,
-    crate::reports::snapshot::RegenerateSummary,
-    crate::entities::rba_fx_rate::ImportOutcome,
-    crate::reports::snapshot::RegenerateRange,
-    crate::reports::snapshot::Snapshot,
+    HoldingOverview,
+    HoldingPerformance,
+    PeriodPerformance,
+    ActivityResponse,
+    OpenParcel,
+    UnrealisedGain,
+    RealisedGainLoss,
+    NetCapitalGainYear,
+    WhatIfResponse,
+    OptimiserResponse,
+    TaxYearSummary,
+    ExchangeMicStatus,
+    SettlementCoverageAlert,
+    E4CrossCheckAlert,
+    IndexationCrossCheck,
+    AmitAdjustmentAlert,
+    RowHistoryResponse,
+    RolloverAlert,
+    AmitCashAlert,
+    WashSaleAlert,
+    FrankingAtRiskAlert,
+    FrankingWhatIfAlert,
+    FxCoverageAlert,
+    HealthReport,
+    TaxReport,
+    AttachmentIndexRow,
+    SnapshotMeta,
+    SeriesPoint,
+    HoldingSeries,
+    RegenerateSummary,
+    ImportOutcome,
+    RegenerateRange,
+    Snapshot,
 );
 
 /// A required string path parameter per `{name}` segment of the path — read
@@ -952,7 +1065,7 @@ pub fn router(generated: OpenApi, base_path: &BasePath, mode: AuthMode) -> Route
     generated.merge(own);
     let published = publish(generated, base_path, mode);
     let document = serde_json::to_value(&published).expect("the document serialises");
-    let served = std::sync::Arc::new(Served {
+    let served = Arc::new(Served {
         whole: document.to_string(),
         index: route_index(&published, base_path),
         document,
@@ -1003,7 +1116,7 @@ pub struct DocumentQuery {
     params(DocumentQuery)
 )]
 async fn serve_document(
-    axum::Extension(served): axum::Extension<std::sync::Arc<Served>>,
+    axum::Extension(served): axum::Extension<Arc<Served>>,
     Query(query): Query<DocumentQuery>,
 ) -> Result<DocumentJson, ApiError> {
     let body = match (query.tag, query.operation) {
@@ -1043,17 +1156,13 @@ async fn serve_document(
 struct DocumentJson(String);
 
 impl IntoResponse for DocumentJson {
-    fn into_response(self) -> axum::response::Response {
-        (
-            [(axum::http::header::CONTENT_TYPE, "application/json")],
-            self.0,
-        )
-            .into_response()
+    fn into_response(self) -> response::Response {
+        ([(header::CONTENT_TYPE, "application/json")], self.0).into_response()
     }
 }
 
 impl utoipa::IntoResponses for DocumentJson {
-    fn responses() -> std::collections::BTreeMap<String, RefOr<Response>> {
+    fn responses() -> BTreeMap<String, RefOr<Response>> {
         ResponsesBuilder::new()
             .response(
                 "200",
@@ -1079,9 +1188,7 @@ impl utoipa::IntoResponses for DocumentJson {
     path = "/openapi/index",
     summary = "The compact route index (text/plain): one line per operation — verb, path, operationId, summary — grouped by tag, each group headed by the request for that tag's slice of /openapi.json."
 )]
-async fn serve_index(
-    axum::Extension(served): axum::Extension<std::sync::Arc<Served>>,
-) -> Payload<PlainText> {
+async fn serve_index(axum::Extension(served): axum::Extension<Arc<Served>>) -> Payload<PlainText> {
     Payload::new("text/plain; charset=utf-8", served.index.clone())
 }
 
@@ -1144,7 +1251,18 @@ pub(crate) fn documented_id_keyed_collection_creates() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities;
+    use crate::infra::http;
+    use crate::reports::row_history;
+    use crate::test_support;
+    use crate::test_support::ApiClient;
+    use crate::web;
+    use axum::http::StatusCode;
     use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+    use std::collections::HashSet;
+    use std::sync::LazyLock;
 
     /// The document under test, as JSON.
     fn doc() -> Value {
@@ -1220,7 +1338,7 @@ mod tests {
     }
 
     /// Every published operation of the auth-on document, in path order.
-    static OPERATIONS: std::sync::LazyLock<Vec<RouteRow>> = std::sync::LazyLock::new(|| {
+    static OPERATIONS: LazyLock<Vec<RouteRow>> = LazyLock::new(|| {
         let doc = doc();
         let mut rows = Vec::new();
         for (path, item) in doc["paths"].as_object().expect("paths is an object") {
@@ -1284,7 +1402,7 @@ mod tests {
     #[test]
     fn every_route_is_registered_through_routes() {
         let needle = format!(".{}(", "route");
-        let mut sites: Vec<String> = crate::test_support::rust_sources()
+        let mut sites: Vec<String> = test_support::rust_sources()
             .iter()
             .filter(|source| source.production.contains(&needle))
             .map(|source| source.path.clone())
@@ -1302,7 +1420,7 @@ mod tests {
              UNDOCUMENTED_REGISTRATIONS"
         );
         let doc = doc();
-        for (path, _) in crate::web::JS_MODULES {
+        for (path, _) in web::JS_MODULES {
             assert!(
                 doc["paths"][path]["get"].is_object(),
                 "the served module {path} is not documented"
@@ -1330,7 +1448,7 @@ mod tests {
                  row's reinvest_trade_id, read at GET /income/{id}",
             ),
         ];
-        let readable: std::collections::BTreeSet<&str> = OPERATIONS
+        let readable: BTreeSet<&str> = OPERATIONS
             .iter()
             .filter(|row| row.0 == Verb::Get)
             .map(|row| row.1.as_str())
@@ -1387,7 +1505,7 @@ mod tests {
                 "the AMIT adjustment rows written for the statement",
             ),
         ];
-        let readable: std::collections::BTreeSet<&str> = OPERATIONS
+        let readable: BTreeSet<&str> = OPERATIONS
             .iter()
             .filter(|row| row.0 == Verb::Get)
             .filter_map(|row| match &row.5 {
@@ -1554,7 +1672,7 @@ mod tests {
             .expect("info.description is a string");
         assert!(description.contains("Errors are never JSON."));
         assert!(description.contains("text/plain; charset=utf-8"));
-        for (code, has_body) in crate::infra::http::documented_error_shapes() {
+        for (code, has_body) in http::documented_error_shapes() {
             if !has_body {
                 continue;
             }
@@ -1646,8 +1764,8 @@ mod tests {
         // The page-size claim, formatted from the consts the handler enforces.
         let bounds = format!(
             "before_id returns entries older than that trail id and limit is 1-{} (default {})",
-            crate::reports::row_history::MAX_BROWSE_LIMIT,
-            crate::reports::row_history::DEFAULT_BROWSE_LIMIT
+            row_history::MAX_BROWSE_LIMIT,
+            row_history::DEFAULT_BROWSE_LIMIT
         );
         assert!(
             description.contains(&bounds),
@@ -1692,7 +1810,7 @@ mod tests {
     #[test]
     fn every_operation_has_a_unique_id_and_one_documented_tag() {
         let api_md = include_str!("../docs/API.md");
-        let sections: std::collections::HashSet<&str> = api_md
+        let sections: HashSet<&str> = api_md
             .lines()
             .filter_map(|line| line.strip_prefix("## "))
             .collect();
@@ -1703,8 +1821,8 @@ mod tests {
             .iter()
             .map(|tag| tag["name"].as_str().expect("a tag has a name"))
             .collect();
-        let mut ids = std::collections::BTreeMap::new();
-        let mut used = std::collections::BTreeSet::new();
+        let mut ids = BTreeMap::new();
+        let mut used = BTreeSet::new();
         let mut operations = 0;
         for (path, item) in doc["paths"].as_object().expect("paths is an object") {
             for (method, op) in item.as_object().expect("a path item is an object") {
@@ -1736,7 +1854,7 @@ mod tests {
             }
         }
         assert!(operations > 150, "only {operations} operations were walked");
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for tag in &listed {
             assert!(seen.insert(tag), "the top-level tags list {tag:?} twice");
             assert!(
@@ -1884,8 +2002,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let mut seen = std::collections::BTreeSet::new();
-        let mut undescribed = std::collections::BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut undescribed = BTreeSet::new();
         let mut checked = 0;
         while let Some(name) = queue.pop() {
             if !seen.insert(name.clone()) {
@@ -2119,8 +2237,7 @@ mod tests {
     #[test]
     fn every_referenced_schema_is_registered_and_uniquely_named() {
         let schemas = component_schemas();
-        let mut by_name: std::collections::BTreeMap<&str, &RefOr<Schema>> =
-            std::collections::BTreeMap::new();
+        let mut by_name: BTreeMap<&str, &RefOr<Schema>> = BTreeMap::new();
         for (name, schema) in &schemas {
             match by_name.get(name.as_str()) {
                 None => {
@@ -2215,7 +2332,7 @@ mod tests {
                 })
                 .unwrap_or_default()
         };
-        for (path, params) in crate::entities::filtered_list_routes() {
+        for (path, params) in entities::filtered_list_routes() {
             let declared = query_names(path, "get");
             for param in params {
                 assert!(
@@ -2449,8 +2566,8 @@ mod tests {
     /// document, through `ApiClient::full` (whose auth-less router serves it).
     #[tokio::test]
     async fn get_openapi_json_serves_the_document() {
-        let pool = crate::test_support::test_pool().await;
-        let client = crate::test_support::ApiClient::full(&pool);
+        let pool = test_support::test_pool().await;
+        let client = ApiClient::full(&pool);
         let body: Value = client.get_json("/openapi.json").await;
         assert_eq!(body["openapi"].as_str(), Some("3.1.0"));
         assert!(body["info"]["title"].is_string());
@@ -2527,7 +2644,7 @@ mod tests {
         expected: &[(String, String)],
         what: &str,
     ) {
-        fn refs(value: &Value, out: &mut std::collections::BTreeSet<String>) {
+        fn refs(value: &Value, out: &mut BTreeSet<String>) {
             match value {
                 Value::Object(map) => {
                     for (key, child) in map {
@@ -2572,7 +2689,7 @@ mod tests {
             "{what}'s top-level tags"
         );
 
-        let mut found = std::collections::BTreeSet::new();
+        let mut found = BTreeSet::new();
         refs(slice, &mut found);
         for reference in &found {
             let name = reference
@@ -2583,7 +2700,7 @@ mod tests {
                 "{what}'s $ref {reference} does not resolve inside it"
             );
         }
-        let carried: std::collections::BTreeSet<String> = slice["components"]["schemas"]
+        let carried: BTreeSet<String> = slice["components"]["schemas"]
             .as_object()
             .expect("schemas")
             .keys()
@@ -2673,8 +2790,8 @@ mod tests {
     /// answers the plain-text index — all through the full application.
     #[tokio::test]
     async fn the_tag_slice_and_the_route_index_are_served() {
-        let pool = crate::test_support::test_pool().await;
-        let client = crate::test_support::ApiClient::full(&pool);
+        let pool = test_support::test_pool().await;
+        let client = ApiClient::full(&pool);
         let slice: Value = client
             .get_json("/openapi.json?tag=Portfolio%20reports")
             .await;
@@ -2686,7 +2803,7 @@ mod tests {
         );
 
         let unknown = client.get("/openapi.json?tag=Nope").await;
-        assert_eq!(unknown.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
         assert!(
             unknown.text().contains("no operation is tagged `Nope`"),
             "{}",
@@ -2695,7 +2812,7 @@ mod tests {
         assert!(unknown.text().contains("Trades"), "{}", unknown.text());
 
         let typo = client.get("/openapi.json?tags=Trades").await;
-        assert_eq!(typo.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(typo.status, StatusCode::BAD_REQUEST);
 
         let one: Value = client.get_json("/openapi.json?operation=createSells").await;
         assert_eq!(
@@ -2704,15 +2821,15 @@ mod tests {
         );
         assert!(one["components"]["schemas"]["SellBody"].is_object());
         let unknown = client.get("/openapi.json?operation=nope").await;
-        assert_eq!(unknown.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
         assert!(unknown.text().contains("`nope`"), "{}", unknown.text());
         let both = client
             .get("/openapi.json?operation=createSells&tag=Sells")
             .await;
-        assert_eq!(both.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(both.status, StatusCode::BAD_REQUEST);
 
         let index = client.get("/openapi/index").await;
-        assert_eq!(index.status, axum::http::StatusCode::OK);
+        assert_eq!(index.status, StatusCode::OK);
         assert_eq!(index.headers["content-type"], "text/plain; charset=utf-8");
         assert!(
             index.text().contains("GET    /trades  listTrades — "),
@@ -2847,7 +2964,7 @@ mod tests {
     /// entity fails until its summary documents it.
     #[test]
     fn every_filtered_list_summary_names_its_filters() {
-        let filtered = crate::entities::filtered_list_routes();
+        let filtered = entities::filtered_list_routes();
         assert!(
             !filtered.is_empty(),
             "the entity filter classification table came back empty"

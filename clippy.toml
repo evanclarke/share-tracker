@@ -12,3 +12,8 @@ disallowed-methods = [
 # a bare `unwrap()` there says nothing about why it cannot fail. A test's
 # `unwrap()` is its assertion, so test code is exempt.
 allow-unwrap-in-tests = true
+
+# `clippy::absolute_paths` (Cargo.toml's `[lints.clippy]`): a path from a crate
+# root may have at most two segments — `fx::to_aud`, `io::Error`,
+# `sqlx::Error` — so anything deeper is imported. No crate is exempt.
+absolute-paths-max-segments = 2

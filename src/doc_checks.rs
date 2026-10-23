@@ -5,6 +5,18 @@
 //! anything about building, configuring or operating the server — and the cited
 //! ATO mirror — is present, so the documented scope cut can't silently vanish.
 
+use crate::api_spec;
+use crate::entities;
+use crate::entities::closing_price;
+use crate::infra::http;
+use crate::reports::snapshot;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fs;
+use std::path;
+use std::path::Component;
+use std::path::PathBuf;
+
 /// A mirrored ATO page as the page itself reads.
 ///
 /// The mirrors escape `$` as `\$` so GitHub does not take a pair of dollar
@@ -397,7 +409,7 @@ fn list_filtering_contract_documented() {
             )
         })
         .collect();
-    let filtered = crate::entities::filtered_list_routes();
+    let filtered = entities::filtered_list_routes();
     for (path, params) in &filtered {
         let label = format!("`{path}`");
         let params_cell = filter_rows
@@ -1079,7 +1091,7 @@ fn created_response_row_names_collection_creates_and_vest() {
     named.dedup();
     assert_eq!(
         named,
-        crate::api_spec::documented_id_keyed_collection_creates(),
+        api_spec::documented_id_keyed_collection_creates(),
         "the `201` row's collection list and the generated document disagree; the row is: {row}"
     );
 }
@@ -1239,7 +1251,7 @@ fn error_bodies_list_names_only_returned_codes() {
     // The codes `ApiError::into_response` answers with a non-empty body,
     // **derived** from the error type's own samples in `infra::http` — not
     // transcribed here, which is how the stale `409` survived.
-    let shapes = crate::infra::http::documented_error_shapes();
+    let shapes = http::documented_error_shapes();
     let mut api_text: Vec<String> = shapes
         .iter()
         .filter(|(_, has_body)| *has_body)
@@ -1408,7 +1420,7 @@ fn error_body_matrix_pins_every_status_and_shape() {
     // The `ApiError` half of the matrix is **derived** from the error type's
     // own samples (via `infra::http`'s one table), so a new variant cannot be
     // documented in the matrix and skipped in the code, or vice versa.
-    let mut expected: Vec<(String, String)> = crate::infra::http::documented_error_shapes()
+    let mut expected: Vec<(String, String)> = http::documented_error_shapes()
         .into_iter()
         .map(|(code, has_body)| {
             (
@@ -3828,12 +3840,12 @@ fn workflows_declare_explicit_token_permissions() {
     assert!(RELEASE_YML.contains("permissions:\n  contents: write"));
     // Any workflow added later declares its own scopes rather than inheriting.
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/.github/workflows");
-    for entry in std::fs::read_dir(dir).expect("workflows dir is readable") {
+    for entry in fs::read_dir(dir).expect("workflows dir is readable") {
         let path = entry.expect("readable dir entry").path();
         if path.extension().is_none_or(|e| e != "yml" && e != "yaml") {
             continue;
         }
-        let body = std::fs::read_to_string(&path).expect("workflow is readable");
+        let body = fs::read_to_string(&path).expect("workflow is readable");
         assert!(
             body.contains("\npermissions:"),
             "{} declares no top-level permissions: block",
@@ -5077,9 +5089,9 @@ fn presale_tools_read_candidates_as_at_the_request_date() {
 /// with the tie between the two windows that forces them to be one number.
 #[test]
 fn price_collection_lookback_window_documented_as_the_constant() {
-    let days = crate::entities::closing_price::COLLECTION_LOOKBACK_DAYS;
+    let days = closing_price::COLLECTION_LOOKBACK_DAYS;
     // One number, not two — so the docs are entitled to state one figure.
-    assert_eq!(crate::reports::snapshot::CATCHUP_LOOKBACK_DAYS, days);
+    assert_eq!(snapshot::CATCHUP_LOOKBACK_DAYS, days);
     let window = format!("last {days} calendar days");
 
     let section = |heading: &str| -> &'static str {
@@ -5306,6 +5318,7 @@ fn amma_coverage_rule_is_documented_with_its_ato_authority() {
 /// config file the package installs.
 mod freebsd_packaging {
     use super::{API_MD, README_MD};
+    use std::process::Command;
 
     const RELEASE_YML: &str = include_str!("../.github/workflows/release.yml");
     const BUILD_SH: &str = include_str!("../pkg/freebsd/build-pkg.sh");
@@ -5366,7 +5379,7 @@ mod freebsd_packaging {
         let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/release-notes.sh");
         let dir = tempfile::tempdir().expect("tempdir");
         let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
+            let out = Command::new("git")
                 .args(args)
                 .current_dir(dir.path())
                 .env("GIT_AUTHOR_NAME", "t")
@@ -5378,7 +5391,7 @@ mod freebsd_packaging {
             assert!(out.status.success(), "git {args:?}: {out:?}");
         };
         let notes = |version: &str| {
-            let out = std::process::Command::new("sh")
+            let out = Command::new("sh")
                 .args([script, version])
                 .current_dir(dir.path())
                 .output()
@@ -5867,9 +5880,9 @@ fn slugify(heading: &str) -> String {
 
 /// The anchors a rendered markdown file offers: one per ATX heading, with
 /// GitHub's `-1`, `-2`, … disambiguating suffix on a repeated slug.
-fn heading_anchors(src: &str) -> std::collections::HashSet<String> {
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut anchors = std::collections::HashSet::new();
+fn heading_anchors(src: &str) -> HashSet<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut anchors = HashSet::new();
     for (_, line) in markdown_lines(src) {
         let hashes = line.chars().take_while(|c| *c == '#').count();
         if hashes == 0 || hashes > 6 || !line[hashes..].starts_with(' ') {
@@ -5940,14 +5953,14 @@ fn markdown_links(src: &str) -> Vec<(usize, String, String)> {
 /// Resolve `rel` against the directory holding the linking file, folding away
 /// `.` and `..` textually — the target may not exist, which is the very thing
 /// being tested, so `canonicalize` is not available.
-fn resolve(from_dir: &std::path::Path, rel: &str) -> std::path::PathBuf {
-    let mut out = std::path::PathBuf::new();
+fn resolve(from_dir: &path::Path, rel: &str) -> PathBuf {
+    let mut out = PathBuf::new();
     for comp in from_dir.join(rel).components() {
         match comp {
-            std::path::Component::ParentDir => {
+            Component::ParentDir => {
                 out.pop();
             }
-            std::path::Component::CurDir => {}
+            Component::CurDir => {}
             c => out.push(c.as_os_str()),
         }
     }
@@ -5967,11 +5980,11 @@ fn resolve(from_dir: &std::path::Path, rel: &str) -> std::path::PathBuf {
 /// dead link until a reader clicks one, so the tree is pinned here instead.
 #[test]
 fn every_markdown_link_resolves() {
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     let mut walk = vec![root.clone()];
     while let Some(dir) = walk.pop() {
-        for entry in std::fs::read_dir(&dir)
+        for entry in fs::read_dir(&dir)
             .expect("repository directories are readable")
             .flatten()
         {
@@ -5996,15 +6009,15 @@ fn every_markdown_link_resolves() {
         files.len()
     );
 
-    let mut anchors = std::collections::HashMap::new();
+    let mut anchors = HashMap::new();
     for path in &files {
-        let src = std::fs::read_to_string(path).expect("markdown is readable");
+        let src = fs::read_to_string(path).expect("markdown is readable");
         anchors.insert(path.clone(), heading_anchors(&src));
     }
 
     let mut offenders = Vec::new();
     for path in &files {
-        let src = std::fs::read_to_string(path).expect("markdown is readable");
+        let src = fs::read_to_string(path).expect("markdown is readable");
         let dir = path.parent().expect("a file has a parent directory");
         let shown = path.strip_prefix(&root).unwrap_or(path).display();
         for (line, text, target) in markdown_links(&src) {

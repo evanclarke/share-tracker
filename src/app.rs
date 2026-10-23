@@ -1,7 +1,21 @@
 //! Assembles the full axum application from the entity, report, and infra
 //! routers. Kept separate from `main` so the wiring is unit-testable.
+use crate::api_spec;
+use crate::entities;
+use crate::infra::auth;
+use crate::infra::auth::AuthState;
+use crate::infra::http;
+use crate::infra::request_guard;
+use crate::infra::request_guard::RequestGuard;
+use crate::infra::security_headers;
+use crate::reports;
+use crate::web;
+use axum::middleware;
+use axum::response::Redirect;
+use axum::routing;
 use axum::{Extension, Router};
 use sqlx::SqlitePool;
+use tower_http::catch_panic::CatchPanicLayer;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::entities::closing_price::SharedFetcher;
@@ -43,21 +57,18 @@ pub fn router(
     allowed_hosts: &[String],
 ) -> Router {
     let mode = AuthMode::of(auth.as_ref());
-    let guard = crate::infra::request_guard::RequestGuard::new(mode, allowed_hosts);
+    let guard = RequestGuard::new(mode, allowed_hosts);
     // One registration per route: `split_for_parts` hands back the axum router
     // and the OpenAPI operations utoipa generated from the very same
     // `#[utoipa::path]` handlers, which `api_spec` completes into the served
     // document — so a route cannot be served undocumented, or documented
     // unserved.
     let (app, generated) = api_routes(base_path, mode).split_for_parts();
-    let mut app = app.merge(crate::api_spec::router(generated, base_path, mode));
+    let mut app = app.merge(api_spec::router(generated, base_path, mode));
     if let Some(auth) = &auth {
         // What the login routes need — the credential and the base path the
         // redirects are built from — as the extension their handlers read.
-        app = app.layer(Extension(crate::infra::auth::AuthState::new(
-            auth.clone(),
-            base_path.clone(),
-        )));
+        app = app.layer(Extension(AuthState::new(auth.clone(), base_path.clone())));
     }
     let app = app
         .with_state(pool)
@@ -70,9 +81,9 @@ pub fn router(
     // path, matching the plain `"/login"`/`"/static/style.css"` strings its
     // allowlist checks against.
     let app = match auth {
-        Some(auth) => app.layer(axum::middleware::from_fn_with_state(
-            crate::infra::auth::AuthState::new(auth, base_path.clone()),
-            crate::infra::auth::require_auth,
+        Some(auth) => app.layer(middleware::from_fn_with_state(
+            AuthState::new(auth, base_path.clone()),
+            auth::require_auth,
         )),
         None => app,
     };
@@ -90,11 +101,11 @@ pub fn router(
     let app = Router::new()
         .route(
             &format!("{base_path}/"),
-            axum::routing::any({
+            routing::any({
                 let target = base_path.to_string();
                 move || {
                     let target = target.clone();
-                    async move { axum::response::Redirect::temporary(&target) }
+                    async move { Redirect::temporary(&target) }
                 }
             }),
         )
@@ -109,12 +120,12 @@ pub fn router(
 /// [`AuthState`](crate::infra::auth::AuthState) they read, which [`router`]
 /// layers on, so the document can be generated without a credential.
 pub fn api_routes(base_path: &BasePath, mode: AuthMode) -> OpenApiRouter<SqlitePool> {
-    let routes = crate::entities::router()
-        .merge(crate::reports::router())
+    let routes = entities::router()
+        .merge(reports::router())
         .merge(scheduler::router())
-        .merge(crate::web::router(base_path, mode));
+        .merge(web::router(base_path, mode));
     match mode {
-        AuthMode::Required => routes.merge(crate::infra::auth::routes()),
+        AuthMode::Required => routes.merge(auth::routes()),
         AuthMode::Open => routes,
     }
 }
@@ -126,14 +137,9 @@ pub fn api_routes(base_path: &BasePath, mode: AuthMode) -> OpenApiRouter<SqliteP
 ///
 /// Outside the guard in turn sit the browser-hardening response headers
 /// ([`crate::infra::security_headers`]), so a refusal carries them too.
-fn guarded(app: Router, guard: crate::infra::request_guard::RequestGuard) -> Router {
-    app.layer(axum::middleware::from_fn_with_state(
-        guard,
-        crate::infra::request_guard::guard,
-    ))
-    .layer(axum::middleware::map_response(
-        crate::infra::security_headers::apply,
-    ))
+fn guarded(app: Router, guard: RequestGuard) -> Router {
+    app.layer(middleware::from_fn_with_state(guard, request_guard::guard))
+        .layer(middleware::map_response(security_headers::apply))
 }
 
 /// The outermost layer of both shapes [`router`] returns: a panicking handler
@@ -152,16 +158,23 @@ fn guarded(app: Router, guard: crate::infra::request_guard::RequestGuard) -> Rou
 /// A panic is still a bug, not a supported outcome: this is the net under the
 /// arithmetic fixes, not a substitute for them.
 fn catching_panics(app: Router) -> Router {
-    app.layer(tower_http::catch_panic::CatchPanicLayer::custom(
-        crate::infra::http::panic_response,
-    ))
+    app.layer(CatchPanicLayer::custom(http::panic_response))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::distribution_event::test_support::DistributionStub;
     use crate::infra::auth::{Auth, CookieSecurity};
+    use crate::infra::config::BasePath;
+    use crate::infra::scheduler;
+    use crate::test_support;
+    use crate::test_support::ApiResponse;
     use crate::test_support::{ApiClient, TEST_PASSWORD, test_pool};
+    use crate::web;
     use axum::http::StatusCode;
+    use axum::http::header;
+    use axum::routing;
     use sqlx::SqlitePool;
 
     /// The full application mounted under a reverse-proxy prefix, as `main`
@@ -169,18 +182,18 @@ mod tests {
     /// parameter — `None` for the base-path-only tests below,
     /// `Some` for the one combining a prefix with `[auth]` configured.
     fn prefixed(pool: &SqlitePool, auth: Option<Auth>) -> ApiClient {
-        let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
-        let registry = crate::infra::scheduler::registry(
+        let fetcher = QuoteStub::default().shared();
+        let registry = scheduler::registry(
             pool.clone(),
             ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
-            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            DistributionStub::default().shared(),
             None,
         );
         ApiClient::over(super::router(
-            &crate::infra::config::BasePath::of("/share_tracker"),
+            &BasePath::of("/share_tracker"),
             pool.clone(),
             registry,
             fetcher,
@@ -206,8 +219,7 @@ mod tests {
         async fn boom() -> StatusCode {
             panic!("deliberate panic in a test route")
         }
-        let app =
-            super::catching_panics(axum::Router::new().route("/boom", axum::routing::get(boom)));
+        let app = super::catching_panics(axum::Router::new().route("/boom", routing::get(boom)));
 
         let resp = ApiClient::over(app).get("/boom").await;
         assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -231,12 +243,12 @@ mod tests {
     #[tokio::test]
     async fn an_unrepresentable_parcel_cost_base_is_a_500_not_a_dead_connection() {
         let pool = test_pool().await;
-        crate::test_support::listing(9).insert(&pool).await;
-        crate::test_support::insert_parcel_bypassing_checks(
+        test_support::listing(9).insert(&pool).await;
+        test_support::insert_parcel_bypassing_checks(
             &pool,
             9600,
             9,
-            crate::test_support::ymd(2024, 3, 15),
+            test_support::ymd(2024, 3, 15),
             "1000000000000000",
             "1000000000000000",
         )
@@ -266,7 +278,7 @@ mod tests {
         let resp = client.get("/share_tracker/").await;
         assert_eq!(resp.status, StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(
-            resp.headers.get(axum::http::header::LOCATION).unwrap(),
+            resp.headers.get(header::LOCATION).unwrap(),
             "/share_tracker"
         );
         // A static asset, an entity route, a report route, the scheduler
@@ -323,7 +335,7 @@ mod tests {
     /// the unauthenticated refusal in front of everything else.
     #[tokio::test]
     async fn every_response_refuses_to_be_framed() {
-        fn assert_hardened(resp: &crate::test_support::ApiResponse, what: &str) {
+        fn assert_hardened(resp: &ApiResponse, what: &str) {
             let header = |name| {
                 resp.headers
                     .get(name)
@@ -379,7 +391,7 @@ mod tests {
         let login = gated.get("/share_tracker/login").await;
         let shell = ApiClient::full(&pool).get("/").await;
         for resp in [&login, &shell] {
-            assert!(resp.text().contains(crate::web::THEME_BOOT_SCRIPT));
+            assert!(resp.text().contains(web::THEME_BOOT_SCRIPT));
             let csp = resp.headers["content-security-policy"].to_str().unwrap();
             assert!(csp.contains("script-src 'self' 'sha256-"), "{csp}");
         }
@@ -391,8 +403,8 @@ mod tests {
     #[tokio::test]
     async fn an_attachment_may_be_framed_by_the_app_itself() {
         let pool = test_pool().await;
-        crate::test_support::listing(1).insert(&pool).await;
-        crate::test_support::buy(1, 1).insert(&pool).await;
+        test_support::listing(1).insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
         let boundary = "X-TEST-BOUNDARY";
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"trade_id\"\r\n\r\n1\r\n\
@@ -447,7 +459,7 @@ mod tests {
         let resp = client.get("/share_tracker/listings").await;
         assert_eq!(resp.status, StatusCode::SEE_OTHER);
         assert_eq!(
-            resp.headers.get(axum::http::header::LOCATION).unwrap(),
+            resp.headers.get(header::LOCATION).unwrap(),
             "/share_tracker/login"
         );
 
@@ -460,12 +472,12 @@ mod tests {
             .await;
         assert_eq!(login.status, StatusCode::SEE_OTHER);
         assert_eq!(
-            login.headers.get(axum::http::header::LOCATION).unwrap(),
+            login.headers.get(header::LOCATION).unwrap(),
             "/share_tracker"
         );
         let set_cookie = login
             .headers
-            .get(axum::http::header::SET_COOKIE)
+            .get(header::SET_COOKIE)
             .unwrap()
             .to_str()
             .unwrap();
@@ -510,7 +522,7 @@ mod tests {
             .await;
         let cookie = login
             .headers
-            .get(axum::http::header::SET_COOKIE)
+            .get(header::SET_COOKIE)
             .unwrap()
             .to_str()
             .unwrap()
@@ -615,7 +627,7 @@ mod tests {
         };
         let ident = |c: char| c.is_alphanumeric() || c == '_';
         let mut found = Vec::new();
-        for source in crate::test_support::rust_sources() {
+        for source in test_support::rust_sources() {
             if test_only(&source.path) {
                 continue;
             }
@@ -776,7 +788,7 @@ mod tests {
     /// schedule file into entries) are not constructors and are not flagged.
     #[test]
     fn no_type_has_an_inherent_parse_method_instead_of_from_str() {
-        let found: Vec<_> = crate::test_support::rust_sources()
+        let found: Vec<_> = test_support::rust_sources()
             .iter()
             .flat_map(|source| {
                 inherent_parse_methods(&source.code)

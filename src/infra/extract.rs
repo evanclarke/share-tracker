@@ -25,10 +25,12 @@
 //! `infra::extract::tests::no_handler_takes_axums_own_query_or_json` keeps
 //! every route on these: a module that imports axum's `Json` or `Query`
 //! directly fails it.
+use axum::extract;
 use axum::extract::{FromRequest, FromRequestParts, OptionalFromRequest, Request};
 use axum::http::{StatusCode, request::Parts};
 use axum::response::{IntoResponse, Response};
 use serde::{Serialize, de::DeserializeOwned};
+use std::error;
 
 /// A query string decoded into `T`, refused `400` naming why when it cannot be.
 #[derive(Debug, Clone, Copy, Default)]
@@ -44,7 +46,7 @@ pub struct Json<T>(pub T);
 /// rejection's *source* — serde's message, path included — rather than its
 /// `Display`, which prefixes axum's own wording; a rejection with no source
 /// (the missing content type) has only its body text to give.
-fn rejected(status: StatusCode, part: &str, rejection: &dyn std::error::Error) -> Response {
+fn rejected(status: StatusCode, part: &str, rejection: &dyn error::Error) -> Response {
     let reason = rejection
         .source()
         .map(|source| source.to_string())
@@ -60,9 +62,9 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        axum::extract::Query::<T>::from_request_parts(parts, state)
+        extract::Query::<T>::from_request_parts(parts, state)
             .await
-            .map(|axum::extract::Query(value)| Query(value))
+            .map(|extract::Query(value)| Query(value))
             .map_err(|e| rejected(StatusCode::BAD_REQUEST, "query string", &e))
     }
 }

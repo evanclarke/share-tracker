@@ -210,8 +210,22 @@ async fn style_css() -> Payload<Css> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::distribution_event::test_support::DistributionStub;
+    use crate::entities::trade;
+    use crate::infra::scheduler;
+    use crate::reports::activity::RecordTable;
+    use crate::reports::fx_coverage;
+    use crate::reports::parcel_optimiser;
+    use crate::reports::row_history;
+    use crate::test_support;
+    use crate::test_support::SourceFile;
     use crate::test_support::{ApiClient, ApiResponse, test_pool};
     use axum::http::StatusCode;
+    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path;
 
     #[test]
     fn fill_template_never_rescans_a_substituted_value() {
@@ -376,8 +390,8 @@ mod tests {
     // table, or a new module missing from it, fails here.
     #[test]
     fn js_test_files_are_not_served_and_every_module_is() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web");
-        for entry in std::fs::read_dir(dir).expect("src/web exists") {
+        let dir = path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/web");
+        for entry in fs::read_dir(dir).expect("src/web exists") {
             let name = entry.expect("readable dir entry").file_name();
             let name = name.to_str().expect("utf-8 filename");
             if !name.ends_with(".js") {
@@ -2257,7 +2271,7 @@ mod tests {
         // copy — so an operation's new provenance column fails here until the
         // UI labels it, instead of its trades silently reading as entered
         // directly.
-        for p in crate::entities::trade::TRADE_PROVENANCE {
+        for p in trade::TRADE_PROVENANCE {
             assert!(
                 js.contains(&format!("t.{} != null", p.column)),
                 "tradeOrigin never tests provenance column {} — its trades would \
@@ -3313,7 +3327,7 @@ mod tests {
             .find("const ACTIVITY_RECORD_ROUTES = {")
             .expect("the record route map");
         let map = &config[start..start + config[start..].find("\n};").unwrap()];
-        for table in crate::reports::activity::RecordTable::ALL {
+        for table in RecordTable::ALL {
             let key = serde_json::to_value(table).unwrap();
             let key = key.as_str().unwrap();
             assert!(
@@ -3343,7 +3357,7 @@ mod tests {
             .find("const FX_COVERAGE_RECORD_ROUTES = {")
             .expect("the FX Coverage record route map");
         let map = &config[start..start + config[start..].find("\n};").unwrap()];
-        for (record, _) in crate::reports::fx_coverage::SOURCES {
+        for (record, _) in fx_coverage::SOURCES {
             assert!(
                 map.contains(&format!("\n  '{record}': function")),
                 "no FX Coverage route for record {record}"
@@ -3664,16 +3678,16 @@ mod tests {
     #[tokio::test]
     async fn every_registered_job_is_described_on_the_jobs_screen() {
         let js = app_js_body().await;
-        let pool = crate::test_support::test_pool().await;
-        let registry = crate::infra::scheduler::registry(
+        let pool = test_support::test_pool().await;
+        let registry = scheduler::registry(
             pool,
             // Only the backup job's *body* reads the path; registration never
             // touches it, and no job runs in this test.
             "unused.db".to_owned(),
             None,
             None,
-            crate::entities::closing_price::test_support::QuoteStub::default().shared(),
-            crate::entities::distribution_event::test_support::DistributionStub::default().shared(),
+            QuoteStub::default().shared(),
+            DistributionStub::default().shared(),
             None,
         );
         assert!(!registry.is_empty(), "the registry registers jobs");
@@ -4028,7 +4042,7 @@ mod tests {
         // action type cannot reach the form without one. The picker that
         // offers them is pinned to the same list by
         // `select_option_lists_are_pinned_to_their_server_side_source`.
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         for action_type in schema_check_values(&pool, "corporate_actions", "action_type").await {
             assert!(
                 js.contains(&format!("{action_type}: [")),
@@ -4040,13 +4054,13 @@ mod tests {
     /// Every `sel(name, label, options, …)` picker in `config.js`, as field
     /// name → the values its options submit. An option list is either plain
     /// strings or `{ value, label }` objects; both yield the values.
-    fn config_select_options() -> std::collections::BTreeMap<String, Vec<String>> {
+    fn config_select_options() -> BTreeMap<String, Vec<String>> {
         let config = JS_MODULES
             .iter()
             .find(|(path, _)| *path == "/static/config.js")
             .expect("config.js is served")
             .1;
-        let mut pickers = std::collections::BTreeMap::new();
+        let mut pickers = BTreeMap::new();
         // `sel('` rather than `sel(`: a field name is always a literal, and
         // the only other `sel` in the tree is `populateSelect`'s parameter in
         // forms.js.
@@ -4126,9 +4140,9 @@ mod tests {
     /// cannot ship unpinned.
     #[tokio::test]
     async fn select_option_lists_are_pinned_to_their_server_side_source() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let pickers = config_select_options();
-        let mut classified: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        let mut classified: BTreeSet<&str> = BTreeSet::new();
         // Order is a UI choice (the pickers happen to follow their schema
         // order); membership is what must match.
         let mut check = |field: &'static str, mut expected: Vec<String>| {
@@ -4163,7 +4177,7 @@ mod tests {
         // migration's trigger set (`reports::row_history`).
         check(
             "table",
-            crate::reports::row_history::AUDITED_TABLES
+            row_history::AUDITED_TABLES
                 .iter()
                 .map(|t| (*t).to_owned())
                 .collect(),
@@ -4173,7 +4187,7 @@ mod tests {
         // picker is checked against the wire names rather than the variants.
         check(
             "strategy",
-            crate::reports::parcel_optimiser::ALL_STRATEGIES
+            parcel_optimiser::ALL_STRATEGIES
                 .iter()
                 .map(|s| {
                     serde_json::to_value(s)
@@ -4205,10 +4219,7 @@ mod tests {
 
         assert_eq!(
             classified,
-            pickers
-                .keys()
-                .map(String::as_str)
-                .collect::<std::collections::BTreeSet<_>>(),
+            pickers.keys().map(String::as_str).collect::<BTreeSet<_>>(),
             "every sel() picker must be pinned to the list it copies — classify the new one above"
         );
     }
@@ -4256,7 +4267,7 @@ mod tests {
     /// fails this test until the banner renders it or it is classified above.
     #[tokio::test]
     async fn health_banner_renders_every_field_of_the_health_report() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let report: serde_json::Value = ApiClient::full(&pool).get_json("/reports/health").await;
         let fields = report
             .as_object()
@@ -4507,7 +4518,7 @@ mod tests {
     /// `#[cfg(test)]`-only top-level modules (`test_support`, `doc_checks`,
     /// `ato_examples`) are skipped: their fixtures reach no browser.
     fn wire_decimals() -> Vec<WireDecimal> {
-        let sources = crate::test_support::rust_sources();
+        let sources = test_support::rust_sources();
         let main_rs = sources
             .iter()
             .find(|source| source.path == "main.rs")
@@ -4522,7 +4533,7 @@ mod tests {
             .collect();
 
         let mut found = Vec::new();
-        for crate::test_support::SourceFile {
+        for SourceFile {
             path: file,
             raw: body,
             ..
@@ -4625,7 +4636,7 @@ mod tests {
     /// [...])` list in `util.js`, mapped to its kind. Comment lines are
     /// dropped first — they contain apostrophes, which would otherwise pair
     /// off with the name literals around them.
-    fn column_kinds() -> std::collections::BTreeMap<String, String> {
+    fn column_kinds() -> BTreeMap<String, String> {
         let util = JS_MODULES
             .iter()
             .find(|(path, _)| *path == "/static/util.js")
@@ -4645,7 +4656,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let mut kinds = std::collections::BTreeMap::new();
+        let mut kinds = BTreeMap::new();
         let mut rest = code.as_str();
         while let Some((_, after)) = rest.split_once("set('") {
             let (kind, after) = after.split_once('\'').expect("the kind literal closes");

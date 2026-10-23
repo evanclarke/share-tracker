@@ -10,7 +10,10 @@ use super::schedule::ScheduleEntry;
 use chrono::{DateTime, TimeZone, Utc};
 use croner::Cron;
 use sqlx::SqlitePool;
+use std::fmt;
 use std::{sync::Arc, time::Duration};
+use tokio::task::JoinError;
+use tokio::time;
 
 /// Run a single job once, bracketing it with an INFO `job started` line and an
 /// INFO `job finished` line (the latter carries `ok` = whether it succeeded).
@@ -68,7 +71,7 @@ pub(super) async fn run_job(
 /// payload when it carried a string (`panic!("…")`, `expect`, an index out of
 /// bounds — every panic the code itself raises), else a plain statement that it
 /// panicked. A cancelled task cannot reach here: nothing aborts a run.
-fn join_failure(e: tokio::task::JoinError) -> String {
+fn join_failure(e: JoinError) -> String {
     if !e.is_panic() {
         return format!("job task ended unexpectedly: {e}");
     }
@@ -208,7 +211,7 @@ pub(super) async fn run_entry<Z>(
     now: impl Fn() -> DateTime<Z> + Send + 'static,
 ) where
     Z: TimeZone + Send + 'static,
-    Z::Offset: std::fmt::Display + Send,
+    Z::Offset: fmt::Display + Send,
 {
     let ScheduleEntry { cron, name, .. } = &entry;
     let mut stored = StoredSchedule::new(&entry);
@@ -228,7 +231,7 @@ pub(super) async fn run_entry<Z>(
             "next run scheduled"
         );
         while delay > MAX_SLEEP {
-            tokio::time::sleep(MAX_SLEEP).await;
+            time::sleep(MAX_SLEEP).await;
             delay = match next_run(cron, now()) {
                 // Re-stored as well as re-slept: a wall-clock shift mid-wait
                 // moves the target, and a stored instant left at the old one
@@ -245,7 +248,7 @@ pub(super) async fn run_entry<Z>(
                 }
             };
         }
-        tokio::time::sleep(delay).await;
+        time::sleep(delay).await;
         // A scheduled run always uses the default (unsuffixed) params — a
         // suffix labels a deliberate one-off backup, not the weekly run.
         if let Err(e) = run_job(&pool, name, &job, JobParams::default()).await {
