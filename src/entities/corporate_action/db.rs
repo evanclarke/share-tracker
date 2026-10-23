@@ -626,7 +626,8 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists_opt::<CorporateAction, _>(&mut *tx, id).await?;
+    let outcome =
+        http::Upsert::of(http::crud_exists_opt::<CorporateAction, _>(&mut *tx, id).await?);
 
     // An action that exercise, participation, exchange, or demerge trades
     // were validated against is frozen: editing its terms (or re-typing it)
@@ -888,7 +889,7 @@ async fn write(
     }
 
     let upserted =
-        http::crud_upserted::<CorporateAction, _>(&mut *tx, existed, assigned_id).await?;
+        http::crud_upserted::<CorporateAction, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

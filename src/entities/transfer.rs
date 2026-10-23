@@ -884,7 +884,7 @@ async fn create(
     Json(body): Json<TransferBody>,
 ) -> Result<Written<TransferGroup>, ApiError> {
     let group = write(&pool, None, &body, query.mode()).await?;
-    Ok(Written::new(query.dry_run, group))
+    Ok(Written::new(query.mode(), group))
 }
 
 #[utoipa::path(

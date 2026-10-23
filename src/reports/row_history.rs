@@ -167,15 +167,6 @@ struct Occupants {
 }
 
 impl Occupants {
-    fn new(occupied: bool, reusable: bool) -> Self {
-        Self {
-            occupant: 1,
-            occupied,
-            reusable,
-            seen_any: false,
-        }
-    }
-
     /// The occupant the next (older) entry belongs to, and whether that
     /// occupant is the record holding the id now.
     fn next(&mut self, operation: &str) -> (i64, bool) {
@@ -310,7 +301,14 @@ pub async fn db_row_history(
     .await?;
     tx.commit().await?;
 
-    let mut occupants = Occupants::new(occupied, audited.is_some_and(|t| t.key_is_reusable));
+    // A struct literal rather than a constructor: its two flags are the same
+    // type and would swap silently as positional arguments.
+    let mut occupants = Occupants {
+        occupant: 1,
+        occupied,
+        reusable: audited.is_some_and(|t| t.key_is_reusable),
+        seen_any: false,
+    };
     rows.iter()
         .map(|row| {
             let mut entry = Map::new();

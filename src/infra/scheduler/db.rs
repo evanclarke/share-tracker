@@ -9,6 +9,7 @@
 //! and rewrites it every iteration, so a task that has died leaves a row that
 //! ages (SCENARIOS T-11/T-02/T-12).
 
+use super::registry::JobOutcome;
 use crate::infra::db::write_tx;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -35,13 +36,21 @@ pub enum JobRunStatus {
 }
 
 impl JobRunStatus {
-    /// The finished state for a run that returned `Ok`/`Err`.
-    fn finished(success: bool) -> Self {
-        if success {
-            JobRunStatus::Ok
-        } else {
-            JobRunStatus::Failed
+    /// The finished state for a run that returned `outcome`.
+    fn finished(outcome: &JobOutcome) -> Self {
+        match outcome {
+            Ok(_) => JobRunStatus::Ok,
+            Err(_) => JobRunStatus::Failed,
         }
+    }
+}
+
+/// The `error` and `note` columns of a finished run: the failure's message, or
+/// the note qualifying a success (see [`JobRunRecord`]) — never both.
+fn error_and_note(outcome: &JobOutcome) -> (Option<&str>, Option<&str>) {
+    match outcome {
+        Ok(note) => (None, note.as_deref()),
+        Err(error) => (Some(error.as_str()), None),
     }
 }
 
@@ -118,16 +127,15 @@ pub(super) async fn db_finish_run(
     pool: &SqlitePool,
     id: i64,
     finished_at: &str,
-    success: bool,
-    error: Option<&str>,
-    note: Option<&str>,
+    outcome: &JobOutcome,
 ) -> Result<(), sqlx::Error> {
+    let (error, note) = error_and_note(outcome);
     let updated = sqlx::query(
         "UPDATE job_runs SET finished_at = ?, status = ?, error = ?, note = ? \
          WHERE id = ? AND status = 'running'",
     )
     .bind(finished_at)
-    .bind(JobRunStatus::finished(success))
+    .bind(JobRunStatus::finished(outcome))
     .bind(error)
     .bind(note)
     .bind(id)
@@ -149,10 +157,9 @@ pub(super) async fn db_record_run(
     name: &str,
     started_at: &str,
     finished_at: &str,
-    success: bool,
-    error: Option<&str>,
-    note: Option<&str>,
+    outcome: &JobOutcome,
 ) -> Result<(), sqlx::Error> {
+    let (error, note) = error_and_note(outcome);
     let mut tx = write_tx(pool).await?;
     sqlx::query(
         "INSERT INTO job_runs (name, started_at, finished_at, status, error, note) \
@@ -161,7 +168,7 @@ pub(super) async fn db_record_run(
     .bind(name)
     .bind(started_at)
     .bind(finished_at)
-    .bind(JobRunStatus::finished(success))
+    .bind(JobRunStatus::finished(outcome))
     .bind(error)
     .bind(note)
     .execute(&mut *tx)

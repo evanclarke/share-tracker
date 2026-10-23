@@ -253,7 +253,7 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists_opt::<DrpEnrolment, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<DrpEnrolment, _>(&mut *tx, id).await?);
 
     // Half-open [start, end) overlap test against the (listing, holding
     // account)'s other periods — the same listing's periods in *another*
@@ -309,7 +309,7 @@ async fn write(
 
     recompute_residuals(&mut tx, period).await?;
 
-    let upserted = http::crud_upserted::<DrpEnrolment, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<DrpEnrolment, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }
@@ -579,10 +579,8 @@ async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<NoContent, ApiError> {
-    http::deleted(
-        db_delete(&pool, id).await?,
-        <DrpEnrolment as CrudEntity>::NOUN,
-    )
+    let found = db_delete(&pool, id).await?;
+    http::deleted(found, <DrpEnrolment as CrudEntity>::NOUN)
 }
 
 impl From<UpsertError> for ApiError {

@@ -28,7 +28,7 @@
 use crate::domain::open_parcels;
 use crate::entities::amit_adjustment::{self, AmitAdjustment, AmitAdjustmentBody};
 use crate::entities::corporate_action;
-use crate::infra::db::write_tx;
+use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
@@ -59,6 +59,20 @@ pub struct GenerateBody {
     /// check, not a weaker one.
     #[serde(default)]
     pub preview: bool,
+}
+
+impl GenerateBody {
+    /// How the generation's transaction ends: a `preview` is a
+    /// [`WriteMode::DryRun`] — and, unlike the `?dry_run=true` writes, one
+    /// that skips the rows' INSERTs as well as rolling back (see
+    /// [`UNASSIGNED_ID`]).
+    pub fn mode(&self) -> WriteMode {
+        if self.preview {
+            WriteMode::DryRun
+        } else {
+            WriteMode::Commit
+        }
+    }
 }
 
 #[derive(utoipa::ToSchema, Debug, Serialize)]
@@ -288,14 +302,13 @@ pub const UNASSIGNED_ID: i64 = 0;
 /// carried on the row so a list of the rows adds up to that total.
 async fn write_or_preview(
     conn: &mut sqlx::SqliteConnection,
-    preview: bool,
+    mode: WriteMode,
     fields: AmitAdjustmentBody,
     units_adjusted: Decimal,
 ) -> Result<GeneratedAdjustment, amit_adjustment::UpsertError> {
-    let id = if preview {
-        UNASSIGNED_ID
-    } else {
-        amit_adjustment::db_insert_on(&mut *conn, &fields).await?
+    let id = match mode {
+        WriteMode::Commit => amit_adjustment::db_insert_on(&mut *conn, &fields).await?,
+        WriteMode::DryRun => UNASSIGNED_ID,
     };
     Ok(GeneratedAdjustment {
         adjustment: AmitAdjustment {
@@ -328,7 +341,7 @@ struct Holding {
 struct Placement<'a> {
     statement_id: i64,
     year_end: NaiveDate,
-    preview: bool,
+    mode: WriteMode,
     splits: &'a [corporate_action::SplitEvent],
     created: Vec<GeneratedAdjustment>,
     units_adjusted: Decimal,
@@ -424,7 +437,7 @@ impl Placement<'_> {
                 .quantity();
                 let adjustment = write_or_preview(
                     &mut *conn,
-                    self.preview,
+                    self.mode,
                     AmitAdjustmentBody {
                         amma_statement_id: self.statement_id,
                         trade_id: holding.id,
@@ -507,7 +520,7 @@ pub async fn db_generate(
     let mut placement = Placement {
         statement_id,
         year_end,
-        preview: body.preview,
+        mode: body.mode(),
         splits: &splits,
         created: Vec::with_capacity(parcels.len()),
         units_adjusted: Decimal::ZERO,
@@ -540,11 +553,7 @@ pub async fn db_generate(
         ..
     } = placement;
 
-    if body.preview {
-        tx.rollback().await?;
-    } else {
-        tx.commit().await?;
-    }
+    body.mode().finish(tx).await?;
 
     Ok(GeneratedAdjustments {
         created,
@@ -568,7 +577,7 @@ async fn generate(
 ) -> Result<Written<GeneratedAdjustments>, ApiError> {
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let result = db_generate(&pool, statement_id, &body).await?;
-    Ok(Written::new(result.preview, result))
+    Ok(Written::new(body.mode(), result))
 }
 
 impl From<GenerateError> for ApiError {

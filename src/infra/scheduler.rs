@@ -1516,9 +1516,7 @@ mod tests {
             "backup",
             "2026-06-01T00:00:00Z",
             "2026-06-01T00:00:01Z",
-            false,
-            Some("boom"),
-            None,
+            &Err("boom".to_owned()),
         )
         .await
         .unwrap();
@@ -1527,9 +1525,7 @@ mod tests {
             "backup",
             "2026-06-02T00:00:00Z",
             "2026-06-02T00:00:01Z",
-            true,
-            None,
-            None,
+            &Ok(None),
         )
         .await
         .unwrap();
@@ -1555,9 +1551,7 @@ mod tests {
             "other",
             "2026-05-01T00:00:00Z",
             "2026-05-01T00:00:01Z",
-            true,
-            None,
-            None,
+            &Ok(None),
         )
         .await
         .unwrap();
@@ -1565,7 +1559,7 @@ mod tests {
         for i in 0..(JOB_RUN_HISTORY_LIMIT + extra) {
             let started = format!("2026-06-01T00:{i:02}:00Z");
             let finished = format!("2026-06-01T00:{i:02}:01Z");
-            db_record_run(&pool, "backup", &started, &finished, true, None, None)
+            db_record_run(&pool, "backup", &started, &finished, &Ok(None))
                 .await
                 .unwrap();
         }
@@ -1600,9 +1594,7 @@ mod tests {
             "backup",
             "2026-06-01T00:00:00Z",
             "2026-06-01T00:00:01Z",
-            true,
-            None,
-            None,
+            &Ok(None),
         )
         .await
         .unwrap();
@@ -1685,9 +1677,7 @@ mod tests {
             "backup",
             "2026-06-01T00:00:00Z",
             "2026-06-01T00:00:01Z",
-            true,
-            None,
-            None,
+            &Ok(None),
         )
         .await
         .unwrap();
@@ -1734,7 +1724,7 @@ mod tests {
         for i in 0..(JOB_RUN_HISTORY_LIMIT + 5) {
             let started = format!("2026-06-01T00:{i:02}:00Z");
             let finished = format!("2026-06-01T00:{i:02}:01Z");
-            db_record_run(&pool, "backup", &started, &finished, true, None, None)
+            db_record_run(&pool, "backup", &started, &finished, &Ok(None))
                 .await
                 .unwrap();
         }
@@ -1768,9 +1758,7 @@ mod tests {
             "backup",
             "2026-06-01T00:00:00Z",
             "2026-06-01T00:00:01Z",
-            false,
-            Some("boom"),
-            None,
+            &Err("boom".to_owned()),
         )
         .await
         .unwrap();
@@ -1779,9 +1767,7 @@ mod tests {
             "backup",
             "2026-06-02T00:00:00Z",
             "2026-06-02T00:00:01Z",
-            true,
-            None,
-            None,
+            &Ok(None),
         )
         .await
         .unwrap();

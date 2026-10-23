@@ -506,7 +506,7 @@ async fn exchange(
     Query(query): Query<DryRunQuery>,
 ) -> Result<Written<Exchange>, ApiError> {
     let exchange = execute(&pool, action_id, query.mode()).await?;
-    Ok(Written::new(query.dry_run, exchange))
+    Ok(Written::new(query.mode(), exchange))
 }
 
 impl From<ExchangeError> for ApiError {

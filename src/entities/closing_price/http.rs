@@ -228,20 +228,21 @@ async fn put_manual(
     // concurrent store of the same day could race the decision (CLAUDE.md,
     // "Data integrity").
     let mut tx = write_tx(&pool).await?;
-    let existed = db_get_one(&mut *tx, listing_id, price_date)
-        .await?
-        .is_some();
+    let outcome = Upsert::of(
+        db_get_one(&mut *tx, listing_id, price_date)
+            .await?
+            .is_some(),
+    );
     db_store(&mut *tx, &row).await?;
     // Read the stored row **inside this transaction**: reading it after the
     // commit let a concurrent delete or replace turn the `201` into a 500 or
     // report the other writer's row.
-    let stored = if existed {
-        None
-    } else {
-        db_get_one(&mut *tx, listing_id, price_date).await?
+    let stored = match outcome {
+        Upsert::Created => db_get_one(&mut *tx, listing_id, price_date).await?,
+        Upsert::Replaced => None,
     };
     tx.commit().await?;
-    http::upsert_response_of(Upsert::of(existed), stored)
+    http::upsert_response_of(outcome, stored)
 }
 
 /// Re-fetch one (listing, date) on demand — typically to replace an errored
@@ -293,7 +294,12 @@ async fn fetch_one(
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("stored row vanished"))?;
-    Ok(Written::new(before.is_some_and(|b| b.id == row.id), row))
+    let outcome = if before.is_some_and(|b| b.id == row.id) {
+        Upsert::Replaced
+    } else {
+        Upsert::Created
+    };
+    Ok(Written::upserted(outcome, row))
 }
 
 /// Backfill a listing's price history over a date range (e.g. after importing

@@ -854,7 +854,7 @@ async fn write(
     // The create-vs-replace decision is made here, inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"); a check
     // outside it could see no row and then race another PUT for the same id.
-    let existed = http::crud_exists_opt::<Income, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<Income, _>(&mut *tx, id).await?);
 
     // No id means a create, and a row that does not exist yet has nothing to
     // freeze: the buy-back and reinvestment guards below are about an
@@ -1084,7 +1084,7 @@ async fn write(
     // explicit one it was handed. Either way the created row is read back
     // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
-    let upserted = http::crud_upserted::<Income, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Income, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

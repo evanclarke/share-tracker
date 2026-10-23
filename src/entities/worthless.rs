@@ -274,7 +274,7 @@ async fn recognise(
     Query(query): Query<DryRunQuery>,
 ) -> Result<Written<Recognise>, ApiError> {
     let recognise = execute(&pool, action_id, query.mode()).await?;
-    Ok(Written::new(query.dry_run, recognise))
+    Ok(Written::new(query.mode(), recognise))
 }
 
 impl From<RecogniseError> for ApiError {

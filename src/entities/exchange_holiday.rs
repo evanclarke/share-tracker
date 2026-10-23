@@ -131,13 +131,14 @@ pub async fn db_upsert(
     holiday: &ExchangeHoliday,
 ) -> Result<http::Upserted<ExchangeHoliday>, sqlx::Error> {
     let mut tx = write_tx(pool).await?;
-    let existed: i64 = sqlx::query_scalar(
+    let existed: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM exchange_holidays WHERE mic = ? AND holiday_date = ?)",
     )
     .bind(&holiday.mic)
     .bind(holiday.holiday_date)
     .fetch_one(&mut *tx)
     .await?;
+    let outcome = Upsert::of(existed);
     sqlx::query(
         "INSERT INTO exchange_holidays (mic, holiday_date, name) VALUES (?, ?, ?) \
          ON CONFLICT(mic, holiday_date) DO UPDATE SET name = excluded.name",
@@ -150,17 +151,12 @@ pub async fn db_upsert(
     // Read the created row **inside this transaction**: after the commit a
     // concurrent DELETE or replace could turn the `201` into a 500 or report
     // the other writer's row.
-    let created = existed == 0;
-    let stored = if created {
-        db_get(&mut *tx, &holiday.mic, holiday.holiday_date).await?
-    } else {
-        None
+    let created = match outcome {
+        Upsert::Created => db_get(&mut *tx, &holiday.mic, holiday.holiday_date).await?,
+        Upsert::Replaced => None,
     };
     tx.commit().await?;
-    Ok(Upserted {
-        outcome: Upsert::of(!created),
-        created: stored,
-    })
+    Ok(Upserted { outcome, created })
 }
 
 pub async fn db_delete(pool: &SqlitePool, mic: &str, date: NaiveDate) -> Result<bool, sqlx::Error> {

@@ -104,21 +104,41 @@ pub async fn fetch_live_aud_prices(
     Ok(out)
 }
 
-/// Resolve live AUD prices for the price-dependent report handlers: when `live`
-/// is set, fetch the latest quote for every listing in `listing_ids` that has
-/// no explicit override (an explicit price always wins, so it is never
-/// fetched). Off, or with no fetcher available, yields an empty map (no live
+/// Whether a price-dependent read values at live quotes — a report's
+/// `?live=true` — or only at stored and explicitly supplied prices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveQuotes {
+    Fetch,
+    Skip,
+}
+
+impl LiveQuotes {
+    /// The mode a report request's `live` field asks for.
+    pub fn requested(live: bool) -> Self {
+        if live {
+            LiveQuotes::Fetch
+        } else {
+            LiveQuotes::Skip
+        }
+    }
+}
+
+/// Resolve live AUD prices for the price-dependent report handlers: for
+/// [`LiveQuotes::Fetch`], fetch the latest quote for every listing in
+/// `listing_ids` that has no explicit override (an explicit price always wins,
+/// so it is never fetched). [`LiveQuotes::Skip`] yields an empty map (no live
 /// valuation). A live request with no fetcher marks each listing unavailable
 /// rather than silently dropping the as-of contract.
 pub async fn resolve_live_prices(
     pool: &SqlitePool,
     fetcher: Option<&dyn PriceFetcher>,
-    live: bool,
+    quotes: LiveQuotes,
     overrides: &HashMap<ListingId, Aud>,
     listing_ids: impl IntoIterator<Item = ListingId>,
 ) -> Result<HashMap<ListingId, Result<LiveValuation, String>>, sqlx::Error> {
-    if !live {
-        return Ok(HashMap::new());
+    match quotes {
+        LiveQuotes::Fetch => {}
+        LiveQuotes::Skip => return Ok(HashMap::new()),
     }
     let ids: Vec<ListingId> = listing_ids
         .into_iter()

@@ -114,7 +114,9 @@ pub async fn db_upsert(
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"), so a
     // concurrent insert of the same year cannot race the decision.
     let mut tx = write_tx(pool).await?;
-    let existed = http::crud_exists::<TaxYearSettings, _>(&mut *tx, settings.tax_year).await?;
+    let outcome = http::Upsert::of(
+        http::crud_exists::<TaxYearSettings, _>(&mut *tx, settings.tax_year).await?,
+    );
     sqlx::query(
         "INSERT INTO tax_year_settings (tax_year, ess_taxed_upfront_reduction_eligible) \
          VALUES (?, ?) \
@@ -126,7 +128,7 @@ pub async fn db_upsert(
     .execute(&mut *tx)
     .await?;
     let upserted =
-        http::crud_upserted::<TaxYearSettings, _>(&mut *tx, existed, settings.tax_year).await?;
+        http::crud_upserted::<TaxYearSettings, _>(&mut *tx, outcome, settings.tax_year).await?;
     tx.commit().await?;
     Ok(upserted)
 }

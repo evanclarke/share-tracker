@@ -525,7 +525,7 @@ async fn exercise(
     Json(body): Json<ExerciseBody>,
 ) -> Result<Written<Trade>, ApiError> {
     let trade = execute(&pool, action_id, &body, query.mode()).await?;
-    Ok(Written::new(query.dry_run, trade))
+    Ok(Written::new(query.mode(), trade))
 }
 
 #[cfg(test)]

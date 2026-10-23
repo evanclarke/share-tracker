@@ -922,7 +922,14 @@ async fn activity_handler(
         .price
         .map(|p| HashMap::from([(req.listing_id, Aud::stated(p))]))
         .unwrap_or_default();
-    portfolio::price_holdings(&pool, fetcher.as_deref(), true, &prices, &mut holdings).await?;
+    portfolio::price_holdings(
+        &pool,
+        fetcher.as_deref(),
+        crate::entities::closing_price::LiveQuotes::Fetch,
+        &prices,
+        &mut holdings,
+    )
+    .await?;
 
     Ok(Json(ActivityResponse {
         listing_id: req.listing_id,

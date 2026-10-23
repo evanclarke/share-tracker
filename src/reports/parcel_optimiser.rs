@@ -659,7 +659,7 @@ async fn optimiser_handler(
             let live = closing_price::resolve_live_prices(
                 &pool,
                 fetcher.as_ref().map(|f| f.0.as_ref()),
-                true,
+                closing_price::LiveQuotes::Fetch,
                 &HashMap::new(),
                 [req.listing_id],
             )

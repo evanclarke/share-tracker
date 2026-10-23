@@ -22,6 +22,7 @@
 //! `JS_MODULES` allowlist is the only route table, and the
 //! `js_test_files_are_not_served_and_every_module_is` test pins that no
 //! `*.test.js` file is listed on it (and that every non-test module is).
+use crate::infra::auth::AuthMode;
 use crate::infra::config::BasePath;
 use crate::infra::respond::{Css, Html, Payload};
 use axum::{
@@ -103,12 +104,12 @@ pub(crate) fn served_js_bundle() -> String {
 /// ([`BasePath::ROOT`] at the root — see `app::router`). The routes themselves are unaware of
 /// it, because `nest` strips it before matching; it exists here only to be
 /// baked into the shell, which is the one place the frontend learns where it is
-/// mounted. `auth_enabled` is likewise baked into the shell (as a `<meta
+/// mounted. The [`AuthMode`] is likewise baked into the shell (as a `<meta
 /// name="auth">`) so `nav.js` knows whether to render "Log out" and `util.js`
 /// knows a 401 means "go to `/login`" rather than some other failure — the
 /// frontend has no other way to learn whether `[auth]` is configured. The
 /// shell is templated once at startup, not per request.
-pub fn router(base_path: &BasePath, auth_enabled: bool) -> OpenApiRouter<SqlitePool> {
+pub fn router(base_path: &BasePath, mode: AuthMode) -> OpenApiRouter<SqlitePool> {
     let mut router = OpenApiRouter::new()
         .routes(routes!(index))
         .routes(routes!(style_css));
@@ -118,7 +119,7 @@ pub fn router(base_path: &BasePath, auth_enabled: bool) -> OpenApiRouter<SqliteP
     for (path, source) in JS_MODULES {
         router = router.route(path, get(move || async move { js_asset(source) }));
     }
-    router.layer(Extension(Shell(index_html(base_path, auth_enabled))))
+    router.layer(Extension(Shell(index_html(base_path, mode))))
 }
 
 /// The SPA shell, templated once at startup ([`index_html`]) and handed to
@@ -132,11 +133,15 @@ struct Shell(String);
 /// `<meta name="base-path">` the frontend's `apiUrl` (util.js) reads to prefix
 /// every API call it makes; and whether `[auth]` is configured, as
 /// `<meta name="auth">` (`"1"` or `""`).
-fn index_html(base_path: &BasePath, auth_enabled: bool) -> String {
+fn index_html(base_path: &BasePath, mode: AuthMode) -> String {
+    let auth = match mode {
+        AuthMode::Required => "1",
+        AuthMode::Open => "",
+    };
     INDEX_HTML
         .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
         .replace("{{BASE}}", base_path.as_str())
-        .replace("{{AUTH}}", if auth_enabled { "1" } else { "" })
+        .replace("{{AUTH}}", auth)
         .replace("{{THEME}}", THEME_BOOT_SCRIPT)
 }
 
@@ -177,7 +182,7 @@ mod tests {
     /// only the shell's contents change.
     async fn get_based(base_path: &str, uri: &str) -> ApiResponse {
         ApiClient::over(
-            router(&BasePath::of(base_path), false)
+            router(&BasePath::of(base_path), AuthMode::Open)
                 .with_state(SqlitePool::connect(":memory:").await.unwrap()),
         )
         .get(uri)
@@ -257,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn auth_enabled_sets_the_auth_meta() {
         let resp = ApiClient::over(
-            router(&BasePath::ROOT, true)
+            router(&BasePath::ROOT, AuthMode::Required)
                 .with_state(SqlitePool::connect(":memory:").await.unwrap()),
         )
         .get("/")
@@ -2536,7 +2541,7 @@ mod tests {
 
         // The scheme is applied before the first paint, or a dark-mode reload
         // flashes a full white page while the module graph loads.
-        let shell = index_html(&BasePath::ROOT, false);
+        let shell = index_html(&BasePath::ROOT, AuthMode::Open);
         assert!(shell.contains("document.documentElement.setAttribute('data-theme'"));
         assert!(shell.contains("localStorage.getItem('share-tracker.theme')"));
         assert!(

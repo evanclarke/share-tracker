@@ -356,7 +356,7 @@ async fn participate(
     Json(body): Json<ParticipationBody>,
 ) -> Result<Written<Participation>, ApiError> {
     let participation = execute(&pool, action_id, &body, query.mode()).await?;
-    Ok(Written::new(query.dry_run, participation))
+    Ok(Written::new(query.mode(), participation))
 }
 
 #[cfg(test)]

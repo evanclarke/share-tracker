@@ -337,7 +337,7 @@ fn problems_for(
                  enter one row per parcel held at year end"
             ));
         }
-        problems.extend(units_held_problem(facts, false));
+        problems.extend(units_held_problem(facts, AdjustmentSet::Absent));
         return problems;
     }
 
@@ -438,8 +438,18 @@ fn problems_for(
         }
     }
 
-    problems.extend(units_held_problem(facts, true));
+    problems.extend(units_held_problem(facts, AdjustmentSet::Entered));
     problems
+}
+
+/// Whether a statement has any AMIT adjustment rows — which decides what
+/// [`units_held_problem`] can say about a mismatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdjustmentSet {
+    /// No rows entered or generated yet.
+    Absent,
+    /// At least one row, so there is a set whose sum can be compared.
+    Entered,
 }
 
 /// The statement's own `units_held` against the units **actually open** at its
@@ -463,7 +473,7 @@ fn problems_for(
 /// of both. A holding sold out (or transferred, exchanged, demerged away)
 /// during the year has nil open at the year end and a statement stating nil
 /// units held, and reconciles.
-fn units_held_problem(facts: &StatementFacts, has_adjustments: bool) -> Option<String> {
+fn units_held_problem(facts: &StatementFacts, set: AdjustmentSet) -> Option<String> {
     let &StatementFacts {
         year_end,
         units_held,
@@ -481,7 +491,7 @@ fn units_held_problem(facts: &StatementFacts, has_adjustments: bool) -> Option<S
     // whose fix is to regenerate. When the set already sums to what is open,
     // the set has been rebuilt and it is the statement's stated figure left
     // behind (or the statement is against the wrong holding account).
-    let cause = if !has_adjustments {
+    let cause = if set == AdjustmentSet::Absent {
         // With no rows at all there is no set to have gone stale, and the
         // zero sum agrees with nothing on purpose — say only what is known.
         "check the statement's units held and holding account against the parcels entered"

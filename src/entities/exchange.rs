@@ -207,7 +207,8 @@ pub async fn db_upsert(
     // The exists check decides create-vs-replace inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
     let mut tx = write_tx(pool).await?;
-    let existed = http::crud_exists::<Exchange, _>(&mut *tx, exchange.mic.clone()).await?;
+    let outcome =
+        http::Upsert::of(http::crud_exists::<Exchange, _>(&mut *tx, exchange.mic.clone()).await?);
     sqlx::query(
         "INSERT INTO exchanges (mic, name, country, currency, timezone, settlement_days, close_time) \
          VALUES (?, ?, ?, ?, ?, ?, ?) \
@@ -229,7 +230,7 @@ pub async fn db_upsert(
     .execute(&mut *tx)
     .await?;
     let upserted =
-        http::crud_upserted::<Exchange, _>(&mut *tx, existed, exchange.mic.clone()).await?;
+        http::crud_upserted::<Exchange, _>(&mut *tx, outcome, exchange.mic.clone()).await?;
     tx.commit().await?;
     Ok(upserted)
 }

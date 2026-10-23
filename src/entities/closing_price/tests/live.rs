@@ -236,7 +236,7 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
     let off = resolve_live_prices(
         &pool,
         Some(&fetcher),
-        false,
+        LiveQuotes::Skip,
         &HashMap::new(),
         [ListingId(1), ListingId(2)],
     )
@@ -252,7 +252,7 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
     let on = resolve_live_prices(
         &pool,
         Some(&fetcher),
-        true,
+        LiveQuotes::Fetch,
         &overrides,
         [ListingId(1), ListingId(2)],
     )
@@ -268,9 +268,15 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
     );
 
     // live = true with no fetcher → each listing marked unavailable.
-    let none = resolve_live_prices(&pool, None, true, &HashMap::new(), [ListingId(1)])
-        .await
-        .unwrap();
+    let none = resolve_live_prices(
+        &pool,
+        None,
+        LiveQuotes::Fetch,
+        &HashMap::new(),
+        [ListingId(1)],
+    )
+    .await
+    .unwrap();
     assert!(
         none[&ListingId(1)]
             .as_ref()

@@ -283,7 +283,7 @@ async fn vest(
     Query(query): Query<DryRunQuery>,
 ) -> Result<Written<Trade>, ApiError> {
     let trade = execute(&pool, statement_id, query.mode()).await?;
-    Ok(Written::new(query.dry_run, trade))
+    Ok(Written::new(query.mode(), trade))
 }
 
 impl From<VestError> for ApiError {

@@ -18,8 +18,9 @@
 //! it, so a response type missing from the document's schemas does not
 //! compile) and for a `Vec` of one.
 
+use crate::infra::db::WriteMode;
 use crate::infra::extract::Json;
-use crate::infra::http::{ApiError, UpsertResponse};
+use crate::infra::http::{ApiError, Upsert, UpsertResponse};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use std::collections::BTreeMap;
@@ -152,24 +153,38 @@ impl<T: JsonBody> IntoResponses for Created<T> {
 /// or — for a `?dry_run=true` preview, which created nothing — `200 OK` with
 /// the same body (`infra::http::DryRunQuery`).
 pub struct Written<T> {
-    pub dry_run: bool,
-    pub body: T,
+    /// `201` when the call created what `body` describes, `200` when it did
+    /// not — fixed by the constructor, from a [`WriteMode`] or an [`Upsert`].
+    status: StatusCode,
+    body: T,
 }
 
 impl<T> Written<T> {
-    pub fn new(dry_run: bool, body: T) -> Self {
-        Self { dry_run, body }
+    /// The answer of a write whose transaction ended in `mode`: `201` for a
+    /// committed write, `200` for a [`WriteMode::DryRun`] preview.
+    pub fn new(mode: WriteMode, body: T) -> Self {
+        let status = match mode {
+            WriteMode::Commit => StatusCode::CREATED,
+            WriteMode::DryRun => StatusCode::OK,
+        };
+        Self { status, body }
+    }
+
+    /// The answer of a `POST` that stores on a natural key and so either
+    /// creates the row (`201`) or replaces the one stored (`200` — the row
+    /// keeps its id, so it is the same resource, not a created one).
+    pub fn upserted(outcome: Upsert, body: T) -> Self {
+        let status = match outcome {
+            Upsert::Created => StatusCode::CREATED,
+            Upsert::Replaced => StatusCode::OK,
+        };
+        Self { status, body }
     }
 }
 
 impl<T: serde::Serialize> IntoResponse for Written<T> {
     fn into_response(self) -> Response {
-        let status = if self.dry_run {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        };
-        (status, Json(self.body)).into_response()
+        (self.status, Json(self.body)).into_response()
     }
 }
 

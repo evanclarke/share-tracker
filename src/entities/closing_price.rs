@@ -171,7 +171,7 @@ pub(crate) use fetcher::clean_price;
 pub use fetcher::{CachingFetcher, SharedFetcher};
 pub use held::{HeldTimeline, db_held_listing_ids, db_held_listing_ids_on};
 pub use http::router;
-pub use live::resolve_live_prices;
+pub use live::{LiveQuotes, resolve_live_prices};
 /// Named outside `market` only by the tests that pin the lag's boundary.
 #[cfg(test)]
 pub(crate) use market::CRYPTO_PUBLICATION_LAG_HOURS;

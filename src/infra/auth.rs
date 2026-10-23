@@ -345,14 +345,14 @@ async fn login_handler(auth: Auth, base_path: BasePath, req: Request) -> Respons
     // Read before the body is decoded, and before any lockout decision: a
     // browser (`Accept: text/html`) gets the rendered page on either failure
     // path, a script gets the machine-readable status.
-    let html = wants_html(req.headers());
+    let client = LoginClient::of(req.headers());
     // The form body is decoded through axum's own extractor, so an absent or
     // malformed body is answered exactly as it is on every other form route.
     let form = match axum::extract::Form::<LoginForm>::from_request(req, &()).await {
         Ok(axum::extract::Form(form)) => form,
         Err(rejection) => return rejection.into_response(),
     };
-    login_submit(auth, base_path, source, html, form).await
+    login_submit(auth, base_path, source, client, form).await
 }
 
 /// What the tracker remembers about one source.
@@ -657,8 +657,47 @@ impl LockoutTracker {
     }
 }
 
+/// Whether `[auth]` is configured — the one fact about it the routes, the SPA
+/// shell, the request guard and the OpenAPI document need, without the
+/// credential itself (which only `app::router`'s gate and the login routes
+/// read).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMode {
+    /// `[auth]` is configured: `/login`/`/logout` are served and documented,
+    /// every other route is behind `require_auth`, and the request guard skips
+    /// its `Host` check.
+    Required,
+    /// No `[auth]` table (the default): no login routes and no gate, and the
+    /// request guard refuses unlisted `Host` names (DNS rebinding).
+    Open,
+}
+
+impl AuthMode {
+    /// The mode a resolved `[auth]` setting (`None` when the table is absent)
+    /// puts the server in.
+    pub fn of(auth: Option<&Auth>) -> Self {
+        match auth {
+            Some(_) => AuthMode::Required,
+            None => AuthMode::Open,
+        }
+    }
+}
+
+/// Whether the session cookie carries `Secure` (HTTPS-only). Independent of
+/// this process's own scheme: behind the documented nginx reverse proxy, the
+/// *browser* talks HTTPS even though the backend socket is plain HTTP
+/// loopback, and `Secure` is judged by the browser's own connection.
+/// [`CookieSecurity::Secure`] is the default; `secure_cookie = false` in
+/// `[auth]` selects [`CookieSecurity::PlainHttp`], only for a deliberately
+/// plain-HTTP setup (e.g. local testing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CookieSecurity {
+    Secure,
+    PlainHttp,
+}
+
 /// The resolved `[auth]` configuration. Cheap to clone (a couple of
-/// `String`s, a bool, a 32-byte key, and an `Arc` to the lockout table) —
+/// `String`s, a flag, a 32-byte key, and an `Arc` to the lockout table) —
 /// cloned into every handler/middleware closure that needs it, the same way
 /// `SharedFetcher` is. `Debug` exists so `config::Settings` (which derives it)
 /// can keep doing so. `PartialEq` is hand-written — see its impl below — since
@@ -672,13 +711,8 @@ pub struct Auth {
     /// type borrowing from itself.
     password_hash: String,
     api_token: Option<String>,
-    /// Whether the session cookie carries `Secure` (HTTPS-only). Independent
-    /// of this process's own scheme: behind the documented nginx reverse
-    /// proxy, the *browser* talks HTTPS even though the backend socket is
-    /// plain HTTP loopback, and `Secure` is judged by the browser's own
-    /// connection. Defaults to `true`; set `secure_cookie = false` in
-    /// `[auth]` only for a deliberately plain-HTTP setup (e.g. local testing).
-    secure_cookie: bool,
+    /// Whether the session cookie carries `Secure` (see [`CookieSecurity`]).
+    cookie_security: CookieSecurity,
     signing_key: [u8; 32],
     /// The bounded per-source failed-login lockout. Shared through its own
     /// `Arc` (not the derived `Clone` of an inner `HashMap`), so every clone
@@ -704,7 +738,7 @@ impl PartialEq for Auth {
         self.username == other.username
             && self.password_hash == other.password_hash
             && self.api_token == other.api_token
-            && self.secure_cookie == other.secure_cookie
+            && self.cookie_security == other.cookie_security
             && self.signing_key == other.signing_key
             && self.trusted_proxies == other.trusted_proxies
     }
@@ -719,7 +753,7 @@ impl Auth {
         username: String,
         password_hash: String,
         api_token: Option<String>,
-        secure_cookie: bool,
+        cookie_security: CookieSecurity,
     ) -> Result<Self, String> {
         PasswordHash::new(&password_hash)
             .map_err(|e| format!("invalid auth.password_hash: {e}"))?;
@@ -728,7 +762,7 @@ impl Auth {
             username,
             password_hash,
             api_token,
-            secure_cookie,
+            cookie_security,
             signing_key,
             lockouts: LockoutTracker::new(),
             trusted_proxies: Vec::new().into(),
@@ -796,10 +830,10 @@ impl Auth {
         username: String,
         password_hash: String,
         api_token: Option<String>,
-        secure_cookie: bool,
+        cookie_security: CookieSecurity,
         policy: LockoutPolicy,
     ) -> Result<Self, String> {
-        let mut auth = Auth::new(username, password_hash, api_token, secure_cookie)?;
+        let mut auth = Auth::new(username, password_hash, api_token, cookie_security)?;
         auth.lockouts = LockoutTracker::with_policy(policy);
         Ok(auth)
     }
@@ -1068,6 +1102,25 @@ fn wants_html(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.contains("text/html"))
 }
 
+/// Who is posting the login form, which decides the shape of a refusal: a
+/// browser (`Accept: text/html`) gets the rendered page, a script the
+/// machine-readable status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoginClient {
+    Browser,
+    Script,
+}
+
+impl LoginClient {
+    fn of(headers: &HeaderMap) -> Self {
+        if wants_html(headers) {
+            LoginClient::Browser
+        } else {
+            LoginClient::Script
+        }
+    }
+}
+
 fn unauthorized_response(state: &AuthState, headers: &HeaderMap) -> Response {
     if wants_html(headers) {
         Redirect::to(&format!("{}/login", state.base_path)).into_response()
@@ -1200,7 +1253,7 @@ async fn login_submit(
     auth: Auth,
     base_path: BasePath,
     source: Source,
-    html: bool,
+    client: LoginClient,
     form: LoginForm,
 ) -> Response {
     // The lockout gate comes **first**, before the password is even looked at:
@@ -1235,15 +1288,16 @@ async fn login_submit(
         // or fail2ban rule can act on, which a `200` page for `Accept:
         // text/html` would hide. A browser still gets the rendered sign-in page
         // as the body rather than a bare plain-text reason.
-        return if html {
-            (
+        return match client {
+            LoginClient::Browser => (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, retry_after_secs.to_string())],
                 render_login(&base_path, Some(&message)),
             )
-                .into_response()
-        } else {
-            ApiError::too_many_requests(message, retry_after_secs).into_response()
+                .into_response(),
+            LoginClient::Script => {
+                ApiError::too_many_requests(message, retry_after_secs).into_response()
+            }
         };
     }
 
@@ -1260,15 +1314,16 @@ async fn login_submit(
             "login refused: no Argon2 verify slot free"
         );
         let message = "too many login attempts are being verified at once; try again in a moment";
-        return if html {
-            (
+        return match client {
+            LoginClient::Browser => (
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, "1".to_string())],
                 render_login(&base_path, Some(message)),
             )
-                .into_response()
-        } else {
-            ApiError::too_many_requests(message.to_string(), 1).into_response()
+                .into_response(),
+            LoginClient::Script => {
+                ApiError::too_many_requests(message.to_string(), 1).into_response()
+            }
         };
     };
     if verified {
@@ -1333,7 +1388,10 @@ async fn logout(auth: Auth, base_path: BasePath) -> Response {
 /// target for the bare-prefix form), and the cookie is scoped to the same path.
 fn build_set_cookie(auth: &Auth, base_path: &BasePath, value: Option<String>) -> String {
     let path = base_path.home();
-    let secure = if auth.secure_cookie { "; Secure" } else { "" };
+    let secure = match auth.cookie_security {
+        CookieSecurity::Secure => "; Secure",
+        CookieSecurity::PlainHttp => "",
+    };
     match value {
         Some(v) => format!(
             "{COOKIE_NAME}={v}; Path={path}; Max-Age={SESSION_LIFETIME_SECS}; HttpOnly; SameSite=Lax{secure}"
@@ -1352,7 +1410,7 @@ mod tests {
             "evan".to_string(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             Some(TEST_TOKEN.clone()),
-            true,
+            CookieSecurity::Secure,
         )
         .unwrap()
     }
@@ -1367,9 +1425,14 @@ mod tests {
 
     #[test]
     fn an_unparseable_password_hash_is_rejected_at_construction() {
-        let err = Auth::new("evan".into(), "not a phc string".into(), None, true)
-            .err()
-            .unwrap();
+        let err = Auth::new(
+            "evan".into(),
+            "not a phc string".into(),
+            None,
+            CookieSecurity::Secure,
+        )
+        .err()
+        .unwrap();
         assert!(err.contains("password_hash"), "{err}");
     }
 
@@ -1429,7 +1492,7 @@ mod tests {
             "evan".to_string(),
             Auth::hash_password(&WRONG_PASSWORD).unwrap(),
             None,
-            true,
+            CookieSecurity::Secure,
         )
         .unwrap();
         assert!(!new.verify_cookie(&cookie));
@@ -1449,7 +1512,7 @@ mod tests {
             "evan".into(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             None,
-            true,
+            CookieSecurity::Secure,
         )
         .unwrap();
         assert!(!a.verify_bearer(&TEST_TOKEN));
@@ -1607,7 +1670,7 @@ mod tests {
             auth(),
             BasePath::ROOT,
             Source::Unknown,
-            false,
+            LoginClient::Script,
             LoginForm {
                 username: "evil\nforged login succeeded".to_string(),
                 password: WRONG_PASSWORD.clone(),
@@ -1693,7 +1756,7 @@ mod tests {
 
 #[cfg(test)]
 mod api_tests {
-    use super::Auth;
+    use super::{Auth, CookieSecurity};
     use crate::test_support::{
         ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN, test_pool,
     };
@@ -1705,11 +1768,11 @@ mod api_tests {
             "evan".to_string(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             Some(TEST_TOKEN.clone()),
-            // `secure_cookie: false` — the in-process `oneshot` client never
+            // `PlainHttp` — the in-process `oneshot` client never
             // negotiates TLS, and `Secure` only governs whether a real
             // browser sends the cookie back over plain HTTP, which nothing
             // here models either way.
-            false,
+            CookieSecurity::PlainHttp,
         )
         .unwrap()
     }
@@ -1940,7 +2003,7 @@ mod lockout_tests {
             "evan".to_string(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             Some(TEST_TOKEN.clone()),
-            false,
+            CookieSecurity::PlainHttp,
             policy,
         )
         .unwrap()
@@ -2287,7 +2350,7 @@ mod lockout_tests {
                     auth,
                     BasePath::ROOT,
                     peer(n + 1),
-                    false,
+                    LoginClient::Script,
                     LoginForm {
                         username: "evan".to_string(),
                         password: format!("wrong {n}"),

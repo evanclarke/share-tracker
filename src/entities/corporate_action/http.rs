@@ -102,5 +102,6 @@ async fn delete(
     State(pool): State<SqlitePool>,
     Path(id): Path<i64>,
 ) -> Result<NoContent, ApiError> {
-    http::deleted(db_delete(&pool, id).await?, "corporate action")
+    let found = db_delete(&pool, id).await?;
+    http::deleted(found, "corporate action")
 }

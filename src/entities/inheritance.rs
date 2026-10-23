@@ -695,7 +695,7 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists_opt::<Inheritance, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<Inheritance, _>(&mut *tx, id).await?);
 
     check_listing_currency(&mut tx, inh).await?;
     check_convertible(&mut tx, inh).await?;
@@ -853,7 +853,7 @@ async fn write(
         });
     }
 
-    let upserted = http::crud_upserted::<Inheritance, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Inheritance, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

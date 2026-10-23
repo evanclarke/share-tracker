@@ -185,7 +185,10 @@ impl Settings {
                     a.username,
                     a.password_hash,
                     a.api_token,
-                    a.secure_cookie.unwrap_or(true),
+                    match a.secure_cookie {
+                        Some(false) => super::auth::CookieSecurity::PlainHttp,
+                        Some(true) | None => super::auth::CookieSecurity::Secure,
+                    },
                 )
                 .and_then(|auth| {
                     let proxies = a
@@ -751,8 +754,13 @@ mod tests {
         let auth = settings.auth.expect("[auth] resolved");
         // Equality is over configuration, so an `Auth` with the same credential
         // and no proxy list is a *different* configuration.
-        let without = crate::infra::auth::Auth::new("evan".into(), hash.clone(), None, true)
-            .expect("the same credential");
+        let without = crate::infra::auth::Auth::new(
+            "evan".into(),
+            hash.clone(),
+            None,
+            crate::infra::auth::CookieSecurity::Secure,
+        )
+        .expect("the same credential");
         assert_ne!(auth, without, "the proxy list is part of the configuration");
         assert_eq!(
             auth,

@@ -474,7 +474,7 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists_opt::<Listing, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<Listing, _>(&mut *tx, id).await?);
 
     // An identity change (ticker or exchange) on a listing that already has
     // history must go through the rename action instead of a bare field
@@ -661,7 +661,7 @@ async fn write(
     // explicit one it was handed. Either way the created row is read back
     // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| ListingId(result.last_insert_rowid()));
-    let upserted = http::crud_upserted::<Listing, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Listing, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

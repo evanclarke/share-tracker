@@ -509,7 +509,7 @@ async fn write(
 
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists_opt::<Trade, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<Trade, _>(&mut *tx, id).await?);
 
     // The settlement date is resolved on this transaction — the row the write
     // lands on is the row the classification read (see
@@ -850,7 +850,7 @@ async fn write(
         });
     }
 
-    let upserted = http::crud_upserted::<Trade, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Trade, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

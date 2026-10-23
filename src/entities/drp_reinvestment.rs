@@ -769,7 +769,7 @@ async fn reinvest(
     Json(body): Json<ReinvestBody>,
 ) -> Result<Written<Trade>, ApiError> {
     let trade = execute(&pool, income_id, &body, query.mode()).await?;
-    Ok(Written::new(query.dry_run, trade))
+    Ok(Written::new(query.mode(), trade))
 }
 
 #[utoipa::path(

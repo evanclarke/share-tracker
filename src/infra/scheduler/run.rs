@@ -108,27 +108,14 @@ async fn run_attached(
     let finished_at = chrono::Utc::now().to_rfc3339();
     tracing::info!(job = %name, ok = result.is_ok(), "job finished");
 
-    let error = result.as_ref().err().map(String::as_str);
-    let note = result.as_ref().ok().and_then(Option::as_deref);
-    if let Some(note) = note {
+    if let Ok(Some(note)) = &result {
         tracing::info!(job = %name, "job succeeded incompletely: {note}");
     }
     let recorded = match run_id {
-        Some(id) => db_finish_run(pool, id, &finished_at, result.is_ok(), error, note).await,
+        Some(id) => db_finish_run(pool, id, &finished_at, &result).await,
         // No opening row to complete, so record the whole run in one write
         // rather than losing it.
-        None => {
-            db_record_run(
-                pool,
-                name,
-                &started_at,
-                &finished_at,
-                result.is_ok(),
-                error,
-                note,
-            )
-            .await
-        }
+        None => db_record_run(pool, name, &started_at, &finished_at, &result).await,
     };
     if let Err(e) = recorded {
         tracing::warn!(job = %name, "failed to record job run: {e}");

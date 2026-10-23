@@ -32,6 +32,7 @@
 
 use axum::{Router, response::IntoResponse};
 
+use crate::infra::auth::AuthMode;
 use crate::infra::config::BasePath;
 use crate::infra::extract::Query;
 use crate::infra::http::ApiError;
@@ -477,17 +478,17 @@ fn operation_slice(document: &serde_json::Value, id: &str) -> Option<serde_json:
 /// The OpenAPI 3.1 document — the auth-on, root-path form the tests read.
 #[cfg(test)]
 pub fn document() -> OpenApi {
-    document_for(&BasePath::ROOT, true)
+    document_for(&BasePath::ROOT, AuthMode::Required)
 }
 
 /// [`document`] for a deployment, built exactly as [`router`] builds the one
 /// it serves: from [`crate::app::api_routes`]' generated operations plus this
 /// module's own two.
 #[cfg(test)]
-pub fn document_for(base_path: &BasePath, auth: bool) -> OpenApi {
-    let mut generated = crate::app::api_routes(base_path, auth).into_openapi();
+pub fn document_for(base_path: &BasePath, mode: AuthMode) -> OpenApi {
+    let mut generated = crate::app::api_routes(base_path, mode).into_openapi();
     generated.merge(own_routes().into_openapi());
-    publish(generated, base_path, auth)
+    publish(generated, base_path, mode)
 }
 
 /// The published document: the operations utoipa generated from the
@@ -510,7 +511,7 @@ pub fn document_for(base_path: &BasePath, auth: bool) -> OpenApi {
 ///   the component schemas and, with `[auth]`, the security schemes and
 ///   requirement. A deployment without `[auth]` merges no `/login` or
 ///   `/logout` route, so the document cannot advertise one.
-fn publish(generated: OpenApi, base_path: &BasePath, auth: bool) -> OpenApi {
+fn publish(generated: OpenApi, base_path: &BasePath, mode: AuthMode) -> OpenApi {
     let mut paths = generated.paths;
     for (path, _) in crate::web::JS_MODULES {
         paths.add_path_operation(
@@ -553,17 +554,20 @@ fn publish(generated: OpenApi, base_path: &BasePath, auth: bool) -> OpenApi {
         )
         .paths(paths)
         .tags(Some(tags))
-        .components(Some(components(generated.components, auth)))
+        .components(Some(components(generated.components, mode)))
         .servers(Some(vec![
             utoipa::openapi::ServerBuilder::new()
                 .url(server_url)
                 .build(),
         ]));
-    if auth {
-        builder = builder.security(Some(vec![
-            SecurityRequirement::new("sessionCookie", Vec::<String>::new()),
-            SecurityRequirement::new("bearerAuth", Vec::<String>::new()),
-        ]));
+    match mode {
+        AuthMode::Required => {
+            builder = builder.security(Some(vec![
+                SecurityRequirement::new("sessionCookie", Vec::<String>::new()),
+                SecurityRequirement::new("bearerAuth", Vec::<String>::new()),
+            ]));
+        }
+        AuthMode::Open => {}
     }
     builder.build()
 }
@@ -729,7 +733,7 @@ fn non_success_responses(verb: Verb, path: &str, body: Option<bool>) -> Vec<(u16
 /// path (which would panic inside a handler for an invariant the test already
 /// covers). The `BTreeMap` also makes the merge O(n log n) rather than the
 /// `Vec::iter().find` scan this replaced.
-fn components(generated: Option<Components>, auth: bool) -> Components {
+fn components(generated: Option<Components>, mode: AuthMode) -> Components {
     let mut by_name: std::collections::BTreeMap<String, RefOr<Schema>> =
         std::collections::BTreeMap::new();
     for (name, schema) in component_schemas() {
@@ -741,7 +745,7 @@ fn components(generated: Option<Components>, auth: bool) -> Components {
         by_name.entry(name).or_insert(schema);
     }
     let mut components = ComponentsBuilder::new().schemas_from_iter(by_name).build();
-    if auth {
+    if mode == AuthMode::Required {
         // The two credentials docs/API.md documents: the session cookie the
         // browser carries, and the bearer token the deployment scripts send
         // (`Authorization: Bearer <api_token>`). Named here so a generated
@@ -931,11 +935,11 @@ fn path_parameters(path: &str) -> Vec<Parameter> {
 /// The document (200+ schemas, ~170 paths) is completed and serialised
 /// **once**, when the router is assembled, and each request clones the
 /// finished JSON string.
-pub fn router(generated: OpenApi, base_path: &BasePath, auth: bool) -> Router<SqlitePool> {
+pub fn router(generated: OpenApi, base_path: &BasePath, mode: AuthMode) -> Router<SqlitePool> {
     let (router, own) = own_routes().split_for_parts();
     let mut generated = generated;
     generated.merge(own);
-    let published = publish(generated, base_path, auth);
+    let published = publish(generated, base_path, mode);
     let document = serde_json::to_value(&published).expect("the document serialises");
     let served = std::sync::Arc::new(Served {
         whole: document.to_string(),
@@ -1760,7 +1764,7 @@ mod tests {
     /// top-level list names only tags some published operation uses.
     #[test]
     fn the_tag_list_follows_the_published_routes() {
-        let doc = serde_json::to_value(document_for(&BasePath::ROOT, false))
+        let doc = serde_json::to_value(document_for(&BasePath::ROOT, AuthMode::Open))
             .expect("the document serialises");
         let listed: Vec<&str> = doc["tags"]
             .as_array()
@@ -2392,7 +2396,8 @@ mod tests {
     /// omits the `/login`/`/logout` routes it does not serve.
     #[test]
     fn the_document_publishes_its_server_and_security() {
-        let rooted = serde_json::to_value(document_for(&BasePath::ROOT, true)).expect("serialises");
+        let rooted = serde_json::to_value(document_for(&BasePath::ROOT, AuthMode::Required))
+            .expect("serialises");
         assert_eq!(rooted["servers"][0]["url"], "/");
         assert!(rooted["components"]["securitySchemes"]["bearerAuth"].is_object());
         assert!(rooted["components"]["securitySchemes"]["sessionCookie"].is_object());
@@ -2401,14 +2406,18 @@ mod tests {
             "an auth deployment must carry a global security requirement"
         );
 
-        let prefixed =
-            serde_json::to_value(document_for(&BasePath::of("/share_tracker"), true)).expect("ser");
+        let prefixed = serde_json::to_value(document_for(
+            &BasePath::of("/share_tracker"),
+            AuthMode::Required,
+        ))
+        .expect("ser");
         assert_eq!(
             prefixed["servers"][0]["url"], "/share_tracker",
             "a base-path deployment must publish the prefix its paths resolve against"
         );
 
-        let open = serde_json::to_value(document_for(&BasePath::ROOT, false)).expect("serialises");
+        let open = serde_json::to_value(document_for(&BasePath::ROOT, AuthMode::Open))
+            .expect("serialises");
         assert!(
             open["components"]
                 .get("securitySchemes")
@@ -2437,8 +2446,8 @@ mod tests {
     /// `[auth]` neither lists `/login`/`/logout`).
     #[test]
     fn the_route_index_lists_exactly_the_published_operations() {
-        for auth in [true, false] {
-            let document = document_for(&BasePath::ROOT, auth);
+        for mode in [AuthMode::Required, AuthMode::Open] {
+            let document = document_for(&BasePath::ROOT, mode);
             let doc = serde_json::to_value(&document).expect("serialises");
             let index = route_index(&document, &BasePath::ROOT);
             let mut listed: Vec<(String, String)> = Vec::new();
@@ -2481,10 +2490,10 @@ mod tests {
             let before = listed.len();
             listed.dedup();
             assert_eq!(before, listed.len(), "the index lists an operation twice");
-            assert_eq!(listed, documented_routes(&doc), "auth = {auth}");
+            assert_eq!(listed, documented_routes(&doc), "{mode:?}");
             assert_eq!(
                 listed.iter().any(|(path, _)| path == "/login"),
-                auth,
+                mode == AuthMode::Required,
                 "/login is listed only when [auth] serves it"
             );
         }

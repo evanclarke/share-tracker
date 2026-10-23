@@ -811,7 +811,7 @@ async fn sell_rights(
     Json(body): Json<SellRightsBody>,
 ) -> Result<Written<RightsSale>, ApiError> {
     let sale = execute(&pool, action_id, &body, query.mode()).await?;
-    Ok(Written::new(query.dry_run, sale))
+    Ok(Written::new(query.mode(), sale))
 }
 
 #[utoipa::path(
@@ -852,7 +852,8 @@ async fn delete_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<RightsSaleId>,
 ) -> Result<NoContent, ApiError> {
-    http::deleted(db_delete(&pool, id).await?, "rights sale")
+    let found = db_delete(&pool, id).await?;
+    http::deleted(found, "rights sale")
 }
 
 #[cfg(test)]

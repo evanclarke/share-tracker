@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::entities::closing_price::SharedFetcher;
-use crate::infra::auth::Auth;
+use crate::infra::auth::{Auth, AuthMode};
 use crate::infra::config::BasePath;
 use crate::infra::scheduler::{self, JobRegistry};
 
@@ -42,18 +42,15 @@ pub fn router(
     auth: Option<Auth>,
     allowed_hosts: &[String],
 ) -> Router {
-    let guard = crate::infra::request_guard::RequestGuard::new(auth.is_some(), allowed_hosts);
+    let mode = AuthMode::of(auth.as_ref());
+    let guard = crate::infra::request_guard::RequestGuard::new(mode, allowed_hosts);
     // One registration per route: `split_for_parts` hands back the axum router
     // and the OpenAPI operations utoipa generated from the very same
     // `#[utoipa::path]` handlers, which `api_spec` completes into the served
     // document — so a route cannot be served undocumented, or documented
     // unserved.
-    let (app, generated) = api_routes(base_path, auth.is_some()).split_for_parts();
-    let mut app = app.merge(crate::api_spec::router(
-        generated,
-        base_path,
-        auth.is_some(),
-    ));
+    let (app, generated) = api_routes(base_path, mode).split_for_parts();
+    let mut app = app.merge(crate::api_spec::router(generated, base_path, mode));
     if let Some(auth) = &auth {
         // What the login routes need — the credential and the base path the
         // redirects are built from — as the extension their handlers read.
@@ -111,15 +108,14 @@ pub fn router(
 /// `api_spec` documents. The login routes are merged without the
 /// [`AuthState`](crate::infra::auth::AuthState) they read, which [`router`]
 /// layers on, so the document can be generated without a credential.
-pub fn api_routes(base_path: &BasePath, auth: bool) -> OpenApiRouter<SqlitePool> {
+pub fn api_routes(base_path: &BasePath, mode: AuthMode) -> OpenApiRouter<SqlitePool> {
     let routes = crate::entities::router()
         .merge(crate::reports::router())
         .merge(scheduler::router())
-        .merge(crate::web::router(base_path, auth));
-    if auth {
-        routes.merge(crate::infra::auth::routes())
-    } else {
-        routes
+        .merge(crate::web::router(base_path, mode));
+    match mode {
+        AuthMode::Required => routes.merge(crate::infra::auth::routes()),
+        AuthMode::Open => routes,
     }
 }
 
@@ -163,7 +159,7 @@ fn catching_panics(app: Router) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use crate::infra::auth::Auth;
+    use crate::infra::auth::{Auth, CookieSecurity};
     use crate::test_support::{ApiClient, TEST_PASSWORD, test_pool};
     use axum::http::StatusCode;
     use sqlx::SqlitePool;
@@ -432,7 +428,7 @@ mod tests {
             "evan".to_string(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             None,
-            false,
+            CookieSecurity::PlainHttp,
         )
         .unwrap()
     }
@@ -532,5 +528,167 @@ mod tests {
         ] {
             assert_eq!(authed.get(uri).await.status, StatusCode::OK, "{uri}");
         }
+    }
+
+    /// Every non-test function that still takes a `bool` parameter, with the
+    /// reason its meaning is visible at the call site anyway. A `bool` whose
+    /// sense is invisible where it is passed (`Written::new(true, …)`, the
+    /// auth flag `web::router(…, false)`) is an enum instead — `WriteMode`,
+    /// `AuthMode`, `LiveQuotes`, `CookieSecurity` — so a new one fails
+    /// [`no_function_takes_an_unclassified_bool_parameter`] until it is
+    /// converted or classified here.
+    const BOOL_PARAMETERS_ALLOWED: &[(&str, &str, &str)] = &[
+        (
+            "infra/http.rs",
+            "of",
+            "`Upsert::of` is the one adapter from the existence query's answer \
+             (`crud_exists`) to the `Upsert` every write then carries",
+        ),
+        (
+            "entities/closing_price/live.rs",
+            "requested",
+            "`LiveQuotes::requested` is the one adapter from a report request's \
+             serde `live` field to the enum the pricing path takes",
+        ),
+        (
+            "infra/http.rs",
+            "deleted",
+            "every caller passes a local named `found`, the answer of the delete it just ran",
+        ),
+        (
+            "infra/http.rs",
+            "deleted_with_body",
+            "private twin of `deleted`; its one caller binds the delete's answer as `found`",
+        ),
+        (
+            "api_spec.rs",
+            "operation_id",
+            "private; its one caller passes a local named `answers_array`",
+        ),
+        (
+            "infra/email.rs",
+            "align",
+            "private; called with `table.numeric[i]`, the column's own named flag",
+        ),
+        (
+            "domain/deduction_destination.rs",
+            "destination",
+            "the domain takes the fact rather than the entity type (CLAUDE.md, \
+             `src/domain/`); every caller passes `….is_debt_deduction()`",
+        ),
+        (
+            "domain/tax_year.rs",
+            "amit_in_tax_year",
+            "callers pass the listing's stored `amit` column by name",
+        ),
+        (
+            "entities/rights_sale.rs",
+            "resolve_fx_rate",
+            "private; its one caller passes `amounts.converts_nothing()`",
+        ),
+        (
+            "entities/trade/checks.rs",
+            "resolve_brokerage",
+            "both callers pass the request body's `brokerage_includes_gst` field",
+        ),
+        (
+            "reports/net_capital_gain.rs",
+            "reduction_for_units",
+            "private; its one caller passes the cohort's named `disposal` field",
+        ),
+        (
+            "reports/performance.rs",
+            "build_row",
+            "private; its callers pass the locals `open` / `any_open`",
+        ),
+    ];
+
+    /// The `(file, fn)` of every function in non-test code with a parameter
+    /// typed `bool`.
+    fn functions_taking_a_bool() -> Vec<(String, String)> {
+        let test_only = |path: &str| {
+            path == "test_support.rs"
+                || path.ends_with("/test_support.rs")
+                || path == "ato_examples.rs"
+                || path == "doc_checks.rs"
+                || path.contains("/tests/")
+        };
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut found = Vec::new();
+        for source in crate::test_support::rust_sources() {
+            if test_only(&source.path) {
+                continue;
+            }
+            let code = source.production.as_str();
+            let mut rest = code;
+            while let Some(at) = rest.find("fn ") {
+                let preceded_by_ident = rest[..at].chars().next_back().is_some_and(ident);
+                rest = &rest[at + 3..];
+                if preceded_by_ident {
+                    continue;
+                }
+                let name: String = rest.chars().take_while(|&c| ident(c)).collect();
+                let Some(open) = rest.find('(') else { break };
+                // A signature reaches its parameter list before any body or `;`.
+                if name.is_empty() || rest[..open].contains(['{', ';']) {
+                    continue;
+                }
+                let mut depth = 0;
+                let close = rest[open..]
+                    .char_indices()
+                    .find(|&(_, c)| {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        depth == 0
+                    })
+                    .map(|(i, _)| open + i)
+                    .expect("a parameter list closes");
+                let params = &rest[open + 1..close];
+                let takes_bool = params.split(',').any(|param| {
+                    param
+                        .split_once(':')
+                        .is_some_and(|(_, ty)| ty.trim() == "bool")
+                });
+                if takes_bool {
+                    found.push((source.path.clone(), name));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// See [`BOOL_PARAMETERS_ALLOWED`]: a `bool` parameter is either an enum or
+    /// classified there with its reason, and no classification outlives its
+    /// function.
+    #[test]
+    fn no_function_takes_an_unclassified_bool_parameter() {
+        let found = functions_taking_a_bool();
+        let allowed = |path: &str, name: &str| {
+            BOOL_PARAMETERS_ALLOWED
+                .iter()
+                .any(|&(p, n, _)| p == path && n == name)
+        };
+        let unclassified: Vec<_> = found
+            .iter()
+            .filter(|(path, name)| !allowed(path, name))
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "a `bool` parameter whose meaning the call site cannot see — take an enum \
+             (`WriteMode`, `AuthMode`, …) or classify it in BOOL_PARAMETERS_ALLOWED: \
+             {unclassified:?}"
+        );
+        let stale: Vec<_> = BOOL_PARAMETERS_ALLOWED
+            .iter()
+            .filter(|&&(p, n, _)| !found.iter().any(|(path, name)| path == p && name == n))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "classified but no longer taking a `bool`: {stale:?}"
+        );
     }
 }

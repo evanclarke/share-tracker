@@ -189,7 +189,7 @@ async fn unrealised_gains_handler(
     let live = closing_price::resolve_live_prices(
         &pool,
         fetcher.as_ref().map(|f| f.0.as_ref()),
-        req.live,
+        closing_price::LiveQuotes::requested(req.live),
         &req.prices,
         gains.iter().map(|g| g.listing_id),
     )

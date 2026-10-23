@@ -458,7 +458,7 @@ async fn demerge(
     Query(query): Query<DryRunQuery>,
 ) -> Result<Written<Demerge>, ApiError> {
     let demerge = execute(&pool, action_id, query.mode()).await?;
-    Ok(Written::new(query.dry_run, demerge))
+    Ok(Written::new(query.mode(), demerge))
 }
 
 impl From<DemergeError> for ApiError {

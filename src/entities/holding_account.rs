@@ -147,13 +147,13 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists_opt::<HoldingAccount, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<HoldingAccount, _>(&mut *tx, id).await?);
     let result = query.bind(&account.name).execute(&mut *tx).await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the created row is read back
     // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| HoldingAccountId(result.last_insert_rowid()));
-    let upserted = http::crud_upserted::<HoldingAccount, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<HoldingAccount, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

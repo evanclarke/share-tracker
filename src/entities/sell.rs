@@ -517,7 +517,7 @@ async fn write(
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity"). A Sell is a
     // `trades` row, so the check is against that table.
-    let existed = http::crud_exists_opt::<Trade, _>(&mut *tx, id).await?;
+    let outcome = http::Upsert::of(http::crud_exists_opt::<Trade, _>(&mut *tx, id).await?);
 
     // Recorded with the date, as on the trade path: a supplied value is the
     // taxpayer's assertion and is never rewritten; a computed one is
@@ -619,7 +619,7 @@ async fn write(
         return Err(SellError::NonTradingDay(shut.describe(body.date)));
     }
 
-    let upserted = http::crud_upserted::<Trade, _>(&mut *tx, existed, written).await?;
+    let upserted = http::crud_upserted::<Trade, _>(&mut *tx, outcome, written).await?;
     mode.finish(tx).await?;
     Ok(upserted)
 }
@@ -1017,7 +1017,7 @@ async fn create(
     Json(body): Json<SellBody>,
 ) -> Result<Written<Trade>, ApiError> {
     let created = db_create_sell(&pool, &body, query.mode()).await?;
-    Ok(Written::new(query.dry_run, created.present()))
+    Ok(Written::new(query.mode(), created.present()))
 }
 
 #[utoipa::path(

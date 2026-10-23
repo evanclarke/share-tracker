@@ -41,6 +41,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use super::auth::AuthMode;
 use super::http::ApiError;
 
 /// The `Sec-Fetch-Site` header, which axum's `header` module does not name.
@@ -56,13 +57,15 @@ pub struct RequestGuard {
 }
 
 impl RequestGuard {
-    /// `auth_configured` decides whether the `Host` check runs at all;
-    /// `allowed_hosts` are the config file's extra names (beyond `localhost`
-    /// and IP addresses, which are always allowed).
-    pub fn new(auth_configured: bool, allowed_hosts: &[String]) -> Self {
+    /// `mode` decides whether the `Host` check runs at all (only when
+    /// [`AuthMode::Open`]); `allowed_hosts` are the config file's extra names
+    /// (beyond `localhost` and IP addresses, which are always allowed).
+    pub fn new(mode: AuthMode, allowed_hosts: &[String]) -> Self {
         RequestGuard {
-            allowed_hosts: (!auth_configured)
-                .then(|| allowed_hosts.iter().map(|h| normalise_host(h)).collect()),
+            allowed_hosts: match mode {
+                AuthMode::Required => None,
+                AuthMode::Open => Some(allowed_hosts.iter().map(|h| normalise_host(h)).collect()),
+            },
         }
     }
 
@@ -162,7 +165,7 @@ mod tests {
     }
 
     fn open() -> RequestGuard {
-        RequestGuard::new(false, &["Bigbrain.lan".to_string()])
+        RequestGuard::new(AuthMode::Open, &["Bigbrain.lan".to_string()])
     }
 
     #[test]
@@ -207,7 +210,7 @@ mod tests {
     /// check is skipped — a proxied deployment's public name needs no listing.
     #[test]
     fn with_auth_any_host_is_served() {
-        let guard = RequestGuard::new(true, &[]);
+        let guard = RequestGuard::new(AuthMode::Required, &[]);
         assert_eq!(
             guard.refusal(&Method::GET, &headers(&[("host", "tracker.example.com")])),
             None
@@ -216,7 +219,7 @@ mod tests {
 
     #[test]
     fn a_write_the_browser_marks_cross_site_is_refused_whatever_auth_says() {
-        for guard in [open(), RequestGuard::new(true, &[])] {
+        for guard in [open(), RequestGuard::new(AuthMode::Required, &[])] {
             for site in ["cross-site", "same-site"] {
                 let h = headers(&[("host", "localhost:3000"), ("sec-fetch-site", site)]);
                 for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {

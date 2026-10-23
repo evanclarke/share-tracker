@@ -87,7 +87,8 @@ pub async fn db_upsert(
     // a check outside it could see no row and then race another `PUT` for the
     // same id, each claiming to have created it (CLAUDE.md, "Data integrity").
     let mut tx = write_tx(pool).await?;
-    let existed = http::crud_exists::<CgtSettings, _>(&mut *tx, settings.id).await?;
+    let outcome =
+        http::Upsert::of(http::crud_exists::<CgtSettings, _>(&mut *tx, settings.id).await?);
     sqlx::query(
         "INSERT INTO cgt_settings (id, opening_capital_loss) VALUES (?, ?) \
          ON CONFLICT(id) DO UPDATE SET opening_capital_loss = excluded.opening_capital_loss",
@@ -96,7 +97,7 @@ pub async fn db_upsert(
     .bind(Money(settings.opening_capital_loss))
     .execute(&mut *tx)
     .await?;
-    let upserted = http::crud_upserted::<CgtSettings, _>(&mut *tx, existed, settings.id).await?;
+    let upserted = http::crud_upserted::<CgtSettings, _>(&mut *tx, outcome, settings.id).await?;
     tx.commit().await?;
     Ok(upserted)
 }

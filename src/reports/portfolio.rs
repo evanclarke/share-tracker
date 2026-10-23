@@ -201,7 +201,7 @@ async fn overview(
     price_holdings(
         &pool,
         fetcher.as_deref(),
-        req.live,
+        closing_price::LiveQuotes::requested(req.live),
         &req.prices,
         &mut holdings,
     )
@@ -210,14 +210,15 @@ async fn overview(
 }
 
 /// Value `holdings` at a current price: an explicit `prices` entry (AUD per
-/// unit) always wins and is never fetched; otherwise, when `live`, the live
+/// unit) always wins and is never fetched; otherwise, for
+/// [`LiveQuotes::Fetch`](closing_price::LiveQuotes::Fetch), the live
 /// quote — degrading per holding to a `price_unavailable` reason rather than
 /// failing the whole read. Shared by the overview and the activity ledger's
 /// holdings summary, so the two value a holding identically.
 pub(crate) async fn price_holdings(
     pool: &SqlitePool,
     fetcher: Option<&SharedFetcher>,
-    live: bool,
+    live: closing_price::LiveQuotes,
     prices: &HashMap<ListingId, Aud>,
     holdings: &mut [HoldingOverview],
 ) -> Result<(), ApiError> {

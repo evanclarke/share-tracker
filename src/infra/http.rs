@@ -754,26 +754,22 @@ where
 /// statement and its `commit` (a replace answers `204` with no body, so reads
 /// nothing). Reading the row after the commit let a concurrent `DELETE` turn a
 /// committed create into a `500`, or made the `201` report another writer's
-/// row; see [`upsert_response`]. `existed` is the write's [`crud_exists`]
-/// answer, taken in the same transaction before it wrote.
+/// row; see [`upsert_response`]. `outcome` is the write's [`crud_exists`]
+/// answer ([`Upsert::of`]), taken in the same transaction before it wrote.
 pub async fn crud_upserted<'e, E, X>(
     executor: X,
-    existed: bool,
+    outcome: Upsert,
     key: E::Key,
 ) -> Result<Upserted<E>, sqlx::Error>
 where
     E: CrudEntity,
     X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    let stored = if existed {
-        None
-    } else {
-        crud_get::<E, X>(executor, key).await?
+    let created = match outcome {
+        Upsert::Created => crud_get::<E, X>(executor, key).await?,
+        Upsert::Replaced => None,
     };
-    Ok(Upserted {
-        outcome: Upsert::of(existed),
-        created: stored,
-    })
+    Ok(Upserted { outcome, created })
 }
 
 /// Delete one row of `E`'s table by primary key; `true` if a row went.

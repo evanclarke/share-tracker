@@ -107,11 +107,25 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   instead. The compiler enforces the shapes; the existing tests for each (the `apportion`
   property, the `split_ratio` interval tests, every upsert round-trip, the fx fallback test)
   now assert against the named fields
-- [ ] `bool` parameters whose meaning is invisible at the call site (19 fns): `Written::new(dry_run:
+- [x] `bool` parameters whose meaning is invisible at the call site (19 fns): `Written::new(dry_run:
   bool, …)` (`infra/respond.rs:160`) should take the existing `WriteMode`; the auth flag threaded as
   `bool` through `web::router`, `web::index_html`, `app::api_routes` and `RequestGuard::new` should
   be one `AuthMode` enum; review the rest (`http::deleted(found: bool, …)`, `Upsert::of(existed:
   bool)`) and either convert or name the argument at each call site
+  Done 2026-10-23: `Written::new` takes a `WriteMode` (plus `Written::upserted(Upsert, …)` for
+  `POST /closing_prices/fetch`'s create-or-replace), and the AMMA generation's `preview` is a
+  `WriteMode` through `write_or_preview` too. `infra::auth::AuthMode { Required, Open }` replaces
+  the auth flag in those four and in `api_spec`'s `document_for`/`publish`/`components`/`router`.
+  Also converted: `crud_upserted` takes the `Upsert` (so `amit_adjustment`'s `outcome ==
+  Upsert::Replaced` round trip is gone), `Auth::new`'s `secure_cookie` is `CookieSecurity`,
+  `login_submit`'s `html` is `LoginClient`, `resolve_live_prices`/`price_holdings` take
+  `LiveQuotes`, the scheduler's `db_finish_run`/`db_record_run` take the `&JobOutcome` in place of
+  `success` + `error` + `note`, `units_held_problem` takes `AdjustmentSet`, and `Occupants::new`'s
+  two same-typed flags became a struct literal. `deleted(found, …)`'s three callers now bind
+  `found` first. Twelve `bool` parameters stay, each named at its call site (`Upsert::of` and
+  `LiveQuotes::requested` are the two bool-to-enum adapters). Test:
+  `app::tests::no_function_takes_an_unclassified_bool_parameter` scans every non-test file and
+  fails on a `bool` parameter not in its reasoned `BOOL_PARAMETERS_ALLOWED` (and on a stale entry)
 - [ ] `#[must_use]` is on one item in the tree (`fx::Provisional`); clippy's `must_use_candidate`
   never fires in a binary crate. Add it to the pure domain arithmetic whose dropped result is a
   silent money error — `mul_div`, `apportion`, `split_ratio`, `CostBase::into_aud_with`,

@@ -198,9 +198,10 @@ pub async fn db_upsert_on(
     // The exists check runs on the caller's own connection, so it is inside
     // whatever transaction the write goes on to use — for [`db_upsert`] that
     // is its own `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
-    let existed = http::crud_exists::<AmitAdjustment, _>(&mut *conn, adj.id).await?;
+    let outcome =
+        http::Upsert::of(http::crud_exists::<AmitAdjustment, _>(&mut *conn, adj.id).await?);
     db_write_on(conn, Some(adj.id), &adjustment_body(adj)).await?;
-    Ok(Upsert::of(existed))
+    Ok(outcome)
 }
 
 /// Write a *new* adjustment, letting the database assign its id, and answer
@@ -554,9 +555,7 @@ pub async fn db_upsert(
     // racing.
     let mut tx = write_tx(pool).await?;
     let outcome = db_upsert_on(&mut tx, adj).await?;
-    let upserted =
-        http::crud_upserted::<AmitAdjustment, _>(&mut *tx, outcome == Upsert::Replaced, adj.id)
-            .await?;
+    let upserted = http::crud_upserted::<AmitAdjustment, _>(&mut *tx, outcome, adj.id).await?;
     tx.commit().await?;
     Ok(upserted)
 }
