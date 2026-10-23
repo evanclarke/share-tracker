@@ -42,7 +42,7 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::{date, db};
-use crate::reports;
+use crate::reports::{labels, taxpayer};
 use axum::Extension;
 use axum::extract::State;
 use chrono::NaiveDate;
@@ -589,7 +589,7 @@ pub struct OptimiserResponse {
     pub strategies: Vec<StrategySummary>,
     pub allocations: Vec<StrategyAllocation>,
     /// Informational: the taxpayer assumption behind the hard-wired rates
-    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 50% discount the
+    /// (always [`crate::reports::taxpayer::TAXPAYER_BASIS`]) — the 50% discount the
     /// strategies weight discount-eligible gains at is the
     /// Australian-resident-individual rate; other entity types are not
     /// modelled. Stated once for the whole response rather than repeated per
@@ -643,8 +643,8 @@ async fn optimiser_handler(
     if req.units > open {
         return Err(ApiError::Unprocessable(format!(
             "only {open} unit(s) of {} are open in {}",
-            super::listing_label(&pool, req.listing_id).await?,
-            super::account_label(&pool, req.holding_account_id).await?
+            labels::listing_label(&pool, req.listing_id).await?,
+            labels::account_label(&pool, req.holding_account_id).await?
         )));
     }
 
@@ -669,13 +669,13 @@ async fn optimiser_handler(
                 Some(Err(reason)) => {
                     return Err(ApiError::Unprocessable(format!(
                         "no live price for {}: {reason} — supply a price",
-                        super::listing_label(&pool, req.listing_id).await?
+                        labels::listing_label(&pool, req.listing_id).await?
                     )));
                 }
                 None => {
                     return Err(ApiError::Unprocessable(format!(
                         "no live price for {} — supply a price",
-                        super::listing_label(&pool, req.listing_id).await?
+                        labels::listing_label(&pool, req.listing_id).await?
                     )));
                 }
             }
@@ -705,7 +705,7 @@ async fn optimiser_handler(
         price_as_of,
         strategies,
         allocations,
-        taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
+        taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
     }))
 }
 
@@ -715,7 +715,6 @@ mod tests {
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::{corporate_action, sell};
     use crate::infra::date;
-    use crate::reports;
     use crate::reports::net_capital_gain::WhatIfResponse;
     use crate::reports::realised_gains::{DisposalId, RealisedGainLoss};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
@@ -1499,7 +1498,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(r.taxpayer_basis, reports::TAXPAYER_BASIS);
+        assert_eq!(r.taxpayer_basis, taxpayer::TAXPAYER_BASIS);
     }
 
     #[tokio::test]

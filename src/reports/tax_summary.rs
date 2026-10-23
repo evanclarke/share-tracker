@@ -11,9 +11,8 @@ use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
 use crate::infra::respond::{Csv, Payload};
-use crate::reports;
 use crate::reports::export::{self, Cents};
-use crate::reports::franking;
+use crate::reports::{franking, taxpayer};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -308,7 +307,7 @@ pub struct TaxYearSummary {
     /// own lines, so they are not folded in here.
     pub net_assessable_investment_income: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
-    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the LIC capital gain
+    /// (always [`crate::reports::taxpayer::TAXPAYER_BASIS`]) — the LIC capital gain
     /// deduction passed through here is the Australian-resident-individual 50%
     /// figure from the income record; other entity types are not modelled.
     pub taxpayer_basis: String,
@@ -470,7 +469,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         deductions_dividend_and_interest: Decimal::ZERO,
         deductions_total: Decimal::ZERO,
         net_assessable_investment_income: Decimal::ZERO,
-        taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
+        taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
     }
 }
 
@@ -1296,7 +1295,6 @@ mod tests {
         amma, ess_statement, income, interest_income, investment_expense, listing, rba_fx_rate,
         trade,
     };
-    use crate::reports;
     use crate::reports::tax_report;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::{StatusCode, header};
@@ -1430,7 +1428,7 @@ mod tests {
 
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].taxpayer_basis, reports::TAXPAYER_BASIS);
+        assert_eq!(result[0].taxpayer_basis, taxpayer::TAXPAYER_BASIS);
         // The assumption ships in the CSV export too (CSV_HEADER names it).
         assert!(CSV_HEADER.contains(&"taxpayer_basis"));
     }
@@ -3041,7 +3039,7 @@ mod tests {
         assert_eq!(at("deductions_total"), "0.00");
         // Not money, and untouched: the year and the taxpayer assumption.
         assert_eq!(at("tax_year"), "2024");
-        assert_eq!(at("taxpayer_basis"), reports::TAXPAYER_BASIS);
+        assert_eq!(at("taxpayer_basis"), taxpayer::TAXPAYER_BASIS);
         // Every money cell is at the cent — none escaped the projection.
         for (i, cell) in row.iter().enumerate() {
             if header[i] == "tax_year" || header[i] == "taxpayer_basis" {

@@ -9,7 +9,7 @@ use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::{HoldingAccountId, ListingId, RightsSaleId, TradeId};
-use crate::reports;
+use crate::reports::taxpayer;
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -84,7 +84,7 @@ pub struct RealisedGainLoss {
     /// date then purchase trade id.
     pub parcels: Vec<ParcelDetail>,
     /// Informational: the taxpayer assumption behind the hard-wired rates
-    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 12-month split into
+    /// (always [`crate::reports::taxpayer::TAXPAYER_BASIS`]) — the 12-month split into
     /// `discount_eligible_gain` / `non_discountable_gain` reported here is the
     /// Australian-resident-individual 50% discount's; other entity types are
     /// not modelled. Stated per row, as the tax-summary and net-capital-gain
@@ -664,7 +664,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 non_discountable_gain: non_discount_gain,
                 capital_loss: loss,
                 parcels,
-                taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
+                taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
             })
         })
         .collect();
@@ -770,7 +770,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             non_discountable_gain: non_discount_gain,
             capital_loss: loss,
             parcels,
-            taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
+            taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
         });
     }
 
@@ -811,7 +811,6 @@ mod tests {
         scrip_exchange, trade, transfer,
     };
     use crate::infra::decimal;
-    use crate::reports;
     use crate::reports::open_parcels;
     use crate::test_support::{self, ApiClient, allocate, test_pool};
     use axum::http::StatusCode;
@@ -2172,7 +2171,7 @@ mod tests {
             .get_json("/portfolio/realised_gains")
             .await;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].taxpayer_basis, reports::TAXPAYER_BASIS);
+        assert_eq!(result[0].taxpayer_basis, taxpayer::TAXPAYER_BASIS);
     }
 
     // Return of capital (CGT event G1)

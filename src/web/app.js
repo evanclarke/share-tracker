@@ -2814,7 +2814,7 @@ async function viewReport(report, args, seq = navigationToken()) {
   }
 
   // The taxpayer assumption behind the hard-wired CGT/LIC rates
-  // (`reports::TAXPAYER_BASIS`). A report whose rows each state it (tax
+  // (`reports::taxpayer::TAXPAYER_BASIS`). A report whose rows each state it (tax
   // summary, net capital gain, realised gains) shows it as a table column; one
   // that states it once for the whole response — the parcel optimiser, whose
   // strategies are *ranked against each other* on the 50% discount, so the

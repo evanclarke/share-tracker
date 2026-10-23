@@ -54,10 +54,10 @@ use crate::infra::http::ApiError;
 use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{Csv, Payload};
 use crate::infra::{date, db};
-use crate::reports;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use crate::reports::tax_summary::aud_field;
+use crate::reports::{labels, taxpayer};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -125,7 +125,7 @@ pub struct NetCapitalGainYear {
     /// period at the payment date; surfaced separately for transparency.
     pub cgt_event_c2_gain: Decimal,
     /// Informational: the taxpayer assumption behind the hard-wired rates
-    /// (always [`crate::reports::TAXPAYER_BASIS`]) — the 50% discount applied
+    /// (always [`crate::reports::taxpayer::TAXPAYER_BASIS`]) — the 50% discount applied
     /// here is the Australian-resident-individual rate; other entity types are
     /// not modelled.
     pub taxpayer_basis: String,
@@ -1013,7 +1013,7 @@ fn net_years(
                 cgt_event_e10_gain: to_cents(b.e10),
                 cgt_event_g1_gain: to_cents(b.g1),
                 cgt_event_c2_gain: to_cents(b.c2),
-                taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
+                taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
                 // Attached by the caller (`db_net_capital_gain` groups the
                 // already-fetched realised rows by tax year); left empty here
                 // and on every what-if scenario row.
@@ -1386,13 +1386,13 @@ async fn what_if_handler(
                 }
                 let Some(left) = remaining.get_mut(&a.purchase_trade_id) else {
                     let in_account = match req.holding_account_id {
-                        Some(h) => format!(" in {}", super::account_label(&pool, h).await?),
+                        Some(h) => format!(" in {}", labels::account_label(&pool, h).await?),
                         None => String::new(),
                     };
                     return Err(ApiError::Unprocessable(format!(
                         "parcel {} is not an open parcel of {}{in_account}",
                         a.purchase_trade_id,
-                        super::listing_label(&pool, req.listing_id).await?
+                        labels::listing_label(&pool, req.listing_id).await?
                     )));
                 };
                 if a.units > *left {
@@ -1426,12 +1426,12 @@ async fn what_if_handler(
                 // Same wording as the allocations branch above and the
                 // optimiser's own over-request refusal.
                 let in_account = match req.holding_account_id {
-                    Some(h) => format!(" in {}", super::account_label(&pool, h).await?),
+                    Some(h) => format!(" in {}", labels::account_label(&pool, h).await?),
                     None => String::new(),
                 };
                 return Err(ApiError::Unprocessable(format!(
                     "only {open} unit(s) of {} are open{in_account}",
-                    super::listing_label(&pool, req.listing_id).await?
+                    labels::listing_label(&pool, req.listing_id).await?
                 )));
             }
             // The per-unit price the strategy's gain orderings see.
@@ -1713,11 +1713,11 @@ mod tests {
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].taxpayer_basis, reports::TAXPAYER_BASIS);
+        assert_eq!(r[0].taxpayer_basis, taxpayer::TAXPAYER_BASIS);
         // The assumption ships in the CSV export too (CSV_HEADER names it); a
         // comma in the text would split it across CSV fields.
         assert!(CSV_HEADER.contains(&"taxpayer_basis"));
-        assert!(!reports::TAXPAYER_BASIS.contains(','));
+        assert!(!taxpayer::TAXPAYER_BASIS.contains(','));
     }
 
     #[tokio::test]
@@ -4433,7 +4433,7 @@ mod tests {
         assert_eq!(at("other_gains"), "0.00");
         // Not money, and untouched: the year and the taxpayer assumption.
         assert_eq!(at("tax_year"), "2024");
-        assert_eq!(at("taxpayer_basis"), reports::TAXPAYER_BASIS);
+        assert_eq!(at("taxpayer_basis"), taxpayer::TAXPAYER_BASIS);
         // Every money cell is at the cent — none escaped the projection.
         for (i, cell) in row.iter().enumerate() {
             if header[i] == "tax_year" || header[i] == "taxpayer_basis" {

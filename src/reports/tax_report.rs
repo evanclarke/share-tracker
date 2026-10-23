@@ -58,7 +58,7 @@ use crate::infra::{date, db, decimal};
 use crate::reports::realised_gains::DisposalId;
 use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
-    net_capital_gain, realised_gains, rollover_consistency, tax_summary,
+    net_capital_gain, realised_gains, rollover_consistency, tax_summary, taxpayer,
 };
 use axum::extract::State;
 use chrono::{NaiveDate, Utc};
@@ -1988,7 +1988,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             period_start,
             period_end,
             generated_at: Utc::now(),
-            taxpayer_basis: super::TAXPAYER_BASIS.to_owned(),
+            taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
         },
         completeness,
@@ -2118,7 +2118,6 @@ mod tests {
         interest_income, investment_expense, listing_rename, rba_fx_rate, sell,
     };
     use crate::infra::{date, decimal};
-    use crate::reports;
     use crate::test_support::{self, ApiClient, dec, ymd};
     use axum::http::StatusCode;
 
@@ -5640,7 +5639,7 @@ mod tests {
                 indexation_eligible: false,
                 indexed_cost_base: None,
             }],
-            taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
+            taxpayer_basis: taxpayer::TAXPAYER_BASIS.to_owned(),
         };
 
         let err = disposal_parcel_rows(&disposal, &inputs).unwrap_err();

@@ -1075,18 +1075,26 @@ mod tests {
             "one family of the health report's checks: each reads on the connection of the one read transaction `db_health` (reports/health/mod.rs) begins and passes down",
         ),
         (
+            "reports/labels.rs",
+            "the two message-label helpers, one SELECT each — no multi-read result to hold \
+             together",
+        ),
+        (
             "reports/mic_validation.rs",
             "one SELECT — a single statement is its own consistent snapshot",
         ),
         (
             "reports/mod.rs",
-            "router assembly plus the two message-label helpers, one SELECT each — no \
-             multi-read result to hold together",
+            "module declarations and router assembly — no database access",
         ),
         (
             "reports/snapshot.rs",
             "the one report that writes: its transaction is infra::db::write_tx, and its \
              reads run inside it via the _on helpers",
+        ),
+        (
+            "reports/taxpayer.rs",
+            "no database access: the taxpayer-basis constant only",
         ),
         (
             "reports/weekly_summary.rs",

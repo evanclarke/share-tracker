@@ -3,16 +3,8 @@
 //! validation (exchange MIC validation, settlement-holiday coverage). The one
 //! exception to "no writes" is `snapshot`, which persists the price-dependent
 //! reports' daily results to `report_snapshots`.
-use crate::infra::id::{HoldingAccountId, ListingId};
 use sqlx::SqlitePool;
 use utoipa_axum::router::OpenApiRouter;
-
-/// Taxpayer assumption stated on every tax-report row: the rates are hard-wired
-/// for an Australian-resident *individual* — the 50% CGT discount and the 50%
-/// LIC capital gain deduction. Other entity types (SMSF/complying super 33⅓%,
-/// company 0%, trust/partnership flow-through) are deliberately not modelled
-/// (scope decision, 2026-06-07). Kept comma-free so it stays a single CSV field.
-pub const TAXPAYER_BASIS: &str = "individual resident: 50% CGT discount; 50% LIC deduction";
 
 pub mod activity;
 pub mod amit_adjustment_cross_check;
@@ -25,6 +17,7 @@ pub mod franking_at_risk;
 pub mod fx_coverage;
 pub mod health;
 pub mod indexation_cross_check;
+pub mod labels;
 pub mod mic_validation;
 pub mod net_capital_gain;
 pub mod open_parcels;
@@ -39,6 +32,7 @@ pub mod settlement_coverage;
 pub mod snapshot;
 pub mod tax_report;
 pub mod tax_summary;
+pub mod taxpayer;
 pub mod unrealised_gains;
 pub mod valuation;
 pub mod wash_sales;
@@ -46,37 +40,6 @@ pub mod wash_sales;
 /// the reports above with no routes of its own — the `weekly-summary` job is
 /// its only caller, so it is not merged into `router` below.
 pub mod weekly_summary;
-
-/// A listing's ticker for a rejection or detail message — the error-bodies
-/// contract (API.md) names entities by ticker/name, never by raw foreign-key
-/// id. Falls back to `listing <id>` when no such row exists (e.g. an unknown
-/// id straight from the request).
-pub(crate) async fn listing_label(
-    pool: &SqlitePool,
-    listing_id: ListingId,
-) -> Result<String, sqlx::Error> {
-    let ticker: Option<String> = sqlx::query_scalar("SELECT ticker FROM listings WHERE id = ?")
-        .bind(listing_id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(ticker.unwrap_or_else(|| format!("listing {listing_id}")))
-}
-
-/// A holding account's quoted name for a message (`account 'Default'`),
-/// falling back to `account <id>` when no such row exists.
-pub(crate) async fn account_label(
-    pool: &SqlitePool,
-    account_id: HoldingAccountId,
-) -> Result<String, sqlx::Error> {
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM holding_accounts WHERE id = ?")
-        .bind(account_id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(name.map_or_else(
-        || format!("account {account_id}"),
-        |n| format!("account '{n}'"),
-    ))
-}
 
 /// Merge every report's routes into a single router.
 pub fn router() -> OpenApiRouter<SqlitePool> {
