@@ -374,7 +374,13 @@ async fn execute(
                 currency.clone(),
                 *renounceable,
             ),
-            _ => return Err(ExerciseError::NotARightsIssue),
+            ActionKind::ReturnOfCapital { .. }
+            | ActionKind::ShareSplit { .. }
+            | ActionKind::BonusIssue { .. }
+            | ActionKind::BuyBack { .. }
+            | ActionKind::ScripForScrip { .. }
+            | ActionKind::Demerger { .. }
+            | ActionKind::WorthlessShares { .. } => return Err(ExerciseError::NotARightsIssue),
         };
     // The *exercise* itself is identical under both offers
     // (`docs/ato/rights-issues.md` — the cost-base rules turn on how the

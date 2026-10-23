@@ -62,7 +62,12 @@ impl ParcelOrigin {
     fn trade_type(self) -> super::TradeType {
         match self {
             ParcelOrigin::DrpReinvestment => super::TradeType::DRP,
-            _ => super::TradeType::Buy,
+            ParcelOrigin::EssVest(_)
+            | ParcelOrigin::Inheritance(_)
+            | ParcelOrigin::RightsExercise(_)
+            | ParcelOrigin::ScripExchange(_)
+            | ParcelOrigin::Demerger(_)
+            | ParcelOrigin::Transfer(_) => super::TradeType::Buy,
         }
     }
 }

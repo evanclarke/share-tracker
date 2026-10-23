@@ -512,7 +512,11 @@ pub(crate) fn non_trading_day(market: &Market, date: NaiveDate) -> Option<NonTra
     }
     let reason = match date.weekday() {
         chrono::Weekday::Sat | chrono::Weekday::Sun => NonTradingReason::Weekend,
-        _ => NonTradingReason::Holiday,
+        chrono::Weekday::Mon
+        | chrono::Weekday::Tue
+        | chrono::Weekday::Wed
+        | chrono::Weekday::Thu
+        | chrono::Weekday::Fri => NonTradingReason::Holiday,
     };
     Some(NonTradingDay {
         exchange_mic: exchange.mic.clone(),

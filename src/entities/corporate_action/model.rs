@@ -847,7 +847,16 @@ impl CorporateActionBody {
                     worthless_event: self.worthless_event?,
                 })
             }
-            _ => None,
+            // Each type's guard failing: its fields do not form a valid
+            // action of that type.
+            ActionType::ReturnOfCapital
+            | ActionType::ShareSplit
+            | ActionType::BonusIssue
+            | ActionType::RightsIssue
+            | ActionType::BuyBack
+            | ActionType::ScripForScrip
+            | ActionType::Demerger
+            | ActionType::WorthlessShares => None,
         }
     }
 }

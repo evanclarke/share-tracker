@@ -605,7 +605,13 @@ async fn execute(
             currency.clone(),
             *renounceable,
         ),
-        _ => return Err(SellRightsError::NotARightsIssue),
+        ActionKind::ReturnOfCapital { .. }
+        | ActionKind::ShareSplit { .. }
+        | ActionKind::BonusIssue { .. }
+        | ActionKind::BuyBack { .. }
+        | ActionKind::ScripForScrip { .. }
+        | ActionKind::Demerger { .. }
+        | ActionKind::WorthlessShares { .. } => return Err(SellRightsError::NotARightsIssue),
     };
     // What the offer's own terms allow. A non-renounceable entitlement cannot
     // be traded, transferred or assigned (TR 2012/1 para 2), so it can neither

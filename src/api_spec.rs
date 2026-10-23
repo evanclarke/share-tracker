@@ -393,7 +393,7 @@ fn slice_where(
                 }
             }
             Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
-            _ => {}
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
 

@@ -126,3 +126,10 @@ tracing-test = "0.2"
 # SQLite C library, which every test exercises heavily.
 [profile.dev.package."*"]
 opt-level = 2
+
+[lints.clippy]
+# A `_`/binding catch-all over an enum silently absorbs a variant added later
+# instead of failing to compile at the match that must decide what it means.
+# The deliberate catch-alls carry a reasoned `#[expect]`; test code is exempt
+# (`main.rs`'s `cfg_attr`), since a test's `_ => panic!` is the decision.
+wildcard_enum_match_arm = "warn"

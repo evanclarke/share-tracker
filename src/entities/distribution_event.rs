@@ -329,7 +329,9 @@ impl From<StoreError> for ApiError {
     fn from(e: StoreError) -> Self {
         match e {
             StoreError::Db(e) => e.into(),
-            other => ApiError::Unprocessable(other.to_string()),
+            other @ (StoreError::NotPositive { .. } | StoreError::CurrencyMismatch { .. }) => {
+                ApiError::Unprocessable(other.to_string())
+            }
         }
     }
 }

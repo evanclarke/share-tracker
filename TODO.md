@@ -78,7 +78,7 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   no `unsafe` outside `test_support`'s documented FFI. Done 2026-10-23: `build_filter(Option<&str>)`
   is tested as a pure function, and `logging::tests::unsafe_code_is_confined_to_test_support`
   scans every file's code for the `unsafe` keyword
-- [ ] Wildcard arms over first-party enums, where a new variant would silently take the catch-all
+- [x] Wildcard arms over first-party enums, where a new variant would silently take the catch-all
   instead of failing to compile — list the variants: `ActionKind` (`buyback_participation.rs:217`,
   `rights_exercise.rs:377`, `rights_sale.rs:608`), `ActionType` (`corporate_action/model.rs:850`),
   `ParcelOrigin` (`trade/new_parcel.rs:65`), `FxError` (`infra/fx.rs:200`), `StoreError`
@@ -86,6 +86,12 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   files may stay, each with a comment saying why; third-party enums (yfinance, `serde_json::Value`,
   `Weekday`, sqlx `ErrorKind`) are out of scope. Test: enable `clippy::wildcard_enum_match_arm` (or
   a scan) with the deliberate exceptions `#[allow]`ed and reasoned
+  Done 2026-10-23: `Cargo.toml` now has a `[lints.clippy]` table enabling
+  `wildcard_enum_match_arm` for production code (`main.rs` exempts `cfg(test)`). Every first-party
+  site lists its variants, and so do the closed third-party enums (`Weekday`, `serde_json::Value`).
+  The SellError pass-throughs and the `#[non_exhaustive]` third-party matches (yfinance `YfError`/
+  `Action`, sqlx `ErrorKind`) carry a reasoned fn-level `#[expect]`, because an arm-level attribute
+  is not honoured. Gate mutation-checked: a restored `_` in `new_parcel.rs` fails clippy
 - [ ] Named fields over tuples, worst first where the pair is same-typed and swappable:
   `email::Document::render -> (String, String)` (HTML vs plain text), `decimal::apportion ->
   (Decimal, Decimal)` (share, rest), `adjustments::split_ratio`/`rebase_ratio -> (Decimal, Decimal)`
@@ -107,7 +113,8 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   `should_implement_trait` example), `RateMonth::parse` (`fx.rs:78`), `BasePath::parse`
   (`config.rs:342`), the email address `parse` (`email.rs:123`), `AuditedTable::parse`
   (`row_history.rs:105`); sqlx decode adapts the trait's error where it needs `sqlx::Error`
-- [ ] Encode the rules: add a `[lints.clippy]` table to `Cargo.toml` (so CI's `-D warnings` enforces
+- [ ] Encode the rules: extend the `[lints.clippy]` table in `Cargo.toml` (added with
+  `wildcard_enum_match_arm`) (so CI's `-D warnings` enforces
   it) with at least `unwrap_used` (+ `allow-unwrap-in-tests = true` in `clippy.toml`),
   `undocumented_unsafe_blocks`, `match_wildcard_for_single_variants`, `str_to_string`,
   `redundant_clone`, `needless_pass_by_value`, `format_push_string`, `cast_possible_truncation`.

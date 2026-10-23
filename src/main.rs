@@ -1,3 +1,7 @@
+// A test's catch-all (`_ => panic!(…)`) is itself the decision a new variant
+// needs, so the wildcard-arm lint `Cargo.toml` enables gates production code.
+#![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]
+
 mod api_spec;
 mod app;
 // API-level acceptance tests reproducing the worked examples in the ATO docs.

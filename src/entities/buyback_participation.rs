@@ -124,6 +124,14 @@ pub enum ParticipationError {
 }
 
 impl From<sell::SellError> for ParticipationError {
+    // Every rejection but the database's is wrapped whole: the 422 wording
+    // lives in the wrapper's `From<…> for ApiError` arm, which matches the
+    // variants it can reach, so a new `SellError` variant needs no decision
+    // here.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "a pass-through of every non-database SellError"
+    )]
     fn from(e: sell::SellError) -> Self {
         match e {
             sell::SellError::Db(err) => ParticipationError::Db(err),
@@ -214,7 +222,13 @@ async fn execute(
             *buyback_market_value,
             currency.clone(),
         ),
-        _ => return Err(ParticipationError::NotABuyBack),
+        ActionKind::ReturnOfCapital { .. }
+        | ActionKind::ShareSplit { .. }
+        | ActionKind::BonusIssue { .. }
+        | ActionKind::RightsIssue { .. }
+        | ActionKind::ScripForScrip { .. }
+        | ActionKind::Demerger { .. }
+        | ActionKind::WorthlessShares { .. } => return Err(ParticipationError::NotABuyBack),
     };
     if body.date < action.date {
         return Err(ParticipationError::BeforeBuyBackDate);

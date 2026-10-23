@@ -81,6 +81,10 @@ fn yahoo_symbol_for(market: &Market, identity: &MarketIdentity) -> Result<String
 /// crumb problem and a `429` is a rate limit, neither of which is evidence
 /// that the symbol is wrong, and misdiagnosing an outage as a dead symbol is
 /// the failure mode this narrowness exists to prevent.
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "`YfError` is non-exhaustive, and every other failure is `Other` by design"
+)]
 pub(crate) fn classify_yahoo_failure(symbol: &str, error: yfinance_rs::YfError) -> FetchError {
     let message = format!("yahoo fetch for {symbol} failed: {error}");
     match error {

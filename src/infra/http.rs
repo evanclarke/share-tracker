@@ -1090,6 +1090,10 @@ fn is_busy_code(code: i32) -> bool {
 /// see [`is_busy`]. It is neither the client's fault nor the server's, so it
 /// is neither a 422 nor a 500 — it answers `503` with [`BUSY_BODY`].
 impl From<sqlx::Error> for ApiError {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "`ErrorKind` is non-exhaustive, and any kind not named is the server's fault"
+    )]
     fn from(err: sqlx::Error) -> Self {
         if let Some(db) = err.as_database_error() {
             if is_busy(db) {

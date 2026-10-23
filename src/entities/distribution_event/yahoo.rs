@@ -134,6 +134,10 @@ impl DistributionFetcher for YahooDistributionFetcher {
         closing_price::yahoo_symbol(market, date)
     }
 
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "`Action` is non-exhaustive, and only its dividends are distributions"
+    )]
     fn distributions<'a>(
         &'a self,
         market: &'a Market,

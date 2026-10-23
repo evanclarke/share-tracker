@@ -197,7 +197,7 @@ impl From<FxError> for sqlx::Error {
     fn from(e: FxError) -> Self {
         match e {
             FxError::Db(inner) => inner,
-            missing => sqlx::Error::Decode(Box::new(missing)),
+            missing @ FxError::MissingRate { .. } => sqlx::Error::Decode(Box::new(missing)),
         }
     }
 }

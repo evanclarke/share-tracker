@@ -157,6 +157,14 @@ pub enum ExchangeError {
 }
 
 impl From<sell::SellError> for ExchangeError {
+    // Every rejection but the database's is wrapped whole: the 422 wording
+    // lives in the wrapper's `From<…> for ApiError` arm, which matches the
+    // variants it can reach, so a new `SellError` variant needs no decision
+    // here.
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "a pass-through of every non-database SellError"
+    )]
     fn from(e: sell::SellError) -> Self {
         match e {
             sell::SellError::Db(err) => ExchangeError::Db(err),

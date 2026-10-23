@@ -448,7 +448,11 @@ fn first_short_name(value: &Value) -> Option<String> {
     }
     match value {
         Value::Array(items) => items.iter().find_map(one),
-        other => one(other),
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Object(_)) => one(other),
     }
 }
 
