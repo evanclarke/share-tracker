@@ -97,14 +97,24 @@ struct AuditedTable {
     key_is_reusable: bool,
 }
 
-impl AuditedTable {
-    /// Resolve a requested table name against [`AUDITED_TABLES`]. `None` for
+/// A table name that is not one of [`AUDITED_TABLES`].
+#[derive(thiserror::Error, Debug)]
+#[error("{0:?} is not an audited table")]
+struct NotAudited(String);
+
+impl std::str::FromStr for AuditedTable {
+    type Err = NotAudited;
+
+    /// Resolve a requested table name against [`AUDITED_TABLES`], refusing
     /// anything else — which [`report`] rejects `422` before it ever reaches
     /// here, and which `row_history.table_name`'s CHECK constraint guarantees
     /// has no entries in the trail either way.
-    fn parse(name: &str) -> Option<Self> {
-        let name = *AUDITED_TABLES.iter().find(|t| **t == name)?;
-        Some(match name {
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let name = *AUDITED_TABLES
+            .iter()
+            .find(|t| **t == name)
+            .ok_or_else(|| NotAudited(name.to_owned()))?;
+        Ok(match name {
             "tax_year_settings" => Self {
                 name,
                 key_column: "tax_year",
@@ -271,7 +281,7 @@ pub async fn db_row_history(
     table: &str,
     row_id: i64,
 ) -> Result<Vec<Map<String, Value>>, sqlx::Error> {
-    let audited = AuditedTable::parse(table);
+    let audited = table.parse::<AuditedTable>().ok();
     // Both reads on one transaction: whether the id still holds a row is what
     // separates a re-used id from a plainly deleted one, so it has to come
     // from the same snapshot as the trail — a delete landing between the two

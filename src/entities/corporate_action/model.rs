@@ -31,14 +31,22 @@ impl WorthlessEvent {
             WorthlessEvent::C2Cancellation => "C2Cancellation",
         }
     }
+}
 
-    fn from_str(s: &str) -> Result<Self, sqlx::Error> {
+/// A `worthless_event` value naming neither CGT event.
+#[derive(thiserror::Error, Debug, PartialEq)]
+#[error("unknown worthless_event {0}")]
+pub struct UnknownWorthlessEvent(String);
+
+/// The inverse of [`WorthlessEvent::as_str`]: the stored variant name.
+impl std::str::FromStr for WorthlessEvent {
+    type Err = UnknownWorthlessEvent;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "G3Declaration" => Ok(WorthlessEvent::G3Declaration),
             "C2Cancellation" => Ok(WorthlessEvent::C2Cancellation),
-            other => Err(sqlx::Error::Decode(
-                format!("unknown worthless_event {other}").into(),
-            )),
+            other => Err(UnknownWorthlessEvent(other.to_owned())),
         }
     }
 }
@@ -317,7 +325,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
                 demerger_close_reason: row.try_get("demerger_close_reason")?,
             }),
             "WorthlessShares" => Ok(ActionKind::WorthlessShares {
-                worthless_event: WorthlessEvent::from_str(row.try_get("worthless_event")?)?,
+                worthless_event: row
+                    .try_get::<&str, _>("worthless_event")?
+                    .parse::<WorthlessEvent>()
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
             }),
             other => Err(sqlx::Error::Decode(
                 format!("unknown corporate action_type {other}").into(),

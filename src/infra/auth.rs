@@ -747,7 +747,7 @@ impl PartialEq for Auth {
 impl Auth {
     /// Builds an `Auth` from resolved config values. Parses `password_hash`
     /// up front — an unusable hash aborts startup, the same philosophy as
-    /// `config::BasePath::parse`: serving a login page that can never
+    /// `config::BasePath`'s `FromStr`: serving a login page that can never
     /// succeed is worse than not starting.
     pub fn new(
         username: String,

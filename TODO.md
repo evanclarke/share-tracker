@@ -140,11 +140,17 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   `with_peer` and the six `test_support` row-builder types. No existing call site dropped a result.
   Test: `infra::decimal::tests::money_arithmetic_and_builders_are_must_use` scans for the attribute
   on each listed type and fn, and checks each type-covered fn still answers its must-use type
-- [ ] Implement `FromStr` instead of ad-hoc parse methods (none exist in `src` today):
+- [x] Implement `FromStr` instead of ad-hoc parse methods (none exist in `src` today):
   `WorthlessEvent::from_str` (`corporate_action/model.rs:35` — the guide's own
   `should_implement_trait` example), `RateMonth::parse` (`fx.rs:78`), `BasePath::parse`
   (`config.rs:342`), the email address `parse` (`email.rs:123`), `AuditedTable::parse`
   (`row_history.rs:105`); sqlx decode adapts the trait's error where it needs `sqlx::Error`
+  Done 2026-10-23: all five are `FromStr` impls with a thiserror `Err` (`UnknownWorthlessEvent`,
+  `NotARateMonth`, `InvalidBasePath`, `UnknownEncryption` — the `email.rs:123` parse was
+  `Encryption`'s — and `NotAudited`); callers use `s.parse::<T>()`, the sqlx decodes box the error.
+  Clippy's `should_implement_trait` only fires on a `pub` `from_str` of the exact signature, so the
+  guard is a source scan. Test: `app::tests::no_type_has_an_inherent_parse_method_instead_of_from_str`
+  (scanner self-tested by `the_parse_method_scan_tells_an_inherent_method_from_a_from_str_impl`)
 - [ ] Encode the rules: extend the `[lints.clippy]` table in `Cargo.toml` (added with
   `wildcard_enum_match_arm`) (so CI's `-D warnings` enforces
   it) with at least `unwrap_used` (+ `allow-unwrap-in-tests = true` in `clippy.toml`),

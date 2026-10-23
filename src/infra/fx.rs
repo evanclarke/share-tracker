@@ -41,7 +41,7 @@ use crate::infra::decimal::parse_dec;
 /// The calendar month an ATO/RBA reference rate covers — the key
 /// `rba_fx_rates` stores as `'YYYY-MM'` text. A conversion is always for the
 /// month *of a date*, so [`RateMonth::of`] is the way to one; the text form is
-/// only for display and for reading the stored key ([`RateMonth::parse`]), so
+/// only for display and for reading the stored key (its `FromStr`), so
 /// a lookup cannot be handed a mis-formatted string that silently matches
 /// nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -73,16 +73,28 @@ impl RateMonth {
             }
         }
     }
+}
 
-    /// A stored `'YYYY-MM'` key, or `None` when it is not one.
-    pub fn parse(text: &str) -> Option<Self> {
-        let (year, month) = text.split_once('-')?;
-        if year.len() != 4 || month.len() != 2 {
-            return None;
-        }
-        let year: i32 = year.parse().ok()?;
-        let month: u32 = month.parse().ok()?;
-        (1..=12).contains(&month).then_some(Self { year, month })
+/// Text that is not a `'YYYY-MM'` month key.
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[error("{0:?} is not a YYYY-MM month")]
+pub struct NotARateMonth(String);
+
+/// A stored `'YYYY-MM'` key, refused when it is not one.
+impl std::str::FromStr for RateMonth {
+    type Err = NotARateMonth;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let month = || {
+            let (year, month) = text.split_once('-')?;
+            if year.len() != 4 || month.len() != 2 {
+                return None;
+            }
+            let year: i32 = year.parse().ok()?;
+            let month: u32 = month.parse().ok()?;
+            (1..=12).contains(&month).then_some(Self { year, month })
+        };
+        month().ok_or_else(|| NotARateMonth(text.to_owned()))
     }
 }
 
@@ -101,7 +113,7 @@ impl sqlx::Type<sqlx::Sqlite> for RateMonth {
 impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for RateMonth {
     fn decode(value: sqlx::sqlite::SqliteValueRef<'r>) -> Result<Self, sqlx::error::BoxDynError> {
         let text = <&str as sqlx::Decode<sqlx::Sqlite>>::decode(value)?;
-        RateMonth::parse(text).ok_or_else(|| format!("{text:?} is not a YYYY-MM month").into())
+        Ok(text.parse::<RateMonth>()?)
     }
 }
 
@@ -125,7 +137,7 @@ impl PartialEq<&str> for RateMonth {
 #[cfg(test)]
 impl PartialEq<str> for RateMonth {
     fn eq(&self, other: &str) -> bool {
-        RateMonth::parse(other) == Some(*self)
+        other.parse::<RateMonth>() == Ok(*self)
     }
 }
 
@@ -453,7 +465,7 @@ impl FxRates {
             rates: rates
                 .into_iter()
                 .map(|(currency, month, rate)| {
-                    let month = RateMonth::parse(month).expect("a YYYY-MM test month");
+                    let month = month.parse::<RateMonth>().expect("a YYYY-MM test month");
                     ((CurrencyCode::from(currency), month), rate)
                 })
                 .collect(),
@@ -702,7 +714,7 @@ mod tests {
         let jan = RateMonth::of(date(2024, 1, 31));
         assert_eq!(jan.to_string(), "2024-01");
         assert_eq!(jan.previous().to_string(), "2023-12");
-        assert_eq!(RateMonth::parse("2024-01"), Some(jan));
+        assert_eq!("2024-01".parse::<RateMonth>(), Ok(jan));
         for bad in [
             "2024-1",
             "2024-13",
@@ -712,7 +724,11 @@ mod tests {
             "2024-01-15",
             "",
         ] {
-            assert_eq!(RateMonth::parse(bad), None, "{bad:?}");
+            assert_eq!(
+                bad.parse::<RateMonth>(),
+                Err(NotARateMonth(bad.to_owned())),
+                "{bad:?}"
+            );
         }
 
         let pool = test_pool().await;

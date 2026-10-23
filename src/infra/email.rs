@@ -120,18 +120,6 @@ impl Encryption {
     /// The names the config file accepts, in the error message's own order.
     pub const NAMES: [&'static str; 3] = ["implicit", "starttls", "none"];
 
-    pub fn parse(raw: &str) -> Result<Self, String> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "implicit" | "tls" | "ssl" => Ok(Self::Implicit),
-            "starttls" => Ok(Self::StartTls),
-            "none" | "plain" => Ok(Self::None),
-            other => Err(format!(
-                "invalid email encryption {other:?}: expected one of {}",
-                Self::NAMES.join(", ")
-            )),
-        }
-    }
-
     /// The port this mode is conventionally served on, used when the config
     /// file names no `smtp_port`.
     pub fn default_port(self) -> u16 {
@@ -139,6 +127,29 @@ impl Encryption {
             Self::Implicit => 465,
             Self::StartTls => 587,
             Self::None => 25,
+        }
+    }
+}
+
+/// A config-file `encryption` value naming none of the [`Encryption`] modes.
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[error(
+    "invalid email encryption {0:?}: expected one of {names}",
+    names = Encryption::NAMES.join(", ")
+)]
+pub struct UnknownEncryption(String);
+
+/// The config file's `encryption` value, case-insensitively, with the common
+/// aliases (`tls`/`ssl` for implicit, `plain` for none).
+impl std::str::FromStr for Encryption {
+    type Err = UnknownEncryption;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "implicit" | "tls" | "ssl" => Ok(Self::Implicit),
+            "starttls" => Ok(Self::StartTls),
+            "none" | "plain" => Ok(Self::None),
+            other => Err(UnknownEncryption(other.to_owned())),
         }
     }
 }
@@ -811,13 +822,16 @@ mod tests {
 
     #[test]
     fn encryption_modes_carry_their_conventional_ports() {
-        assert_eq!(Encryption::parse("implicit"), Ok(Encryption::Implicit));
-        assert_eq!(Encryption::parse("STARTTLS"), Ok(Encryption::StartTls));
-        assert_eq!(Encryption::parse("none"), Ok(Encryption::None));
+        assert_eq!("implicit".parse(), Ok(Encryption::Implicit));
+        assert_eq!("STARTTLS".parse(), Ok(Encryption::StartTls));
+        assert_eq!("none".parse(), Ok(Encryption::None));
         assert_eq!(Encryption::Implicit.default_port(), 465);
         assert_eq!(Encryption::StartTls.default_port(), 587);
         assert_eq!(Encryption::None.default_port(), 25);
-        let err = Encryption::parse("tsl").expect_err("a typo is rejected");
+        let err = "tsl"
+            .parse::<Encryption>()
+            .expect_err("a typo is rejected")
+            .to_string();
         assert!(err.contains("tsl"), "names the bad value: {err}");
         assert!(err.contains("starttls"), "lists the valid ones: {err}");
     }

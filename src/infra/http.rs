@@ -1369,7 +1369,7 @@ mod tests {
     async fn a_missing_fx_rate_is_a_422_naming_the_currency_and_month() {
         let missing = || crate::infra::fx::FxError::MissingRate {
             currency: "USD".into(),
-            month: crate::infra::fx::RateMonth::parse("2023-05").unwrap(),
+            month: "2023-05".parse::<crate::infra::fx::RateMonth>().unwrap(),
         };
         for (label, error) in [
             ("raised directly", ApiError::from(missing())),

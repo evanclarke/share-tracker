@@ -691,4 +691,102 @@ mod tests {
             "classified but no longer taking a `bool`: {stale:?}"
         );
     }
+
+    /// The `fn parse`/`fn from_str` methods taking a `&str` that sit in an
+    /// `impl` block other than a `FromStr` one, as `(line, name)`: an ad-hoc
+    /// constructor from text that `str::parse` cannot reach. Clippy's
+    /// `should_implement_trait` catches only a `pub` method literally named
+    /// `from_str` with the trait's exact signature, which is how a private
+    /// `WorthlessEvent::from_str` and four `parse`s slipped past it.
+    fn inherent_parse_methods(code: &str) -> Vec<(usize, String)> {
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        // One frame per open brace: `Some(is_from_str)` for an `impl` block,
+        // `None` for any other block.
+        let mut blocks: Vec<Option<bool>> = Vec::new();
+        let mut header_start = 0;
+        let mut found = Vec::new();
+        for (at, c) in code.char_indices() {
+            match c {
+                '{' => {
+                    let header = &code[header_start..at];
+                    let tokens: Vec<&str> = header.split_whitespace().collect();
+                    let is_impl = tokens
+                        .iter()
+                        .any(|t| *t == "impl" || t.starts_with("impl<"))
+                        && !tokens.contains(&"fn");
+                    blocks.push(is_impl.then(|| header.contains("FromStr for")));
+                    header_start = at + 1;
+                }
+                '}' => {
+                    blocks.pop();
+                    header_start = at + 1;
+                }
+                ';' => header_start = at + 1,
+                'f' if code[at..].starts_with("fn ")
+                    && !code[..at].chars().next_back().is_some_and(ident) =>
+                {
+                    let rest = &code[at + 3..];
+                    let name: String = rest.chars().take_while(|&c| ident(c)).collect();
+                    if name != "parse" && name != "from_str" {
+                        continue;
+                    }
+                    let Some(open) = rest.find('(') else { continue };
+                    let first = rest[open + 1..].split([',', ')']).next().unwrap_or("");
+                    let takes_str = first.split_once(':').is_some_and(|(_, ty)| {
+                        ty.trim().starts_with('&') && ty.trim().ends_with("str")
+                    });
+                    if takes_str && blocks.last() == Some(&Some(false)) {
+                        let line = code[..at].matches('\n').count() + 1;
+                        found.push((line, name));
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_parse_method_scan_tells_an_inherent_method_from_a_from_str_impl() {
+        let code = "\
+            impl Foo {\n\
+                pub fn parse(raw: &str) -> Option<Self> { None }\n\
+                fn from_str(s: &'static str) -> Result<Self, E> { todo!() }\n\
+                fn parse_all(raw: &str) -> Vec<Self> { vec![] }\n\
+                fn parse(&self, raw: &str) -> u8 { 0 }\n\
+            }\n\
+            impl std::str::FromStr for Foo {\n\
+                type Err = E;\n\
+                fn from_str(s: &str) -> Result<Self, E> { if s.is_empty() { todo!() } else { todo!() } }\n\
+            }\n\
+            fn parse(schedule: &str) -> Vec<Entry> { vec![] }\n\
+            fn f(x: impl Iterator) { let _ = { 1 }; }\n\
+            mod tests { fn parse(json: &str) -> u8 { 0 } }\n";
+        assert_eq!(
+            inherent_parse_methods(code),
+            [(2, "parse".to_string()), (3, "from_str".to_string())]
+        );
+    }
+
+    /// A type that is made from text implements `FromStr`, so callers write
+    /// `s.parse::<T>()` and the conversion's error is a real `Err` type —
+    /// never an inherent `T::parse(&str)` or a private `T::from_str` that
+    /// `str::parse` cannot reach (the Google Rust style guide's
+    /// `should_implement_trait`). Free functions named `parse` (a whole
+    /// schedule file into entries) are not constructors and are not flagged.
+    #[test]
+    fn no_type_has_an_inherent_parse_method_instead_of_from_str() {
+        let found: Vec<_> = crate::test_support::rust_sources()
+            .iter()
+            .flat_map(|source| {
+                inherent_parse_methods(&source.code)
+                    .into_iter()
+                    .map(|(line, name)| format!("{}:{line} {name}", source.path))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "implement `std::str::FromStr` instead of an inherent parse method: {found:?}"
+        );
+    }
 }
