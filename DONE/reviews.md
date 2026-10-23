@@ -8018,3 +8018,48 @@ Each closed by the lint named in the section above once it is enabled and clean.
     `the_item_doc_scan_flags_only_undocumented_public_definitions`. Each enforcement was
     mutation-checked once (a header removed, a backtick removed, a doc removed — each failed);
     CLAUDE.md states the three rules (2821 tests)
+
+## Property tests, third pass: cross-report and staleness invariants (2026-10-23)
+The 2026-10-11 and 2026-10-13 properties covered the cost-base, allocation, netting and scheduler
+invariants one module at a time; this pass looked for disagreement *between* modules. New
+properties, all of which now hold and stay as regression guards: `transfer`'s
+`transfers_change_no_holding_or_capital_gain` (any back-and-forth history of transfers, around
+returns of capital paid past the cost base or with a record date before a move, leaves the
+holding's units and cost base on every date and every year's capital gains — G1 and C2 included —
+exactly as never moving it); `activity`'s `the_ledger_and_every_holdings_view_agree` (after any
+history of buys, DRPs, sells, transfers, splits, bonus issues and returns of capital, the ledger's
+running balance, the open-parcels schedule, the ledger summary, the portfolio overview and the
+unrealised-gains report agree per account); and `snapshot`'s
+`a_fresh_snapshot_always_matches_its_regeneration` (after any history of seventeen kinds of write
+through the entity paths, every snapshot still flagged fresh regenerates to exactly what it stores
+— with migration 0052 removed it rediscovers the defect below unaided, shrunk to one rename).
+Three defects found, each fixed with a focused regression test:
+- [x] **A rename moving a listing to another exchange left the snapshots it re-valued fresh.**
+  Valuation walks each holding back to the nearest trading day on the calendar in force then, so a
+  different exchange can pick a different valuation day (Australia Day: the Friday close on XASX,
+  the Monday close on an exchange trading that day — $1,000 stored against $2,000 regenerated).
+  `listings_stale_snapshots_update` ignored `exchange_mic`, which the rename and its undo write,
+  and `listing_renames` is staleness-exempt. Migration 0052 adds the column, staling the dates
+  under the current identity (on or after the newest rename); `docs/SCHEMA.md`, `docs/API.md` and
+  the staleness classification texts say so
+  (`db_moving_a_listing_to_another_exchange_stales_what_its_calendar_valued`)
+- [x] **The activity ledger's balance drifted off the open-parcels schedule.** It re-based a
+  rounded running balance at each split or bonus, so 246 units, a 2-for-7 bonus and a 5-for-4
+  split closed on `…285` against the schedule's (and its own summary's) `…286`. The balance is now
+  an exact fraction rounded once per row
+  (`db_a_balance_re_based_twice_rounds_once_like_the_schedule`)
+- [x] **The Sell that empties a parcel with a non-terminating quantity was refused.** 101 units
+  after a 1-for-3 bonus issue are 134.666…, shown everywhere as `…67`; a Sell of exactly that read
+  back as 101.000…0025 as-acquired units, past the parcel, while the `…66` that was accepted left
+  a sliver open for ever. `adjustments::as_acquired_quantity` now reads a full-precision figure (a
+  rounding by construction) back as the shortest as-acquired count that re-bases to exactly it,
+  and keeps the exact fraction for every shorter figure and where no such count exists; every
+  allocation consumer goes through it. `docs/API.md`'s Fractional entitlements section states the
+  rule (`the_sell_of_everything_the_schedule_shows_empties_a_bonus_issued_parcel`;
+  `selling_the_fraction_cashed_in_lieu_leaves_the_whole_units` pins the documented cash-in-lieu
+  workflow, which already held)
+
+Checked and left as designed: a transfer-in parcel's `return_of_capital_reduction` and
+`amit_cost_base_reduction` omit what was paid before the move, because the transfer-in carries
+the reduced cost base as its own original figure (`docs/API.md`, Open parcels) — the property
+compares units and remaining cost base, which agree (2828 tests).

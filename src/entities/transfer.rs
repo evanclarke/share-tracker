@@ -2628,4 +2628,272 @@ mod tests {
             .assert_dry_run_refuses_alike(&pool, "/transfers", Some(&same_account))
             .await;
     }
+
+    mod properties {
+        use super::*;
+        use crate::reports::net_capital_gain::{self, NetCapitalGainYear};
+        use crate::reports::open_parcels::{self as open_parcels_report, OpenParcel};
+        use chrono::{Datelike, Weekday};
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        /// The Wednesdays of `year` from `from_month` on — ASX trading days
+        /// clear of every seeded public holiday.
+        fn wednesdays(year: i32, from_month: u32) -> Vec<NaiveDate> {
+            d(year, from_month, 1)
+                .iter_days()
+                .take_while(|day| day.year() == year)
+                .filter(|day| day.weekday() == Weekday::Wed)
+                .collect()
+        }
+
+        /// A return of capital: the day index it is paid on, cents per unit
+        /// (up to $150, so it often runs past a parcel's cost base — a G1
+        /// gain), and whether its record date is a fortnight earlier.
+        fn returns_of_capital() -> impl Strategy<Value = Vec<(usize, i64, bool)>> {
+            prop::collection::vec((0usize..12, 1i64..=15_000, any::<bool>()), 0..=2)
+        }
+
+        /// A transfer: the day index, whether it moves account 1 → 2 (else
+        /// 2 → 1), and per parcel the percentage of what that account holds
+        /// of it to move.
+        fn transfers() -> impl Strategy<Value = Vec<(usize, bool, Vec<u32>)>> {
+            prop::collection::vec(
+                (
+                    0usize..12,
+                    any::<bool>(),
+                    prop::collection::vec(0u32..=100, 8),
+                ),
+                0..=4,
+            )
+        }
+
+        /// Units and remaining cost base held of each parcel.
+        type Lineages = BTreeMap<NaiveDate, (Decimal, Decimal)>;
+
+        /// The open parcels keyed by acquisition date (the one thing a
+        /// transferred piece shares with the parcel it came from) and summed
+        /// across accounts. The reduction columns are deliberately left out:
+        /// a transfer-in carries the reduced cost base as its own original
+        /// figure (`docs/API.md`, Open parcels), so a payment received before
+        /// the move is in its cost base, not in its reduction column.
+        fn by_lineage(open: &[OpenParcel]) -> Lineages {
+            let mut lineages = Lineages::new();
+            for p in open {
+                let e = lineages
+                    .entry(p.acquisition_date)
+                    .or_insert((Decimal::ZERO, Decimal::ZERO));
+                e.0 += p.remaining_quantity;
+                e.1 += p.remaining_cost_base;
+            }
+            lineages
+        }
+
+        /// Records one world: the buys and returns of capital, the
+        /// transfers when `with_transfers`, and then a Sell of everything
+        /// still held in each account. Answers what the open-parcels report
+        /// showed on every event date, and the net capital gain report.
+        async fn world(
+            buys: &[(i64, i64, i64)],
+            rocs: &[(usize, i64, bool)],
+            moves: &[(usize, bool, Vec<u32>)],
+            sale_cents: i64,
+            with_transfers: bool,
+        ) -> Result<(Vec<Lineages>, Vec<NetCapitalGainYear>), TestCaseError> {
+            let pool = test_pool().await;
+            test_support::listing(1).insert(&pool).await;
+            let buy_days = wednesdays(2021, 3);
+            for (i, (qty, cents, brokerage)) in buys.iter().enumerate() {
+                test_support::buy(i as i64 + 1, 1)
+                    .date(buy_days[i * 5])
+                    .qty(Decimal::from(*qty))
+                    .price(Decimal::new(*cents, 2))
+                    .brokerage(Decimal::new(*brokerage, 2))
+                    .insert(&pool)
+                    .await;
+            }
+            let days = wednesdays(2022, 2);
+            for (n, (day, cents, recorded_earlier)) in rocs.iter().enumerate() {
+                let date = days[*day * 2 + 1];
+                corporate_action::db_upsert(
+                    &pool,
+                    &CorporateAction {
+                        id: n as i64 + 1,
+                        listing_id: ListingId(1),
+                        date,
+                        kind: ActionKind::ReturnOfCapital {
+                            amount_per_unit: Decimal::new(*cents, 2),
+                            currency: "AUD".into(),
+                            record_date: recorded_earlier.then(|| date - chrono::Days::new(14)),
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            if with_transfers {
+                let mut ordered: Vec<_> = moves.iter().collect();
+                ordered.sort_by_key(|(day, ..)| *day);
+                for (n, (day, one_to_two, pcts)) in ordered.into_iter().enumerate() {
+                    let date = days[*day * 2];
+                    let (from, to) = if *one_to_two { (1, 2) } else { (2, 1) };
+                    let held = open_parcels_report::db_open_parcels(&pool, Some(date))
+                        .await
+                        .unwrap();
+                    let allocations: Vec<AllocationInput> = held
+                        .iter()
+                        .filter(|p| p.holding_account_id == from)
+                        .zip(pcts)
+                        .filter_map(|(p, pct)| {
+                            let units = (p.remaining_quantity * Decimal::from(*pct)
+                                / Decimal::from(100))
+                            .round_dp(2)
+                            .min(p.remaining_quantity);
+                            (units > Decimal::ZERO).then_some(AllocationInput {
+                                purchase_trade_id: p.trade_id,
+                                quantity_allocated: units,
+                            })
+                        })
+                        .collect();
+                    if allocations.is_empty() {
+                        continue;
+                    }
+                    let body = TransferBody {
+                        listing_id: ListingId(1),
+                        date,
+                        from_account_id: HoldingAccountId(from),
+                        to_account_id: HoldingAccountId(to),
+                        allocations,
+                        fee_allocations: Vec::new(),
+                        fee_market_price: None,
+                        fee_fx_rate: None,
+                    };
+                    if let Err(e) = db_transfer(&pool, n as i64 + 1, &body).await {
+                        return Err(TestCaseError::fail(format!(
+                            "valid transfer on {date} refused: {e}"
+                        )));
+                    }
+                }
+            }
+            // Every return of capital's payment and record dates, and the
+            // year end — dates both worlds share.
+            let mut snapshot_days: Vec<NaiveDate> = rocs
+                .iter()
+                .flat_map(|(day, ..)| {
+                    [
+                        days[*day * 2 + 1],
+                        days[*day * 2 + 1] - chrono::Days::new(14),
+                    ]
+                })
+                .collect();
+            snapshot_days.push(d(2023, 1, 4));
+            snapshot_days.sort();
+            let mut snapshots = Vec::new();
+            for day in &snapshot_days {
+                let open = open_parcels_report::db_open_parcels(&pool, Some(*day))
+                    .await
+                    .unwrap();
+                snapshots.push(by_lineage(&open));
+            }
+
+            let sale_date = d(2023, 1, 11);
+            let held = open_parcels_report::db_open_parcels(&pool, Some(sale_date))
+                .await
+                .unwrap();
+            for account in [1, 2] {
+                let allocations: Vec<AllocationInput> = held
+                    .iter()
+                    .filter(|p| p.holding_account_id == account)
+                    .map(|p| AllocationInput {
+                        purchase_trade_id: p.trade_id,
+                        quantity_allocated: p.remaining_quantity,
+                    })
+                    .collect();
+                if allocations.is_empty() {
+                    continue;
+                }
+                let body = SellBody {
+                    brokerage_includes_gst: false,
+                    statement_total: None,
+                    holding_account_id: HoldingAccountId(account),
+                    date: sale_date,
+                    settlement_date: None,
+                    listing_id: ListingId(1),
+                    average_price: Decimal::new(sale_cents, 2),
+                    quantity: allocations.iter().map(|a| a.quantity_allocated).sum(),
+                    currency: "AUD".into(),
+                    brokerage: Decimal::ZERO,
+                    gst_on_brokerage: Decimal::ZERO,
+                    brokerage_currency: "AUD".into(),
+                    fx_rate: Decimal::ONE,
+                    spot_fx_rate: None,
+                    contract_note_ref: None,
+                    allocations,
+                };
+                if let Err(e) = sell::db_upsert_sell(&pool, TradeId(900 + account), &body).await {
+                    return Err(TestCaseError::fail(format!(
+                        "closing Sell in account {account} refused: {e}"
+                    )));
+                }
+            }
+            Ok((
+                snapshots,
+                net_capital_gain::db_net_capital_gain(&pool).await.unwrap(),
+            ))
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// A transfer is not a CGT event: whatever parcels are moved
+            /// between accounts, back and forth, around any returns of
+            /// capital (paid past the cost base, or with a record date before
+            /// a move), the holding summed across accounts carries the same
+            /// units, cost base and return-of-capital reduction on every
+            /// date, and selling all of it reports the same capital gains in
+            /// every year — G1 and C2 included — as never having moved it.
+            #[test]
+            fn transfers_change_no_holding_or_capital_gain(
+                buys in prop::collection::vec((1i64..=1_000, 1i64..=10_000, 0i64..=2_000), 1..=3),
+                rocs in returns_of_capital(),
+                moves in transfers(),
+                sale_cents in 1i64..=20_000,
+            ) {
+                test_support::block_on(async move {
+                    let (still, still_years) = world(&buys, &rocs, &moves, sale_cents, false).await?;
+                    let (moved, moved_years) = world(&buys, &rocs, &moves, sale_cents, true).await?;
+                    let tolerance = Decimal::new(1, 18);
+                    let close = |a: Decimal, b: Decimal| (a - b).abs() <= tolerance;
+
+                    prop_assert_eq!(still.len(), moved.len());
+                    for (s, m) in still.iter().zip(&moved) {
+                        prop_assert_eq!(s.len(), m.len(), "lineages held");
+                        for (date, (su, sc)) in s {
+                            let (mu, mc) = m[date];
+                            prop_assert_eq!(*su, mu, "units of the parcel acquired {}", date);
+                            prop_assert!(close(*sc, mc), "cost base of the parcel acquired {}: {} unmoved, {} moved", date, sc, mc);
+                        }
+                    }
+
+                    prop_assert_eq!(still_years.len(), moved_years.len(), "years reported");
+                    for (s, m) in still_years.iter().zip(&moved_years) {
+                        prop_assert_eq!(s.tax_year, m.tax_year);
+                        for (name, a, b) in [
+                            ("discount-eligible gains", s.discount_eligible_gains, m.discount_eligible_gains),
+                            ("other gains", s.other_gains, m.other_gains),
+                            ("capital losses", s.capital_losses, m.capital_losses),
+                            ("G1 gain", s.cgt_event_g1_gain, m.cgt_event_g1_gain),
+                            ("C2 gain", s.cgt_event_c2_gain, m.cgt_event_c2_gain),
+                        ] {
+                            prop_assert!(
+                                (a - b).abs() <= Decimal::new(1, 12),
+                                "FY{} {}: {} unmoved, {} moved", s.tax_year, name, a, b
+                            );
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }

@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3a9805aaa10226d973b09db70004b4cf3365cfb65f6b68cec99131b2379487fe # shrinks to steps = [Buy { account: 1, drp: false, units: 246, cents: 1 }, Bonus { units: 2, held: 7 }, Split { new: 5, old: 4 }], price_cents = 1
+cc 7ed5793f3833f825899f14fea53c9dbcbf8581a94bd1dfe12383d05f97ea343e # shrinks to steps = [Buy { account: 1, drp: false, units: 1, cents: 1 }, Buy { account: 1, drp: false, units: 1, cents: 1 }, Transfer { from: 1, pcts: [0, 1, 0, 0, 0, 0, 0, 0] }, Buy { account: 1, drp: false, units: 1, cents: 1 }], price_cents = 1
+cc dd935f8823ee3852dc28caa6fef2ca03f7363e6500cd41c6ed64942051e031dc # shrinks to steps = [Buy { account: 1, drp: false, units: 628, cents: 1 }, Bonus { units: 1, held: 3 }, Sell { account: 1, pcts: [6, 0, 0, 0, 0, 0, 0, 0], cents: 1 }], price_cents = 1
+cc 13ac20a913fc23f98d911efc55963d2cdb223e4cd51275ad3357faed226ab751 # shrinks to steps = [Buy { account: 1, drp: false, units: 787, cents: 1 }, Buy { account: 1, drp: false, units: 55, cents: 1 }, Bonus { units: 1, held: 3 }, Transfer { from: 1, pcts: [53, 0, 0, 0, 0, 0, 0, 0] }, Buy { account: 1, drp: false, units: 32, cents: 1 }, Sell { account: 1, pcts: [84, 0, 0, 0, 0, 0, 0, 0], cents: 1 }], price_cents = 1
+cc 95e0aca61d0d760911dc9607d7c950320d9c9784101c6a4fff85eaadc889c47c # shrinks to steps = [Buy { account: 1, drp: false, units: 101, cents: 1 }, Bonus { units: 1, held: 3 }, Sell { account: 1, pcts: [100, 0, 0, 0, 0, 0, 0, 0], cents: 1 }], price_cents = 1

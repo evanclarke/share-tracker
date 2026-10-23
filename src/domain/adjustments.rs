@@ -848,6 +848,10 @@ pub fn split_adjusted_quantity(
     }
 }
 
+/// The smallest mantissa of a `Decimal` carrying 28 significant digits — the
+/// precision a rounded quotient comes out at.
+const FULL_PRECISION: u128 = 10u128.pow(27);
+
 /// The inverse of [`split_adjusted_quantity`]: a quantity expressed in the
 /// unit basis of its own date (e.g. a sale's allocated units) converted back
 /// to the as-acquired units of a parcel bought at `acquired`.
@@ -862,10 +866,37 @@ pub fn as_acquired_quantity(
     }
     // Kept as the fraction `quantity × new / old` rather than divided out
     // (see `AcquiredUnits`); only an unrepresentable product rounds.
-    match qty.quantity.checked_mul(new) {
+    let exact = match qty.quantity.checked_mul(new) {
         Some(num) => AcquiredUnits::fraction(num, old),
-        None => AcquiredUnits::new(mul_div(&[qty.quantity, new], old)),
+        None => return AcquiredUnits::new(mul_div(&[qty.quantity, new], old)),
+    };
+    // Only a figure at `Decimal`'s full precision can be a rounding; a
+    // shorter one (an integer sale, a broker's 2-dp quantity) states its units
+    // exactly and keeps the exact fraction they re-base to.
+    if exact.den == Decimal::ONE || qty.quantity.mantissa().unsigned_abs() < FULL_PRECISION {
+        return exact;
     }
+    // A quantity stated in a later basis is itself a rounded figure where
+    // the units it re-bases from are not a terminating decimal there: after a
+    // 1-for-3 bonus issue 101 units are 134.666…, which the open-parcels
+    // schedule shows (and a Sell can state) only as `…67` — and that, read
+    // back exactly, is 101.000…0025 units, so the Sell emptying the parcel
+    // was refused as exceeding it, and the `…66` that is accepted left dust
+    // open for ever. So the figure reads back as the *shortest* as-acquired
+    // count that re-bases to exactly it — the count it was rounded from — and
+    // keeps the exact fraction only where no such count exists (66.67 units
+    // after a 3-for-1 split is 22.2233…, which nothing shorter re-bases to).
+    let approx = exact.get();
+    for dp in 0..=approx.scale() {
+        let candidate = approx.round_dp(dp);
+        if split_adjusted_quantity(AcquiredUnits::new(candidate), splits, acquired, qty.basis)
+            .quantity
+            == qty.quantity
+        {
+            return AcquiredUnits::new(candidate);
+        }
+    }
+    exact
 }
 
 /// [`as_acquired_quantity`] in checked form: the same conversion, refusing

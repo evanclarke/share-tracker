@@ -693,19 +693,80 @@ impl Sources {
     }
 }
 
+/// The ledger's running units-held balance, kept as the exact fraction
+/// `num / den` and rounded only where a row reads it out. A 2-for-7 bonus
+/// issue leaves a balance no `Decimal` holds, and re-basing that rounded
+/// figure again at a later split rounded twice, so the balance drifted off the
+/// open-parcels schedule — which re-bases each parcel exactly
+/// (`AcquiredUnits`) — in the last digit (246 units, a 2-for-7 bonus, then a
+/// 5-for-4 split: `…285` against the schedule's `…286`).
+#[derive(Clone, Copy)]
+struct Balance {
+    num: Decimal,
+    /// Always positive.
+    den: Decimal,
+}
+
+impl Balance {
+    const ZERO: Self = Self {
+        num: Decimal::ZERO,
+        den: Decimal::ONE,
+    };
+
+    /// The fraction, collapsed to a plain `Decimal` once it divides exactly.
+    fn of(num: Decimal, den: Decimal) -> Self {
+        if den != Decimal::ONE && (num % den).is_zero() {
+            Self {
+                num: num / den,
+                den: Decimal::ONE,
+            }
+        } else {
+            Self { num, den }
+        }
+    }
+
+    /// Re-based by a `new`-for-`old` split or bonus issue. Only where the
+    /// exact terms would overflow does it fall back to the rounded figure.
+    fn rebased(self, new: Decimal, old: Decimal) -> Self {
+        match (self.num.checked_mul(new), self.den.checked_mul(old)) {
+            (Some(num), Some(den)) => Self::of(num, den),
+            _ => Self::of(mul_div(&[self.get(), new], old), Decimal::ONE),
+        }
+    }
+
+    /// Moved by a row's signed quantity, stated in the balance's own basis.
+    fn plus(self, quantity: Decimal) -> Self {
+        match quantity
+            .checked_mul(self.den)
+            .and_then(|q| self.num.checked_add(q))
+        {
+            Some(num) => Self::of(num, self.den),
+            None => Self::of(self.get() + quantity, Decimal::ONE),
+        }
+    }
+
+    fn get(self) -> Decimal {
+        if self.den == Decimal::ONE {
+            self.num
+        } else {
+            self.num / self.den
+        }
+    }
+}
+
 /// Orders the protos and walks them into the ledger, carrying the running
 /// units-held balance that a split/bonus re-bases in place before the day's
 /// trades (TD 2000/10).
 fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
     rows.sort_by_key(|r| (r.date, r.rank, r.record, r.id));
-    let mut balance = Decimal::ZERO;
+    let mut balance = Balance::ZERO;
     rows.into_iter()
         .map(|r| {
             if let Some((new, old)) = r.rebase {
-                balance = mul_div(&[balance, new], old);
+                balance = balance.rebased(new, old);
             }
             if let Some(q) = r.quantity {
-                balance += q;
+                balance = balance.plus(q);
             }
             ActivityEvent {
                 date: r.date,
@@ -713,7 +774,7 @@ fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
                 detail: r.detail,
                 holding_account_id: r.holding_account_id,
                 quantity: r.quantity,
-                units_after: balance,
+                units_after: balance.get(),
                 amount_aud: r.amount_aud,
                 record_table: r.record,
                 record_id: r.id,
@@ -1833,5 +1894,403 @@ mod tests {
         assert_eq!(r.events.len(), 2);
         assert_eq!(r.events[0].units_after, dec("1000000000000000000000000000"));
         assert_eq!(r.events[1].units_after, dec("1000000000000000000000000"));
+    }
+
+    /// A balance no `Decimal` holds, re-based again: 246 units, a 2-for-7
+    /// bonus issue (316.285714…), then a 5-for-4 split. Re-basing the
+    /// rounded balance rounded twice and closed the ledger on `…285`, one
+    /// unit in the last place off the open-parcels schedule's `…286`, which
+    /// re-bases the parcel exactly — so the ledger's closing balance no
+    /// longer equalled its own holding summary.
+    #[tokio::test]
+    async fn db_a_balance_re_based_twice_rounds_once_like_the_schedule() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        test_support::buy(1, 1).qty(dec("246")).insert(&pool).await; // 2024-01-01
+        for (id, date, kind) in [
+            (
+                1,
+                ymd(2024, 3, 1),
+                ActionKind::BonusIssue {
+                    bonus_units: dec("2"),
+                    bonus_held_units: dec("7"),
+                },
+            ),
+            (
+                2,
+                ymd(2024, 5, 1),
+                ActionKind::ShareSplit {
+                    split_new_units: dec("5"),
+                    split_old_units: dec("4"),
+                },
+            ),
+        ] {
+            corporate_action::db_upsert(
+                &pool,
+                &corporate_action::CorporateAction {
+                    id,
+                    listing_id: ListingId(1),
+                    date,
+                    kind,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let (events, holdings) = db_activity(&pool, ListingId(1)).await.unwrap().unwrap();
+        let closing = events.last().unwrap().units_after;
+        assert_eq!(closing, dec("395.35714285714285714285714286"));
+        assert_eq!(closing, holdings[0].quantity);
+    }
+
+    mod properties {
+        use super::*;
+        use crate::entities::corporate_action::CorporateAction;
+        use crate::entities::sell::{self, SellBody};
+        use crate::entities::transfer::TransferBody;
+        use crate::reports::open_parcels::{self, OpenParcel};
+        use crate::reports::unrealised_gains;
+        use chrono::{Datelike, Weekday};
+        use proptest::prelude::*;
+
+        /// One recorded fact of a random history.
+        #[derive(Debug, Clone)]
+        enum Step {
+            /// A Buy (or, when `drp`, a DRP allotment) into account 1 or 2:
+            /// units, cents per unit.
+            Buy {
+                account: i64,
+                drp: bool,
+                units: i64,
+                cents: i64,
+            },
+            /// A Sell from one account: per open parcel there, the
+            /// percentage of it to take; the sale price in cents.
+            Sell {
+                account: i64,
+                pcts: Vec<u32>,
+                cents: i64,
+            },
+            /// A transfer out of one account into the other.
+            Transfer {
+                from: i64,
+                pcts: Vec<u32>,
+            },
+            Split {
+                new: i64,
+                old: i64,
+            },
+            Bonus {
+                units: i64,
+                held: i64,
+            },
+            ReturnOfCapital {
+                cents: i64,
+            },
+        }
+
+        fn step() -> impl Strategy<Value = Step> {
+            let account = prop_oneof![Just(1i64), Just(2i64)];
+            let pcts = prop::collection::vec(0u32..=100, 8);
+            prop_oneof![
+                3 => (account.clone(), any::<bool>(), 1i64..=1_000, 1i64..=10_000)
+                    .prop_map(|(account, drp, units, cents)| Step::Buy { account, drp, units, cents }),
+                3 => (account.clone(), pcts.clone(), 1i64..=20_000)
+                    .prop_map(|(account, pcts, cents)| Step::Sell { account, pcts, cents }),
+                2 => (account, pcts).prop_map(|(from, pcts)| Step::Transfer { from, pcts }),
+                1 => prop::sample::select(vec![(2i64, 1i64), (3, 1), (1, 2), (5, 4), (3, 2)])
+                    .prop_map(|(new, old)| Step::Split { new, old }),
+                1 => prop::sample::select(vec![(1i64, 10i64), (1, 3), (2, 7)])
+                    .prop_map(|(units, held)| Step::Bonus { units, held }),
+                1 => (1i64..=500).prop_map(|cents| Step::ReturnOfCapital { cents }),
+            ]
+        }
+
+        /// The Wednesdays from February 2021 — ASX trading days clear of
+        /// every seeded public holiday — one per step.
+        fn days() -> Vec<NaiveDate> {
+            ymd(2021, 2, 3)
+                .iter_days()
+                .filter(|d| d.weekday() == Weekday::Wed && !(d.month() == 12 && d.day() > 20))
+                .take(40)
+                .collect()
+        }
+
+        /// Takes `pct` percent of each of `account`'s open parcels.
+        fn take(open: &[OpenParcel], account: i64, pcts: &[u32]) -> Vec<AllocationInput> {
+            open.iter()
+                .filter(|p| p.holding_account_id == account)
+                .zip(pcts)
+                .filter_map(|(p, pct)| {
+                    let units = (p.remaining_quantity * Decimal::from(*pct) / Decimal::from(100))
+                        .round_dp(2)
+                        .min(p.remaining_quantity);
+                    (units > Decimal::ZERO).then_some(AllocationInput {
+                        purchase_trade_id: p.trade_id,
+                        quantity_allocated: units,
+                    })
+                })
+                .collect()
+        }
+
+        /// Records `steps`, one per Wednesday, skipping a Sell or transfer
+        /// with nothing to take. Answers the dates used.
+        async fn record(
+            pool: &SqlitePool,
+            steps: &[Step],
+        ) -> Result<Vec<NaiveDate>, TestCaseError> {
+            let days = days();
+            let mut used = Vec::new();
+            for (n, (step, date)) in steps.iter().zip(&days).enumerate() {
+                // Counting down, clear of the ids the database assigns the
+                // transfer-in Buys (one past the highest).
+                let id = 100_000 - n as i64;
+                let date = *date;
+                let open = open_parcels::db_open_parcels(pool, Some(date))
+                    .await
+                    .unwrap();
+                let outcome = match step {
+                    Step::Buy {
+                        account,
+                        drp,
+                        units,
+                        cents,
+                    } => {
+                        let builder = if *drp {
+                            test_support::drp(id, 1)
+                        } else {
+                            test_support::buy(id, 1)
+                        };
+                        builder
+                            .date(date)
+                            .qty(Decimal::from(*units))
+                            .price(Decimal::new(*cents, 2))
+                            .account(*account)
+                            .insert(pool)
+                            .await;
+                        Ok(())
+                    }
+                    Step::Sell {
+                        account,
+                        pcts,
+                        cents,
+                    } => {
+                        let allocations = take(&open, *account, pcts);
+                        if allocations.is_empty() {
+                            continue;
+                        }
+                        let body = SellBody {
+                            brokerage_includes_gst: false,
+                            statement_total: None,
+                            holding_account_id: HoldingAccountId(*account),
+                            date,
+                            settlement_date: None,
+                            listing_id: ListingId(1),
+                            average_price: Decimal::new(*cents, 2),
+                            quantity: allocations.iter().map(|a| a.quantity_allocated).sum(),
+                            currency: "AUD".into(),
+                            brokerage: Decimal::from(10),
+                            gst_on_brokerage: Decimal::ONE,
+                            brokerage_currency: "AUD".into(),
+                            fx_rate: Decimal::ONE,
+                            spot_fx_rate: None,
+                            contract_note_ref: None,
+                            allocations,
+                        };
+                        sell::db_upsert_sell(pool, TradeId(id), &body)
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    }
+                    Step::Transfer { from, pcts } => {
+                        let allocations = take(&open, *from, pcts);
+                        if allocations.is_empty() {
+                            continue;
+                        }
+                        let body = TransferBody {
+                            listing_id: ListingId(1),
+                            date,
+                            from_account_id: HoldingAccountId(*from),
+                            to_account_id: HoldingAccountId(3 - *from),
+                            allocations,
+                            fee_allocations: Vec::new(),
+                            fee_market_price: None,
+                            fee_fx_rate: None,
+                        };
+                        transfer::db_transfer(pool, id, &body)
+                            .await
+                            .map(|_| ())
+                            .map_err(|e| e.to_string())
+                    }
+                    Step::Split { new, old } => corporate_action::db_upsert(
+                        pool,
+                        &CorporateAction {
+                            id,
+                            listing_id: ListingId(1),
+                            date,
+                            kind: ActionKind::ShareSplit {
+                                split_new_units: Decimal::from(*new),
+                                split_old_units: Decimal::from(*old),
+                            },
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:?}")),
+                    Step::Bonus { units, held } => corporate_action::db_upsert(
+                        pool,
+                        &CorporateAction {
+                            id,
+                            listing_id: ListingId(1),
+                            date,
+                            kind: ActionKind::BonusIssue {
+                                bonus_units: Decimal::from(*units),
+                                bonus_held_units: Decimal::from(*held),
+                            },
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:?}")),
+                    Step::ReturnOfCapital { cents } => corporate_action::db_upsert(
+                        pool,
+                        &CorporateAction {
+                            id,
+                            listing_id: ListingId(1),
+                            date,
+                            kind: ActionKind::ReturnOfCapital {
+                                amount_per_unit: Decimal::new(*cents, 2),
+                                currency: "AUD".into(),
+                                record_date: None,
+                            },
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("{e:?}")),
+                };
+                if let Err(e) = outcome {
+                    return Err(TestCaseError::fail(format!(
+                        "step {n} {step:?} on {date} refused: {e}"
+                    )));
+                }
+                used.push(date);
+            }
+            Ok(used)
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// Whatever is bought, reinvested, sold, moved between accounts,
+            /// split, bonus-issued and returned, the four views of a holding
+            /// agree: the ledger's running balance steps by each trade's
+            /// quantity and, as at every date, equals what the open-parcels
+            /// schedule holds then; and its holding summary, the portfolio
+            /// overview and the unrealised-gains report each carry the
+            /// open-parcels schedule's units and cost base per account.
+            #[test]
+            fn the_ledger_and_every_holdings_view_agree(
+                steps in prop::collection::vec(step(), 1..=14),
+                price_cents in 1i64..=20_000,
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_listing(&pool, 1, "PRP").await;
+                    holding_account::db_upsert(&pool, &HoldingAccount { id: HoldingAccountId(2), name: "Second".into() })
+                        .await
+                        .unwrap();
+                    let dates = record(&pool, &steps).await?;
+                    let (events, holdings) = db_activity(&pool, ListingId(1)).await.unwrap().unwrap();
+                    let tolerance = Decimal::new(1, 18);
+
+                    // The ledger is chronological, and a trade row moves the
+                    // running balance by its quantity — exactly, unless the
+                    // balance is a fraction no `Decimal` holds, which each
+                    // row rounds afresh.
+                    let mut before = Decimal::ZERO;
+                    for (i, e) in events.iter().enumerate() {
+                        if i > 0 {
+                            prop_assert!(events[i - 1].date <= e.date, "row {} out of order", i);
+                        }
+                        match e.record_table {
+                            RecordTable::Trades => prop_assert!(
+                                (e.units_after - (before + e.quantity.unwrap_or_default())).abs() <= Decimal::new(1, 20),
+                                "row {} ({}) on {}: {} after {}", i, e.event, e.date, e.units_after, before
+                            ),
+                            RecordTable::Transfers => prop_assert_eq!(e.units_after, before, "transfer row {}", i),
+                            _ => {}
+                        }
+                        before = e.units_after;
+                    }
+
+                    // As at every date, the balance is what the schedule
+                    // holds: exactly, where one parcel is open; else to within
+                    // the one rounding each parcel's own figure takes.
+                    for date in &dates {
+                        let parcels = open_parcels::db_open_parcels(&pool, Some(*date)).await.unwrap();
+                        let held: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
+                        let balance = events.iter().rev().find(|e| e.date <= *date).map_or(Decimal::ZERO, |e| e.units_after);
+                        if parcels.len() <= 1 {
+                            prop_assert_eq!(balance, held, "units held on {}", date);
+                        } else {
+                            prop_assert!((balance - held).abs() <= Decimal::new(1, 20), "units held on {}: {} against {}", date, balance, held);
+                        }
+                    }
+
+                    let open = open_parcels::db_open_parcels(&pool, None).await.unwrap();
+                    let price = Decimal::new(price_cents, 2);
+                    let client = ApiClient::full(&pool);
+                    let overview: Vec<HoldingOverview> = client
+                        .post_json(
+                            "/portfolio/overview",
+                            &serde_json::json!({ "prices": { "1": price.to_string() } }),
+                        )
+                        .await;
+                    let unrealised: Vec<unrealised_gains::UnrealisedGain> = client
+                        .post_json(
+                            "/portfolio/unrealised_gains",
+                            &serde_json::json!({ "prices": { "1": price.to_string() }, "as_of_date": "2030-01-01" }),
+                        )
+                        .await;
+                    for account in [HoldingAccountId(1), HoldingAccountId(2)] {
+                        let parcels: Vec<&OpenParcel> = open.iter().filter(|p| p.holding_account_id == account).collect();
+                        let units: Decimal = parcels.iter().map(|p| p.remaining_quantity).sum();
+                        let cost: Decimal = parcels.iter().map(|p| p.remaining_cost_base).sum();
+                        let summary = holdings.iter().find(|h| h.holding_account_id == account);
+                        let overview = overview.iter().find(|h| h.holding_account_id == account);
+                        let unrealised = unrealised.iter().find(|h| h.holding_account_id == account);
+                        if parcels.is_empty() {
+                            prop_assert!(summary.is_none() && overview.is_none() && unrealised.is_none(), "account {:?} holds nothing", account);
+                            continue;
+                        }
+                        for (view, q, c) in [
+                            ("ledger summary", summary.map(|h| h.quantity), summary.map(|h| h.total_cost_base)),
+                            ("overview", overview.map(|h| h.quantity), overview.map(|h| h.total_cost_base)),
+                            ("unrealised gains", unrealised.map(|h| h.quantity), unrealised.map(|h| h.total_cost_base)),
+                        ] {
+                            let q = q.unwrap();
+                            if parcels.len() == 1 {
+                                prop_assert_eq!(q, units, "{} units in account {:?}", view, account);
+                            } else {
+                                prop_assert!((q - units).abs() <= Decimal::new(1, 20), "{} units in account {:?}: {} against {}", view, account, q, units);
+                            }
+                            let c = c.unwrap();
+                            prop_assert!((c - cost).abs() <= tolerance, "{} cost base in account {:?}: {} against {}", view, account, c, cost);
+                        }
+                        let o = overview.unwrap();
+                        prop_assert_eq!(o.market_value, Some(o.quantity * price));
+                        let u = unrealised.unwrap();
+                        prop_assert_eq!(u.market_value, Some(u.quantity * price));
+                        prop_assert_eq!(u.unrealised_gain_loss, Some(u.quantity * price - u.total_cost_base));
+                        // Every parcel was bought before 2029, so all of it
+                        // has been held more than 12 months by 2030.
+                        prop_assert_eq!(u.cgt_discount_eligible_quantity, u.quantity);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 }

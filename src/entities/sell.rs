@@ -1270,6 +1270,86 @@ mod tests {
         assert!(!trade_exists(&pool, 3).await);
     }
 
+    /// 101 units after a 1-for-3 bonus issue: 134.666… units, which no
+    /// `Decimal` holds. The bonus is recorded, and the open-parcels schedule
+    /// reports what remains.
+    async fn bonus_issued_parcel(pool: &SqlitePool) -> Decimal {
+        insert_listing(pool, 1).await;
+        insert_buy(pool, 1, ListingId(1), Decimal::from(101)).await; // 2024-01-01
+        corporate_action::db_upsert(
+            pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: ListingId(1),
+                date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
+                kind: corporate_action::ActionKind::BonusIssue {
+                    bonus_units: Decimal::ONE,
+                    bonus_held_units: Decimal::from(3),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let open = open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        open[0].remaining_as_of.quantity()
+    }
+
+    /// The schedule rounds 134.666… up to `…67`, and a Sell of exactly that
+    /// figure read back as 101.000…0025 as-acquired units — past the parcel,
+    /// so the sale that empties it was refused, and the `…66` that was
+    /// accepted left a sliver of a unit open for ever. A full-precision figure
+    /// is read back as the count it was rounded from: the Sell empties the
+    /// parcel exactly.
+    #[tokio::test]
+    async fn the_sell_of_everything_the_schedule_shows_empties_a_bonus_issued_parcel() {
+        let pool = test_pool().await;
+        let held = bonus_issued_parcel(&pool).await;
+        assert_eq!(
+            held,
+            "134.66666666666666666666666667".parse::<Decimal>().unwrap()
+        );
+
+        let body = sell_body(
+            held,
+            vec![AllocationInput {
+                purchase_trade_id: TradeId(1),
+                quantity_allocated: held,
+            }],
+        );
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
+        let open = open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert!(open.is_empty(), "nothing is left open: {open:?}");
+    }
+
+    /// `docs/API.md` (Fractional entitlements): where the registry pays cash
+    /// in lieu of the fraction, it is recorded as a Sell of the fractional
+    /// units, which leaves the holding at the whole-unit figure the registry
+    /// holds — even where the ratio does not terminate and the fraction (two
+    /// thirds of a unit) can only be stated rounded.
+    #[tokio::test]
+    async fn selling_the_fraction_cashed_in_lieu_leaves_the_whole_units() {
+        let pool = test_pool().await;
+        let held = bonus_issued_parcel(&pool).await;
+        let fraction = held - Decimal::from(134);
+
+        let body = sell_body(
+            fraction,
+            vec![AllocationInput {
+                purchase_trade_id: TradeId(1),
+                quantity_allocated: fraction,
+            }],
+        );
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
+        let open = open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(open[0].remaining_as_of.quantity(), Decimal::from(134));
+    }
+
     mod properties {
         use super::*;
         use proptest::option;

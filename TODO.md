@@ -45,6 +45,9 @@ The 2026-10-23 Google Rust style guide pass is closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md): its correctness-adjacent findings, its mechanical clean-ups,
 and its imports, module layout and docs section.
 
+The 2026-10-23 third property-test pass (cross-report and snapshot-staleness invariants, and the
+three defects it found) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
+
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
 since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal

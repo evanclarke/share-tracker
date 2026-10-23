@@ -1218,8 +1218,8 @@ mod tests {
     use crate::entities::closing_price::ClearOutcome;
     use crate::entities::closing_price::test_support::QuoteStub;
     use crate::entities::listing_rename::RenameBody;
-    use crate::entities::{corporate_action, listing, listing_rename, rba_fx_rate};
-    use crate::test_support::{self, ApiClient, ApiResponse, test_pool, ymd};
+    use crate::entities::{corporate_action, exchange, listing, listing_rename, rba_fx_rate};
+    use crate::test_support::{self, ApiClient, ApiResponse, dec, test_pool, ymd};
     use axum::http::StatusCode;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1299,18 +1299,22 @@ mod tests {
             "listings",
             &["update"],
             "UPDATE only, narrowed to \
-             `currency`/`security_type`/`unpriced_from`/`unpriced_before` — the columns \
-             that change what a *stored* figure means (the currency denominating every price, \
-             the security type deciding which days are valuable, and the two dates bounding the \
-             span the price provider serves). The first two carry no date, so \
+             `currency`/`security_type`/`unpriced_from`/`unpriced_before`/`exchange_mic` — \
+             the columns that change what a *stored* figure means (the currency denominating \
+             every price, the security type deciding which days are valuable, the two dates \
+             bounding the span the price provider serves, and the exchange whose calendar picks \
+             each date's valuation day). The first two carry no date, so \
              they stale the whole series; `unpriced_from` stales from the earlier of its old \
              and new dates, so clearing it puts the real prices back, and `unpriced_before` — \
              the date the provider's series begins, before which the holding is excluded from \
              the totals — stales the mirror-image prefix, before the later of its old and new \
-             dates. A listing with no trades \
+             dates; `exchange_mic` (written by a rename that moves exchange, or its undo — a \
+             plain listing edit refuses the change once the listing has history) stales the \
+             dates under the current identity, from the newest rename on. A listing with no trades \
              is held on no snapshot date and a delete is refused while anything references it \
              (0030_listing_stale_snapshots.sql, 0035_listing_unpriced_from.sql, \
-             0037_listing_unpriced_before.sql, SCENARIOS M-08, Q-02)",
+             0037_listing_unpriced_before.sql, 0052_listing_exchange_stale_snapshots.sql, \
+             SCENARIOS M-08, Q-02)",
         ),
         (
             "rba_fx_rates",
@@ -1409,7 +1413,10 @@ mod tests {
             "listing_renames",
             "a snapshot carries a ticker only as a display label over `listing_id`, never as a \
              computed figure, so a rename is display-only drift rather than a wrong figure \
-             (0018_listing_renames.sql, SCENARIOS Q-15)",
+             (0018_listing_renames.sql, SCENARIOS Q-15). The one part that is not — a rename \
+             that moves exchange, whose calendar picks the valuation day — rewrites \
+             `listings.exchange_mic` in the same transaction, and the `listings` trigger stales \
+             from it (0052_listing_exchange_stale_snapshots.sql)",
         ),
         (
             "mic_registry",
@@ -1784,6 +1791,115 @@ mod tests {
             gains[0].market_value,
             Some("6000.00".parse().unwrap()),
             "regenerated at the hand-entered price"
+        );
+    }
+
+    /// A second AUD exchange with no holidays recorded, so its calendar trades
+    /// on Australia Day where XASX's does not.
+    async fn insert_second_aud_exchange(pool: &SqlitePool) {
+        exchange::db_upsert(
+            pool,
+            &exchange::Exchange {
+                mic: "CXAX".to_owned(),
+                name: "Second AUD market".to_owned(),
+                country: "Australia".to_owned(),
+                currency: "AUD".into(),
+                timezone: "Australia/Sydney".to_owned(),
+                settlement_days: 2,
+                close_time: "16:00".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    fn move_to(exchange: &str, effective_date: NaiveDate) -> RenameBody {
+        RenameBody {
+            effective_date,
+            ticker: "DUAL".into(),
+            exchange_mic: Some(exchange.into()),
+            name: None,
+            price_symbol: None,
+            note: None,
+        }
+    }
+
+    /// Moving a listing to an exchange whose calendar differs re-values the
+    /// snapshot dates it now trades on — an XASX holding snapshotted on
+    /// Australia Day was valued at the Friday close, and on an exchange that
+    /// trades that Monday it is valued at the Monday close — so the move stales
+    /// every snapshot under the new identity, whether a rename records it or
+    /// its undo reverses it. A snapshot dated before the rename keeps the old
+    /// calendar and stays fresh. The listings trigger
+    /// watched neither `exchange_mic` nor the rename, so the stored $1,000
+    /// stayed `stale = 0` against a regeneration of $2,000 (0052).
+    #[tokio::test]
+    async fn db_moving_a_listing_to_another_exchange_stales_what_its_calendar_valued() {
+        let pool = test_pool().await;
+        insert_second_aud_exchange(&pool).await;
+        insert_listing(&pool, 1, "DUAL", Some("XASX"), "AUD").await;
+        insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "AUD").await;
+        store_price(&pool, ListingId(1), ymd(2025, 12, 31), "8").await;
+        store_price(&pool, ListingId(1), ymd(2026, 1, 23), "10").await; // Friday
+        store_price(&pool, ListingId(1), ymd(2026, 1, 26), "20").await; // Australia Day
+        let now = friday_evening_sydney();
+        let australia_day = ymd(2026, 1, 26);
+        let market_value = |pool: SqlitePool| async move {
+            let snap = db_get(&pool, ReportKind::UnrealisedGains, australia_day)
+                .await
+                .unwrap()
+                .unwrap();
+            let gains: Vec<unrealised_gains::UnrealisedGain> =
+                serde_json::from_value(snap.rows).unwrap();
+            gains[0].market_value.unwrap()
+        };
+        generate(&pool, ymd(2025, 12, 31), now).await.unwrap();
+        generate(&pool, australia_day, now).await.unwrap();
+        assert_eq!(
+            market_value(pool.clone()).await,
+            dec("1000"),
+            "XASX: the Friday close"
+        );
+
+        listing_rename::db_rename(&pool, ListingId(1), &move_to("CXAX", ymd(2026, 1, 5)))
+            .await
+            .unwrap();
+        assert_eq!(
+            stale_flags(&pool, australia_day).await,
+            vec![true; 3],
+            "the rename"
+        );
+        assert_eq!(
+            stale_flags(&pool, ymd(2025, 12, 31)).await,
+            vec![false; 3],
+            "a date before the rename is still on the XASX calendar"
+        );
+        generate(&pool, australia_day, now).await.unwrap();
+        assert_eq!(
+            market_value(pool.clone()).await,
+            dec("2000"),
+            "CXAX: the Monday close"
+        );
+
+        let rename = listing_rename::db_list_for_listing(&pool, ListingId(1))
+            .await
+            .unwrap()
+            .remove(0);
+        listing_rename::db_undo(&pool, ListingId(1), rename.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            stale_flags(&pool, australia_day).await,
+            vec![true; 3],
+            "the undo"
+        );
+        generate(&pool, australia_day, now).await.unwrap();
+        assert_eq!(market_value(pool.clone()).await, dec("1000"));
+
+        assert_eq!(
+            stale_flags(&pool, ymd(2025, 12, 31)).await,
+            vec![false; 3],
+            "nor does undoing it reach a date before the rename"
         );
     }
 
@@ -3732,5 +3848,414 @@ mod tests {
             "the run values at the price committed while it waited, not the one it could \
              have read before the lock"
         );
+    }
+
+    mod properties {
+        use super::*;
+        use crate::entities::corporate_action::{ActionKind, CorporateAction};
+        use crate::entities::exchange_holiday::{self, ExchangeHoliday};
+        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::sell::{self, AllocationInput, SellBody};
+        use crate::entities::transfer::{self, TransferBody};
+        use crate::entities::{income, trade};
+        use crate::infra::id::TradeId;
+        use crate::reports::open_parcels;
+        use chrono::{Datelike, Weekday};
+        use proptest::prelude::*;
+
+        /// The weekdays of January and February 2026: every one carries a
+        /// stored close, so whichever calendar is in force finds a price.
+        fn weekdays() -> Vec<NaiveDate> {
+            ymd(2026, 1, 5)
+                .iter_days()
+                .take_while(|d| d.month() <= 2)
+                .filter(|d| !matches!(d.weekday(), Weekday::Sat | Weekday::Sun))
+                .collect()
+        }
+
+        /// The snapshot dates: two Fridays, Australia Day, and the window's
+        /// last day.
+        fn snapshot_dates() -> [NaiveDate; 4] {
+            [
+                ymd(2026, 1, 16),
+                ymd(2026, 1, 26),
+                ymd(2026, 2, 6),
+                ymd(2026, 2, 27),
+            ]
+        }
+
+        /// One write, dated by an index into [`weekdays`].
+        #[derive(Debug, Clone)]
+        enum Write {
+            Buy {
+                day: usize,
+                units: i64,
+                cents: i64,
+            },
+            /// Sells a percentage of every open parcel in account 1.
+            Sell {
+                day: usize,
+                pct: u32,
+            },
+            /// Moves the `nth` recorded trade to another date.
+            MoveTrade {
+                nth: usize,
+                day: usize,
+            },
+            RepriceTrade {
+                nth: usize,
+                cents: i64,
+            },
+            DeleteTrade {
+                nth: usize,
+            },
+            ReturnOfCapital {
+                day: usize,
+                cents: i64,
+            },
+            Split {
+                day: usize,
+            },
+            MoveAction {
+                nth: usize,
+                day: usize,
+            },
+            DeleteAction {
+                nth: usize,
+            },
+            Income {
+                day: usize,
+                cents: i64,
+            },
+            DeleteIncome {
+                nth: usize,
+            },
+            Price {
+                day: usize,
+                cents: i64,
+            },
+            Holiday {
+                day: usize,
+            },
+            DropHoliday {
+                day: usize,
+            },
+            /// Moves the listing to the holiday-free second exchange.
+            Rename {
+                day: usize,
+            },
+            UndoRename,
+            Transfer {
+                day: usize,
+                pct: u32,
+            },
+        }
+
+        fn write() -> impl Strategy<Value = Write> {
+            let day = 0usize..40;
+            let nth = 0usize..6;
+            prop_oneof![
+                (day.clone(), 1i64..=500, 100i64..=5_000)
+                    .prop_map(|(day, units, cents)| Write::Buy { day, units, cents }),
+                (day.clone(), 1u32..=100).prop_map(|(day, pct)| Write::Sell { day, pct }),
+                (nth.clone(), day.clone()).prop_map(|(nth, day)| Write::MoveTrade { nth, day }),
+                (nth.clone(), 100i64..=5_000)
+                    .prop_map(|(nth, cents)| Write::RepriceTrade { nth, cents }),
+                nth.clone().prop_map(|nth| Write::DeleteTrade { nth }),
+                (day.clone(), 1i64..=300)
+                    .prop_map(|(day, cents)| Write::ReturnOfCapital { day, cents }),
+                day.clone().prop_map(|day| Write::Split { day }),
+                (nth.clone(), day.clone()).prop_map(|(nth, day)| Write::MoveAction { nth, day }),
+                nth.clone().prop_map(|nth| Write::DeleteAction { nth }),
+                (day.clone(), 1i64..=50_000).prop_map(|(day, cents)| Write::Income { day, cents }),
+                nth.prop_map(|nth| Write::DeleteIncome { nth }),
+                (day.clone(), 100i64..=5_000).prop_map(|(day, cents)| Write::Price { day, cents }),
+                day.clone().prop_map(|day| Write::Holiday { day }),
+                day.clone().prop_map(|day| Write::DropHoliday { day }),
+                day.clone().prop_map(|day| Write::Rename { day }),
+                Just(Write::UndoRename),
+                (day, 1u32..=100).prop_map(|(day, pct)| Write::Transfer { day, pct }),
+            ]
+        }
+
+        async fn ids(pool: &SqlitePool, sql: &'static str) -> Vec<i64> {
+            sqlx::query_scalar(sql).fetch_all(pool).await.unwrap()
+        }
+
+        /// Applies one write through its entity's own path. A refused write
+        /// commits nothing, which is all the property needs of it.
+        async fn apply(pool: &SqlitePool, n: i64, w: &Write) {
+            let days = weekdays();
+            let at = |day: &usize| days[*day % days.len()];
+            match w {
+                Write::Buy { day, units, cents } => {
+                    let t = test_support::buy(100_000 - n, 1)
+                        .date(at(day))
+                        .qty(Decimal::from(*units))
+                        .price(Decimal::new(*cents, 2))
+                        .build();
+                    let _ = trade::db_upsert(pool, &t).await;
+                }
+                Write::Sell { day, pct } | Write::Transfer { day, pct } => {
+                    let date = at(day);
+                    let held = open_parcels::db_open_parcels(pool, Some(date))
+                        .await
+                        .unwrap();
+                    let allocations: Vec<AllocationInput> = held
+                        .iter()
+                        .filter(|p| p.holding_account_id == HoldingAccountId(1))
+                        .filter_map(|p| {
+                            let units = (p.remaining_quantity * Decimal::from(*pct)
+                                / Decimal::from(100))
+                            .round_dp(2);
+                            (units > Decimal::ZERO).then_some(AllocationInput {
+                                purchase_trade_id: p.trade_id,
+                                quantity_allocated: units.min(p.remaining_quantity),
+                            })
+                        })
+                        .collect();
+                    if allocations.is_empty() {
+                        return;
+                    }
+                    if matches!(w, Write::Sell { .. }) {
+                        let body = SellBody {
+                            brokerage_includes_gst: false,
+                            statement_total: None,
+                            holding_account_id: HoldingAccountId(1),
+                            date,
+                            settlement_date: None,
+                            listing_id: ListingId(1),
+                            average_price: Decimal::from(30),
+                            quantity: allocations.iter().map(|a| a.quantity_allocated).sum(),
+                            currency: "AUD".into(),
+                            brokerage: Decimal::from(10),
+                            gst_on_brokerage: Decimal::ONE,
+                            brokerage_currency: "AUD".into(),
+                            fx_rate: Decimal::ONE,
+                            spot_fx_rate: None,
+                            contract_note_ref: None,
+                            allocations,
+                        };
+                        let _ = sell::db_upsert_sell(pool, TradeId(100_000 - n), &body).await;
+                    } else {
+                        let body = TransferBody {
+                            listing_id: ListingId(1),
+                            date,
+                            from_account_id: HoldingAccountId(1),
+                            to_account_id: HoldingAccountId(2),
+                            allocations,
+                            fee_allocations: Vec::new(),
+                            fee_market_price: None,
+                            fee_fx_rate: None,
+                        };
+                        let _ = transfer::db_transfer(pool, n, &body).await;
+                    }
+                }
+                Write::MoveTrade { nth, .. }
+                | Write::RepriceTrade { nth, .. }
+                | Write::DeleteTrade { nth } => {
+                    let all = ids(pool, "SELECT id FROM trades ORDER BY id").await;
+                    let Some(id) = all.get(*nth % all.len().max(1)).copied() else {
+                        return;
+                    };
+                    match w {
+                        Write::DeleteTrade { .. } => {
+                            let _ = trade::db_delete(pool, TradeId(id)).await;
+                        }
+                        _ => {
+                            let Some(mut t) = trade::db_get(pool, TradeId(id)).await.unwrap()
+                            else {
+                                return;
+                            };
+                            if t.trade_type == trade::TradeType::Sell {
+                                return; // a Sell is rewritten through /sells, with its allocations
+                            }
+                            match w {
+                                Write::MoveTrade { day, .. } => {
+                                    t.date = at(day);
+                                    t.settlement_date = at(day);
+                                }
+                                Write::RepriceTrade { cents, .. } => {
+                                    t.average_price = Decimal::new(*cents, 2)
+                                }
+                                _ => unreachable!(),
+                            }
+                            let _ = trade::db_upsert(pool, &t).await;
+                        }
+                    }
+                }
+                Write::ReturnOfCapital { day, cents } => {
+                    let _ = corporate_action::db_upsert(
+                        pool,
+                        &CorporateAction {
+                            id: n,
+                            listing_id: ListingId(1),
+                            date: at(day),
+                            kind: ActionKind::ReturnOfCapital {
+                                amount_per_unit: Decimal::new(*cents, 2),
+                                currency: "AUD".into(),
+                                record_date: None,
+                            },
+                        },
+                    )
+                    .await;
+                }
+                Write::Split { day } => {
+                    let _ = corporate_action::db_upsert(
+                        pool,
+                        &CorporateAction {
+                            id: n,
+                            listing_id: ListingId(1),
+                            date: at(day),
+                            kind: ActionKind::ShareSplit {
+                                split_new_units: Decimal::from(2),
+                                split_old_units: Decimal::ONE,
+                            },
+                        },
+                    )
+                    .await;
+                }
+                Write::MoveAction { nth, .. } | Write::DeleteAction { nth } => {
+                    let all = ids(pool, "SELECT id FROM corporate_actions ORDER BY id").await;
+                    let Some(id) = all.get(*nth % all.len().max(1)).copied() else {
+                        return;
+                    };
+                    if let Write::MoveAction { day, .. } = w {
+                        let Some(mut a) = corporate_action::db_get(pool, id).await.unwrap() else {
+                            return;
+                        };
+                        a.date = at(day);
+                        let _ = corporate_action::db_upsert(pool, &a).await;
+                    } else {
+                        let _ = corporate_action::db_delete(pool, id).await;
+                    }
+                }
+                Write::Income { day, cents } => {
+                    let i = test_support::income(n, 1, at(day))
+                        .with(|i| i.unfranked_amount = Decimal::new(*cents, 2))
+                        .build();
+                    let _ = income::db_upsert(pool, &i).await;
+                }
+                Write::DeleteIncome { nth } => {
+                    let all = ids(pool, "SELECT id FROM income ORDER BY id").await;
+                    if let Some(id) = all.get(*nth % all.len().max(1)) {
+                        let _ = income::db_delete(pool, *id).await;
+                    }
+                }
+                Write::Price { day, cents } => {
+                    let p = test_support::closing_price(1, at(day))
+                        .price(&Decimal::new(*cents, 2).to_string())
+                        .manual("property", "a corrected close")
+                        .build();
+                    let _ = closing_price::db_store(pool, &p).await;
+                }
+                Write::Holiday { day } => {
+                    let _ = exchange_holiday::db_upsert(
+                        pool,
+                        &ExchangeHoliday {
+                            id: 0,
+                            mic: "XASX".into(),
+                            holiday_date: at(day),
+                            name: "Property holiday".into(),
+                        },
+                    )
+                    .await;
+                }
+                Write::DropHoliday { day } => {
+                    let _ = exchange_holiday::db_delete(pool, "XASX", at(day)).await;
+                }
+                Write::Rename { day } => {
+                    let current: String =
+                        sqlx::query_scalar("SELECT exchange_mic FROM listings WHERE id = 1")
+                            .fetch_one(pool)
+                            .await
+                            .unwrap();
+                    let to = if current == "XASX" { "CXAX" } else { "XASX" };
+                    let _ =
+                        listing_rename::db_rename(pool, ListingId(1), &move_to(to, at(day))).await;
+                }
+                Write::UndoRename => {
+                    let newest = ids(
+                        pool,
+                        "SELECT id FROM listing_renames ORDER BY effective_date DESC LIMIT 1",
+                    )
+                    .await;
+                    if let Some(id) = newest.first() {
+                        let _ = listing_rename::db_undo(pool, ListingId(1), *id).await;
+                    }
+                }
+            }
+        }
+
+        /// Every stored snapshot of `date`, less its generation time.
+        async fn stored(
+            pool: &SqlitePool,
+            date: NaiveDate,
+        ) -> Vec<(ReportKind, serde_json::Value, bool, bool, bool)> {
+            let mut out = Vec::new();
+            for meta in db_list(pool, None, Some(date), Some(date)).await.unwrap() {
+                let snap = db_get(pool, meta.report, date).await.unwrap().unwrap();
+                out.push((
+                    meta.report,
+                    snap.rows,
+                    snap.provisional,
+                    snap.price_carried_forward,
+                    snap.holding_excluded,
+                ));
+            }
+            out
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// A snapshot left `stale = 0` is the truth: whatever is written
+            /// afterwards through the entity paths — trades bought, sold,
+            /// moved, repriced and deleted, corporate actions recorded, moved
+            /// and removed, income, corrected closes, holidays, renames onto
+            /// another exchange and their undo, transfers — every snapshot
+            /// still flagged fresh regenerates to exactly what it stores. A
+            /// write that changes a stored figure without staling it is the
+            /// gap the staleness triggers exist to close.
+            #[test]
+            fn a_fresh_snapshot_always_matches_its_regeneration(
+                writes in prop::collection::vec(write(), 1..=10),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_second_aud_exchange(&pool).await;
+                    holding_account::db_upsert(&pool, &HoldingAccount { id: HoldingAccountId(2), name: "Second".into() })
+                        .await
+                        .unwrap();
+                    insert_listing(&pool, 1, "DUAL", Some("XASX"), "AUD").await;
+                    insert_buy(&pool, 1, ListingId(1), ymd(2025, 6, 4), "100", "10", "AUD").await;
+                    for (i, day) in weekdays().iter().enumerate() {
+                        store_price(&pool, ListingId(1), *day, &format!("{}.{:02}", 20 + i, i)).await;
+                    }
+                    let now = friday_evening_sydney();
+                    for date in snapshot_dates() {
+                        generate(&pool, date, now).await.unwrap();
+                    }
+
+                    for (n, w) in writes.iter().enumerate() {
+                        apply(&pool, n as i64 + 10, w).await;
+                    }
+
+                    for date in snapshot_dates() {
+                        let metas = db_list(&pool, None, Some(date), Some(date)).await.unwrap();
+                        if metas.iter().any(|m| m.stale) {
+                            continue;
+                        }
+                        let before = stored(&pool, date).await;
+                        if let Err(e) = generate(&pool, date, now).await {
+                            return Err(TestCaseError::fail(format!("the fresh snapshot of {date} no longer generates: {e}")));
+                        }
+                        let after = stored(&pool, date).await;
+                        prop_assert_eq!(before, after, "the snapshot of {} was left fresh", date);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 }
