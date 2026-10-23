@@ -3040,7 +3040,7 @@ fn known_limitations_document_cost_base_fx_timing() {
 
 /// Docs pin for the brokerage-currency invariant (SCENARIOS B-02, decided
 /// 2026-08-15): the write-time refusal has its own tests
-/// (`trade::tests::api_brokerage_in_another_currency_than_the_trade_returns_422`,
+/// (`trade::tests::validation::api_brokerage_in_another_currency_than_the_trade_returns_422`,
 /// the Sell twin, and the open-parcels figure), but the *documented* half —
 /// what a user with a foreign-currency fee is supposed to do instead, and why
 /// the strict s 960-50 per-leg translation is not modelled — lives only in the

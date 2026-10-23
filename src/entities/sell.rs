@@ -2367,7 +2367,7 @@ mod tests {
     /// of the week rather than on the bound under test. Crypto settles
     /// same-day, so "not bounded above" is asserted as `>= today` here; the
     /// listed T+2 case is pinned on the trade path
-    /// (`trade::tests::api_future_dated_trade_rejected_422_and_today_accepted`).
+    /// (`trade::tests::validation::api_future_dated_trade_rejected_422_and_today_accepted`).
     #[tokio::test]
     async fn api_future_dated_sell_rejected_422_and_today_accepted() {
         let pool = test_pool().await;
