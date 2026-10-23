@@ -315,6 +315,7 @@ pub fn row_dec(row: &SqliteRow, column: &str) -> Result<Decimal, sqlx::Error> {
 ///
 /// Only presentation rounds: nothing stored, and no figure a later
 /// calculation consumes, ever goes through here.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 pub fn to_cents(value: Decimal) -> Decimal {
     let rounded =
         value.round_dp_with_strategy(2, rust_decimal::RoundingStrategy::MidpointAwayFromZero);
@@ -359,6 +360,7 @@ pub fn to_cents(value: Decimal) -> Decimal {
 /// `divisor` must be non-zero; every caller guards it (a parcel quantity, a
 /// held-units ratio denominator validated positive at write time, the
 /// literal 100).
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 pub fn mul_div(factors: &[Decimal], divisor: Decimal) -> Decimal {
     let Some((first, rest)) = factors.split_first() else {
         // The empty product is one; no caller does this.
@@ -386,6 +388,7 @@ pub fn mul_div(factors: &[Decimal], divisor: Decimal) -> Decimal {
 /// The two halves [`apportion`] answers, named because both are `Decimal`s and
 /// a swapped pair would still compile — and would carry the wrong leg of a
 /// cost base into a replacement parcel.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Apportioned {
     /// The `num / den` share of the whole.
@@ -1140,5 +1143,141 @@ mod tests {
                  field as a JSON number: {line}"
             );
         }
+    }
+
+    /// The items whose dropped result is a silent money error, or a builder
+    /// that silently does nothing. A binary crate never gets clippy's
+    /// `must_use_candidate`, so `#[must_use]` is placed by hand and this
+    /// pins it: a computed cost base, apportionment or re-based quantity
+    /// written as a bare statement (`x.rebased(..);` in place of
+    /// `x = x.rebased(..);`) compiles, and only the attribute's warning —
+    /// an error under CI's `-D warnings` — says the figure went nowhere.
+    ///
+    /// A *type* carries it where the result has one of its own, which covers
+    /// every function answering it; a function carries it where it answers a
+    /// bare `Decimal` (or `Self` of a type that is not itself must-use).
+    const MUST_USE_TYPES: &[(&str, &str)] = &[
+        ("infra/decimal.rs", "struct Apportioned"),
+        ("infra/currency.rs", "struct Aud"),
+        ("domain/adjustments.rs", "struct SplitRatio"),
+        ("domain/adjustments.rs", "struct AcquiredUnits"),
+        ("domain/adjustments.rs", "struct Fraction"),
+        ("domain/adjustments.rs", "struct UnitsAt"),
+        ("domain/cost_base.rs", "struct CostBase"),
+        ("test_support.rs", "struct ListingBuilder"),
+        ("test_support.rs", "struct ClosingPriceBuilder"),
+        ("test_support.rs", "struct TradeBuilder"),
+        ("test_support.rs", "struct AmmaBuilder"),
+        ("test_support.rs", "struct IncomeBuilder"),
+        ("test_support.rs", "struct EssStatementBuilder"),
+    ];
+    const MUST_USE_FNS: &[(&str, &str)] = &[
+        ("infra/decimal.rs", "fn mul_div("),
+        ("infra/decimal.rs", "fn to_cents("),
+        ("domain/adjustments.rs", "fn rebase("),
+        ("domain/adjustments.rs", "fn contemporaneous_price("),
+        ("domain/cost_base.rs", "fn reduction_for_units("),
+        ("domain/cost_base.rs", "fn per_unit_for("),
+        ("domain/cost_base.rs", "fn prorated_initial_cost("),
+        ("domain/cost_base.rs", "fn reduction_for("),
+        ("test_support.rs", "fn with_header("),
+        ("test_support.rs", "fn with_peer("),
+    ];
+    /// Functions covered by their result type's attribute: each must still
+    /// answer that type, so a signature change cannot quietly uncover one.
+    const MUST_USE_BY_RESULT_TYPE: &[(&str, &str, &str)] = &[
+        ("infra/decimal.rs", "fn apportion(", "Apportioned"),
+        ("domain/adjustments.rs", "fn split_ratio(", "SplitRatio"),
+        ("domain/adjustments.rs", "fn rebase_ratio(", "SplitRatio"),
+        (
+            "domain/adjustments.rs",
+            "fn price_basis_ratio(",
+            "SplitRatio",
+        ),
+        ("domain/adjustments.rs", "fn rebased(", "Self"),
+        (
+            "domain/adjustments.rs",
+            "fn split_adjusted_quantity(",
+            "UnitsAt",
+        ),
+        (
+            "domain/adjustments.rs",
+            "fn as_acquired_quantity(",
+            "AcquiredUnits",
+        ),
+        (
+            "domain/adjustments.rs",
+            "fn sold_in_acquired_units(",
+            "AcquiredUnits",
+        ),
+        ("domain/cost_base.rs", "fn into_aud_with(", "CostBase"),
+        ("domain/cost_base.rs", "fn adjusted_cost_base(", "CostBase"),
+    ];
+
+    /// The one declaration `decl` names in `path`'s code: its offset.
+    fn declaration(code: &str, path: &str, decl: &str) -> usize {
+        let at: Vec<usize> = code
+            .match_indices(decl)
+            .map(|(i, _)| i)
+            .filter(|&i| {
+                // A whole word: `fn rebase(` must not match `fn unrebase(`,
+                // nor `struct Aud` match `struct Audit`.
+                let before = code[..i].chars().next_back();
+                let after = code[i + decl.len()..].chars().next();
+                let word = |c: char| c.is_alphanumeric() || c == '_';
+                !before.is_some_and(word) && (decl.ends_with('(') || !after.is_some_and(word))
+            })
+            .collect();
+        assert_eq!(at.len(), 1, "expected exactly one `{decl}` in {path}");
+        at[0]
+    }
+
+    /// Whether the attributes directly above the declaration at `at` — the
+    /// text back to the previous item's end — include `#[must_use`.
+    fn carries_must_use(code: &str, at: usize) -> bool {
+        let start = code[..at].rfind(['}', ';', '{']).map_or(0, |i| i + 1);
+        code[start..at].contains("#[must_use")
+    }
+
+    #[test]
+    fn money_arithmetic_and_builders_are_must_use() {
+        let code_of = |path: &str| {
+            &crate::test_support::rust_sources()
+                .iter()
+                .find(|source| source.path == path)
+                .unwrap_or_else(|| panic!("{path} is under src"))
+                .code
+        };
+        let mut missing = Vec::new();
+        for &(path, decl) in MUST_USE_TYPES.iter().chain(MUST_USE_FNS) {
+            let code = code_of(path);
+            if !carries_must_use(code, declaration(code, path, decl)) {
+                missing.push(format!("{path}: {decl}"));
+            }
+        }
+        for &(path, decl, result) in MUST_USE_BY_RESULT_TYPE {
+            let code = code_of(path);
+            let at = declaration(code, path, decl);
+            let signature = &code[at..at + code[at..].find('{').expect("a body")];
+            let returns = signature
+                .split_once("->")
+                .map(|(_, ret)| ret)
+                .unwrap_or_default();
+            if !returns
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .any(|word| word == result)
+            {
+                missing.push(format!("{path}: {decl} no longer answers `{result}`"));
+            }
+            let covered = result == "Self"
+                || MUST_USE_TYPES
+                    .iter()
+                    .any(|(_, ty)| ty.strip_prefix("struct ") == Some(result));
+            assert!(covered, "`{result}` is not in MUST_USE_TYPES");
+        }
+        assert!(
+            missing.is_empty(),
+            "must carry `#[must_use]` (a dropped result is a silent error): {missing:#?}"
+        );
     }
 }

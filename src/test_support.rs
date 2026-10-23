@@ -459,6 +459,7 @@ impl ApiClient {
     /// makes from here on — e.g. a session cookie or `Authorization: Bearer
     /// <token>` against an `infra::auth`-gated router. Chainable:
     /// `client.with_header("Cookie", a).with_header("X-Foo", b)`.
+    #[must_use = "a builder does nothing until it is used"]
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
@@ -476,6 +477,7 @@ impl ApiClient {
     /// inserted alongside it: the handler looks up `Extension<ConnectInfo<_>>`
     /// specifically, so only the wrapped type it actually reads is installed
     /// here.
+    #[must_use = "a builder does nothing until it is used"]
     pub fn with_peer(mut self, addr: std::net::SocketAddr) -> Self {
         self.peer = Some(addr);
         self
@@ -869,6 +871,7 @@ pub fn listing(id: i64) -> ListingBuilder {
     }
 }
 
+#[must_use = "a builder does nothing until it is used"]
 pub struct ListingBuilder {
     l: listing::Listing,
 }
@@ -1121,6 +1124,7 @@ pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuil
     }
 }
 
+#[must_use = "a builder does nothing until it is used"]
 pub struct ClosingPriceBuilder {
     p: closing_price::ClosingPrice,
 }
@@ -1213,6 +1217,7 @@ pub fn trade(id: i64, listing_id: i64, trade_type: trade::TradeType) -> TradeBui
     TradeBuilder::new(id, listing_id, trade_type)
 }
 
+#[must_use = "a builder does nothing until it is used"]
 pub struct TradeBuilder {
     t: trade::Trade,
     settlement_overridden: bool,
@@ -1402,6 +1407,7 @@ pub fn amma(id: i64, listing_id: i64) -> AmmaBuilder {
     }
 }
 
+#[must_use = "a builder does nothing until it is used"]
 pub struct AmmaBuilder {
     a: amma::AmmaStatement,
 }
@@ -1481,6 +1487,7 @@ pub fn income(id: i64, listing_id: i64, date_paid: NaiveDate) -> IncomeBuilder {
     }
 }
 
+#[must_use = "a builder does nothing until it is used"]
 pub struct IncomeBuilder {
     i: income::Income,
 }
@@ -1550,6 +1557,7 @@ pub fn ess_statement(id: i64, listing_id: i64, taxing_point: NaiveDate) -> EssSt
     }
 }
 
+#[must_use = "a builder does nothing until it is used"]
 pub struct EssStatementBuilder {
     s: ess_statement::EssStatement,
 }

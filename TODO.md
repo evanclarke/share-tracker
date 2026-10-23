@@ -126,11 +126,20 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   `LiveQuotes::requested` are the two bool-to-enum adapters). Test:
   `app::tests::no_function_takes_an_unclassified_bool_parameter` scans every non-test file and
   fails on a `bool` parameter not in its reasoned `BOOL_PARAMETERS_ALLOWED` (and on a stale entry)
-- [ ] `#[must_use]` is on one item in the tree (`fx::Provisional`); clippy's `must_use_candidate`
+- [x] `#[must_use]` is on one item in the tree (`fx::Provisional`); clippy's `must_use_candidate`
   never fires in a binary crate. Add it to the pure domain arithmetic whose dropped result is a
   silent money error — `mul_div`, `apportion`, `split_ratio`, `CostBase::into_aud_with`,
   `UnitsAt::rebased` — and to `Self`-returning builders (`ApiClient::with_header`). Test: a scan or
   compile-fail-free check that each named fn carries it
+  Done 2026-10-23: the result *types* carry it where they have one — `Apportioned`, `SplitRatio`,
+  `AcquiredUnits`, `Fraction`, `UnitsAt`, `CostBase<C>`, `Aud` — which covers `apportion`,
+  `split_ratio`/`rebase_ratio`/`price_basis_ratio`, `rebased`, `into_aud_with`,
+  `adjusted_cost_base` and the unit conversions; the `Decimal`-returning arithmetic carries it on
+  the fn (`mul_div`, `to_cents`, `rebase`, `contemporaneous_price`, `reduction_for_units`, the AMIT
+  `per_unit_for`, `prorated_initial_cost`, `reduction_for`), as do `ApiClient::with_header`/
+  `with_peer` and the six `test_support` row-builder types. No existing call site dropped a result.
+  Test: `infra::decimal::tests::money_arithmetic_and_builders_are_must_use` scans for the attribute
+  on each listed type and fn, and checks each type-covered fn still answers its must-use type
 - [ ] Implement `FromStr` instead of ad-hoc parse methods (none exist in `src` today):
   `WorthlessEvent::from_str` (`corporate_action/model.rs:35` — the guide's own
   `should_implement_trait` example), `RateMonth::parse` (`fx.rs:78`), `BasePath::parse`

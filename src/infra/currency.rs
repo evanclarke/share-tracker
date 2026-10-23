@@ -119,6 +119,7 @@ impl PartialEq<CurrencyCode> for &str {
 ///
 /// Also the marker that says a [`CostBase`](crate::domain::cost_base::CostBase)
 /// breakdown is in AUD (`CostBase<Aud>`), against [`Native`].
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Aud(Decimal);
 

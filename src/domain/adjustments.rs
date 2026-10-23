@@ -474,6 +474,7 @@ where
 /// A conversion ratio between unit bases: `new` units for every `old`. Named
 /// because both terms are `Decimal`s, and a swapped pair still compiles — and
 /// re-bases every quantity the wrong way.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SplitRatio {
     /// The units held in the later basis for every `old`.
@@ -544,6 +545,7 @@ pub fn split_ratio(splits: &[SplitEvent], from: NaiveDate, up_to: Option<NaiveDa
 /// (`cost_base::prorated_initial_cost`), or read out by [`Self::get`]. Only
 /// where a cross-multiplication would itself overflow does an operation fall
 /// back to the rounded figures, which is no worse than dividing up front.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy)]
 pub struct AcquiredUnits {
     num: Decimal,
@@ -624,6 +626,7 @@ impl AcquiredUnits {
 
 /// An [`AcquiredUnits`] count as the exact fraction `num / den` it holds —
 /// see [`AcquiredUnits::parts`].
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fraction {
     pub num: Decimal,
@@ -728,6 +731,7 @@ impl PartialEq<Decimal> for AcquiredUnits {
 /// Unlike [`AcquiredUnits`] it carries the date it is stated at, so a
 /// conversion is handed only the date it converts *to* and cannot be given
 /// the wrong *from*. The quantity counterpart of `cost_base::Held`.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnitsAt {
     quantity: Decimal,
@@ -778,6 +782,7 @@ impl PartialEq<Decimal> for UnitsAt {
 /// rollover replacement parcel can postdate the AMMA statement year end its
 /// units are costed against (SCENARIOS N-06), and a one-directional window
 /// would multiply by 1 there and apply a per-unit figure to post-split units.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 fn rebase(
     qty: Decimal,
     splits: &[SplitEvent],
@@ -1058,6 +1063,7 @@ pub fn price_basis_ratio(
 /// reciprocal recovers it. Every event's factor is accumulated as an exact
 /// numerator/denominator pair, so however many events the window holds the
 /// result is one multiplication and one division — no intermediate rounding.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 pub fn contemporaneous_price(
     price: Decimal,
     events: &[PriceBasisEvent],

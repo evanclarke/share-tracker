@@ -718,6 +718,7 @@ impl AmitReductionEvent {
     /// what [`mul_div`] preserves, while giving an answer rather than a panic
     /// where one of the two products is too large for `rust_decimal` (a
     /// per-unit adjustment against a holding of 1e15 units).
+    #[must_use = "a dropped money or quantity figure is a silent money error"]
     pub fn reduction_for_units(
         &self,
         parcel_quantity: AcquiredUnits,
@@ -770,6 +771,7 @@ impl AmitReductionEvent {
     /// the itemised adjustment rows display. Presentation only: the amounts
     /// themselves go through `reduction_for_units`, which keeps its division
     /// to the end rather than rounding a rate and multiplying it back up.
+    #[must_use = "a dropped money or quantity figure is a silent money error"]
     pub fn per_unit_for(
         &self,
         parcel_quantity: AcquiredUnits,
@@ -790,6 +792,7 @@ impl AmitReductionEvent {
 /// only way to make one, so a native breakdown cannot be reported, indexed or
 /// aggregated as AUD, nor an AUD one converted a second time. An AUD fixture
 /// converts at rate 1, so this is the check its tests could never make.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 #[derive(Debug, Clone, Copy)]
 pub struct CostBase<C> {
     /// Whole-parcel initial cost base: price × quantity + brokerage + GST.
@@ -857,6 +860,7 @@ pub struct CostBase<C> {
 /// figure is the cost base, so an unrepresentable one has no lesser answer to
 /// give. It panics, and `app::router`'s panic layer turns that into a logged
 /// `500` rather than a dropped connection.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 pub fn prorated_initial_cost(
     initial_cost: Decimal,
     units: AcquiredUnits,
@@ -1236,6 +1240,7 @@ impl CostBase<Aud> {
 /// parcel's cost base). This is the AMIT counterpart of
 /// [`RocEvent::per_unit_for`]'s re-basing of a
 /// return-of-capital payment.
+#[must_use = "a dropped money or quantity figure is a silent money error"]
 pub fn reduction_for(
     quantity: AcquiredUnits,
     cost_base_adjustment: Decimal,
