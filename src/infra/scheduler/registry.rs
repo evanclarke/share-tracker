@@ -10,7 +10,7 @@
 //! operator ever sees — `job_runs.error`, the Jobs table's Error column, the
 //! health banner — and every error enum in the tree carries an `#[error("…")]`
 //! written to be exactly that, which the `Debug` form discards in favour of
-//! Rust syntax (SCENARIOS T-06). `scheduler::tests::
+//! Rust syntax (SCENARIOS T-06). `scheduler::tests::failures::
 //! no_registered_job_records_its_failure_as_a_debug_string` pins it.
 
 use crate::entities::closing_price::SharedFetcher;
