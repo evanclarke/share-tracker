@@ -7,3 +7,8 @@
 disallowed-methods = [
     { path = "sqlx::Pool::begin", reason = "begin a write with infra::db::write_tx and a read with infra::db::read_tx" },
 ]
+
+# `clippy::unwrap_used` (Cargo.toml's `[lints.clippy]`) gates production code:
+# a bare `unwrap()` there says nothing about why it cannot fail. A test's
+# `unwrap()` is its assertion, so test code is exempt.
+allow-unwrap-in-tests = true

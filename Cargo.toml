@@ -133,3 +133,7 @@ opt-level = 2
 # The deliberate catch-alls carry a reasoned `#[expect]`; test code is exempt
 # (`main.rs`'s `cfg_attr`), since a test's `_ => panic!` is the decision.
 wildcard_enum_match_arm = "warn"
+# A bare `unwrap()` says nothing about why it cannot fail: production code
+# states it in an `expect`, or propagates the error where failure is possible.
+# Test code is exempt (`allow-unwrap-in-tests` in `clippy.toml`).
+unwrap_used = "warn"

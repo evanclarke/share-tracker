@@ -159,11 +159,19 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   The guide's rustfmt options (`imports_granularity = "Module"`, `hex_literal_case`,
   `format_macro_matchers`) are nightly-only, so stable `cargo fmt --check` cannot gate them — record
   that decision in a `rustfmt.toml` comment rather than adopting them silently
+  - 2026-10-23: `unwrap_used` and `allow-unwrap-in-tests = true` are done (with the
+    `exchange_holiday.rs` clean-up below); the remaining lints are still open
 
 ## Google Rust style guide pass (2026-10-23) — mechanical clean-ups
 Each closed by the lint named in the section above once it is enabled and clean.
-- [ ] Bare `unwrap()` at `entities/exchange_holiday.rs:187-188` (1 Jan / 31 Dec construction) →
+- [x] Bare `unwrap()` at `entities/exchange_holiday.rs:187-188` (1 Jan / 31 Dec construction) →
   `expect` stating why it cannot fail. `main.rs`'s `expect`s stay (developer-facing binary)
+  - Done 2026-10-23: both are `expect`s (chrono's range runs 1 Jan of its first year to 31 Dec of
+    its last, so both ends of a valid date's year are valid) — the only production `unwrap()`s the
+    lint found. Test: `clippy::unwrap_used = "warn"` in `Cargo.toml`, enforced by CI's
+    `cargo clippy --all-targets -- -D warnings` (mutation-checked: a production `unwrap()` fails
+    it); test code is exempt via `clippy.toml`'s `allow-unwrap-in-tests`, so `main.rs`'s `cfg_attr`
+    needs no entry for it
 - [ ] Possibly-truncating `as` casts → `try_from`: `closing_price/fetcher.rs:342` (usize→i32),
   `tax_year_settings.rs:151` (i64→i32), `row_history.rs:372` (i64→usize)
 - [ ] String building: 15 `s += &format!(…)` (`infra/email.rs` 7, `reports/activity.rs` 6,

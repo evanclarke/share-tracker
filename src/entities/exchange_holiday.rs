@@ -184,8 +184,13 @@ pub(crate) fn coverage_span(holidays: &HashSet<NaiveDate>) -> Option<(NaiveDate,
 pub(crate) fn coverage_span_for(earliest: NaiveDate, latest: NaiveDate) -> (NaiveDate, NaiveDate) {
     use chrono::Datelike;
     (
-        NaiveDate::from_ymd_opt(earliest.year(), 1, 1).unwrap(),
-        NaiveDate::from_ymd_opt(latest.year(), 12, 31).unwrap(),
+        // chrono's supported range runs from 1 January of its first year to
+        // 31 December of its last, so both ends of a year some valid date
+        // falls in are themselves valid dates.
+        NaiveDate::from_ymd_opt(earliest.year(), 1, 1)
+            .expect("1 January of a valid date's year is in chrono's range"),
+        NaiveDate::from_ymd_opt(latest.year(), 12, 31)
+            .expect("31 December of a valid date's year is in chrono's range"),
     )
 }
 
