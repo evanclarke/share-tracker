@@ -4,6 +4,7 @@ use super::test_support::DistributionStub;
 use super::*;
 use crate::infra::id::ListingId;
 use crate::test_support::{ApiClient, allocate, buy, dec, listing, sell, test_pool, ymd};
+use axum::http::StatusCode;
 
 fn client(pool: &SqlitePool) -> ApiClient {
     ApiClient::over(router().with_state(pool.clone()))
@@ -325,7 +326,7 @@ async fn the_list_and_get_routes_serve_the_stored_calendar() {
     // the noun, and this entity has no DELETE (the calendar is provider-owned).
     api.get("/distribution_events/9999")
         .await
-        .expect_status(axum::http::StatusCode::NOT_FOUND);
+        .expect_status(StatusCode::NOT_FOUND);
 }
 
 /// Record a rename directly, the way `domain::listing_identity`'s own tests

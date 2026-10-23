@@ -17,12 +17,15 @@ use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch
 use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use axum::extract::{Extension, State};
+use quick_xml::escape;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+use std::env;
+use std::mem;
 use std::sync::Arc;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -171,7 +174,7 @@ impl ImportSummary {
 impl CrudEntity for Currency {
     /// Keyed by ISO 4217 (or ISO 24165 DTI) code, not a rowid.
     type Key = String;
-    type Filter = crate::infra::http::NoFilter;
+    type Filter = NoFilter;
     const TABLE: &'static str = "currencies";
     const COLUMNS: &'static str = "code, kind, numeric_code, name, short_name, minor_units, source";
     const KEY_COLUMN: &'static str = "code";
@@ -339,7 +342,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
             Ok(Event::GeneralRef(r)) if in_entry && cur_tag.is_some() => {
                 let entity: &str = &r;
                 let raw = format!("&{entity};");
-                let resolved = quick_xml::escape::unescape(&raw)
+                let resolved = escape::unescape(&raw)
                     .map_err(|e| ImportError::Parse(format!("unresolvable reference: {e}")))?;
                 pending.push_str(&resolved);
             }
@@ -349,7 +352,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                 if tag == "CcyNtry" {
                     in_entry = false;
                     cur_tag = None;
-                    if let Some(currency) = std::mem::take(&mut entry).into_currency(&mut seen)? {
+                    if let Some(currency) = mem::take(&mut entry).into_currency(&mut seen)? {
                         out.push(currency);
                     }
                 } else if cur_tag.as_deref() == Some(tag) {
@@ -513,8 +516,8 @@ pub async fn import_feeds(
 /// them (the ISO 24165 download is credential-gated; ISO 4217 is free).
 fn dtif_credentials() -> Option<(String, String)> {
     match (
-        std::env::var("DTI_REGISTRY_USER_ID"),
-        std::env::var("DTI_REGISTRY_PASSWORD"),
+        env::var("DTI_REGISTRY_USER_ID"),
+        env::var("DTI_REGISTRY_PASSWORD"),
     ) {
         (Ok(user), Ok(pass)) => Some((user, pass)),
         _ => None,
@@ -603,8 +606,10 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
+    use tokio::time;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -966,7 +971,7 @@ mod tests {
     /// variant's own `#[error]` wording and carries the transport cause.
     #[tokio::test]
     async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
-        let url = crate::test_support::unreachable_url("list-one.xml");
+        let url = test_support::unreachable_url("list-one.xml");
         let error = fetch(&LiveFeedFetcher, &url, None)
             .await
             .expect_err("nothing is listening");
@@ -1000,7 +1005,7 @@ mod tests {
         use crate::infra::fetch::test_support::StalledFeedFetcher;
 
         let pool = test_pool().await;
-        tokio::time::pause();
+        time::pause();
         let app = ApiClient::over(router_with(StalledFeedFetcher::shared()).with_state(pool));
 
         let resp = app.post_empty("/currencies/import").await;

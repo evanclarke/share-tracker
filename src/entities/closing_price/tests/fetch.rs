@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::infra::id::ListingId;
+use crate::test_support;
 
 #[tokio::test]
 async fn api_backfill_fetches_only_missing_trading_days() {
@@ -246,7 +247,7 @@ async fn api_backfill_records_the_overriding_symbol_on_every_stored_row() {
 async fn api_list_serves_the_symbol_a_row_was_fetched_under() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
-    crate::test_support::closing_price(1, ymd(2026, 6, 1))
+    test_support::closing_price(1, ymd(2026, 6, 1))
         .fetched_symbol("LAAC")
         .insert(&pool)
         .await;
@@ -625,7 +626,7 @@ async fn api_list_filters_by_status() {
         price: &str,
         errored: bool,
     ) {
-        let row = crate::test_support::closing_price(listing_id.0, date).price(price);
+        let row = test_support::closing_price(listing_id.0, date).price(price);
         if errored {
             row.errored("no candle for the day").insert(pool).await;
         } else {

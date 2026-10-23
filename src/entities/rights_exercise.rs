@@ -32,13 +32,23 @@
 //! originals and non-renounceable-offer retail premiums (an unfranked
 //! dividend — entered as income, see `docs/ato/retail-premiums.md`).
 
+use crate::domain::cost_base;
+use crate::domain::cost_base::Term;
+use crate::domain::cost_base::UnrepresentableCost;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action::{
     self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
 };
 use crate::entities::trade::{self, Trade, TradeType};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
+use crate::infra::fx::FxOverride;
+use crate::infra::fx::FxRates;
+use crate::infra::fx::RateMonth;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -122,7 +132,7 @@ pub enum ExerciseError {
     /// are `domain::cost_base`'s, shared with `trade::check_amounts` — which
     /// this path does not go through, since the Buy is written directly.
     #[error("the exercised parcel's cost base is not representable: {0}")]
-    UnrepresentableCostBase(#[source] crate::domain::cost_base::UnrepresentableCost),
+    UnrepresentableCostBase(#[source] UnrepresentableCost),
     /// The exercise date precedes the issue's record date.
     #[error("the exercise date is before the issue's record date")]
     BeforeRecordDate,
@@ -138,7 +148,7 @@ pub enum ExerciseError {
     /// `trade::UpsertError::BackDatedOverWholeHolding`; wording and recovery in
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The exercised quantity is one the listing's recorded splits and bonus
     /// issues re-base past what a `Decimal` can hold. The rights side of
     /// `trade::UpsertError::UnrepresentableRebasedQuantity`, and not the same
@@ -148,7 +158,7 @@ pub enum ExerciseError {
     /// wording (`corporate_action::rebased_quantity_beyond_range`). Mapped to
     /// 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
     /// A non-AUD exercise whose month has no imported ATO rate and whose body
     /// states no `fx_rate`: the parcel's cost base has no rate to convert at,
     /// and binding a placeholder 1 would silently cost it at parity via
@@ -156,8 +166,8 @@ pub enum ExerciseError {
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the request states none")]
     MissingFxRate {
-        currency: crate::infra::currency::CurrencyCode,
-        month: crate::infra::fx::RateMonth,
+        currency: CurrencyCode,
+        month: RateMonth,
     },
 }
 
@@ -279,7 +289,7 @@ pub(crate) fn entitled_units(
     rights_held_units: Decimal,
 ) -> Option<Decimal> {
     Some(
-        crate::domain::cost_base::checked_rebased_quantity(
+        cost_base::checked_rebased_quantity(
             ("units held", held.max(Decimal::ZERO)),
             ("rights_units", rights_units),
             ("rights_held_units", rights_held_units),
@@ -404,13 +414,8 @@ async fn execute(
     // an exercise Buy dated on or before it would stay open forever
     // (SCENARIOS V-d). Compared on the Buy's own date, the exercise date
     // (`domain::whole_holding`).
-    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
-        &mut tx,
-        action.listing_id,
-        body.date,
-        None,
-    )
-    .await?
+    if let Some(back_dated) =
+        whole_holding::db_back_dated_parcel(&mut tx, action.listing_id, body.date, None).await?
     {
         return Err(ExerciseError::BackDatedOverWholeHolding(back_dated));
     }
@@ -438,12 +443,12 @@ async fn execute(
     // one is stored happily and every report that costs the parcel answers a
     // logged `500` (SCENARIOS W-e). Same bound as `trade::check_amounts`,
     // which this path does not go through.
-    crate::domain::cost_base::checked_cost_base(&[
+    cost_base::checked_cost_base(&[
         crate::domain::cost_base::Term::Product {
             price: ("exercise_price", exercise_price),
             units: ("units", body.units),
         },
-        crate::domain::cost_base::Term::Amount("rights_cost", rights_cost),
+        Term::Amount("rights_cost", rights_cost),
     ])
     .map_err(ExerciseError::UnrepresentableCostBase)?;
 
@@ -461,8 +466,8 @@ async fn execute(
     let fx_rate = match body.fx_rate {
         Some(rate) => rate,
         None => {
-            let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
-            match fx.resolve_rate(&currency, body.date, crate::infra::fx::FxOverride::None) {
+            let fx = FxRates::load(&mut *tx).await?;
+            match fx.resolve_rate(&currency, body.date, FxOverride::None) {
                 Ok(rate) => rate,
                 Err(_) if exercise_price * body.units + rights_cost == Decimal::ZERO => {
                     Decimal::ONE
@@ -470,7 +475,7 @@ async fn execute(
                 Err(_) => {
                     return Err(ExerciseError::MissingFxRate {
                         currency: currency.clone(),
-                        month: crate::infra::fx::RateMonth::of(body.date),
+                        month: RateMonth::of(body.date),
                     });
                 }
             }
@@ -497,8 +502,7 @@ async fn execute(
     // behind, like every other parcel-creating path
     // (`corporate_action::rebased_quantity_beyond_range`).
     if let Some(beyond) =
-        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, action.listing_id)
-            .await?
+        corporate_action::rebased_quantity_beyond_range(&mut tx, action.listing_id).await?
     {
         return Err(ExerciseError::UnrepresentableRebasedQuantity(beyond));
     }
@@ -531,7 +535,11 @@ async fn exercise(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities;
+    use crate::entities::rba_fx_rate;
     use crate::entities::{corporate_action::CorporateAction, listing, sell};
+    use crate::reports::open_parcels;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
@@ -677,9 +685,7 @@ mod tests {
         assert_eq!(trade.rights_action_id, Some(10));
 
         // The parcel's cost base is exactly the amount paid to exercise.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         assert_eq!(parcel.acquisition_date, d(2024, 8, 1));
         assert_eq!(parcel.original_cost_base, Decimal::from(450)); // 250 × 1.80
@@ -705,9 +711,7 @@ mod tests {
         let trade = db_exercise(&pool, 10, &exercise).await.unwrap();
         assert_eq!(trade.brokerage, "50.05".parse::<Decimal>().unwrap());
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         // 250 × 1.80 + 50.05
         assert_eq!(
@@ -769,9 +773,7 @@ mod tests {
         assert_eq!(trade.brokerage, Decimal::ZERO);
 
         // The parcels cost the exercise payment alone.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         assert_eq!(parcel.acquisition_date, d(2024, 8, 2));
         assert_eq!(parcel.original_cost_base, Decimal::from(180)); // 100 × 1.80
@@ -1091,9 +1093,7 @@ mod tests {
         // original buy that earned the rights).
         insert_sell(&pool, 50, d(2025, 1, 10), "250", parcel.id).await;
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         let sale = gains
             .iter()
             .find(|g| g.disposal == DisposalId::Sell(TradeId(50)))
@@ -1226,9 +1226,7 @@ mod tests {
         let trade: Trade = resp.json();
         assert_eq!(trade.brokerage, "50.05".parse::<Decimal>().unwrap());
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let parcel = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         // 250 × 1.80 + 50.05
         assert_eq!(
@@ -1282,7 +1280,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let app = ApiClient::over(crate::entities::router().with_state(pool.clone()));
+        let app = ApiClient::over(entities::router().with_state(pool.clone()));
         let resp = app
             .put(
                 format!("/trades/{trade_id}"),
@@ -1752,7 +1750,7 @@ mod tests {
                 id,
                 listing_id: ListingId(1),
                 date,
-                kind: crate::entities::corporate_action::ActionKind::RightsIssue {
+                kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::from(4),
                     exercise_price: price.parse().unwrap(),
@@ -1805,7 +1803,7 @@ mod tests {
         insert_usd_listing(&pool, 1).await;
         insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_usd_rights_issue(&pool, 10, d(2024, 7, 1), "1.80").await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-08", dec("0.5"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-08", dec("0.5"))
             .await
             .unwrap();
 
@@ -1814,9 +1812,7 @@ mod tests {
             .unwrap();
         assert_eq!(trade.fx_rate, dec("0.5"));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let exercised = parcels.iter().find(|p| p.trade_id == trade.id).unwrap();
         // 250 × US$1.80 = US$450 → A$900 at 0.5 USD per AUD.
         assert_eq!(exercised.remaining_cost_base, dec("900"));

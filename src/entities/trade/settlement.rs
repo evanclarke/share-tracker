@@ -8,6 +8,9 @@
 //! were computed against is completed (SCENARIOS S-04).
 
 use super::model::SettlementDateSource;
+use crate::entities::exchange_holiday;
+#[cfg(test)]
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
@@ -244,7 +247,7 @@ pub(crate) async fn auto_settlement_date(
     listing_id: ListingId,
     date: NaiveDate,
 ) -> Result<NaiveDate, SettlementError> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let settles = auto_settlement_date_on(&mut tx, Some(trade_id), listing_id, date).await?;
     tx.commit().await?;
     Ok(settles)
@@ -264,9 +267,7 @@ pub(crate) async fn auto_settlement_date_on(
     let Some(days) = settlement_days_for_listing(&mut *conn, listing_id).await? else {
         return Ok(date);
     };
-    let holidays =
-        crate::entities::exchange_holiday::exchange_holidays_for_listing(&mut *conn, listing_id)
-            .await?;
+    let holidays = exchange_holiday::exchange_holidays_for_listing(&mut *conn, listing_id).await?;
     let settlement = add_business_days(date, days, &holidays)?;
     warn_if_outside_holiday_coverage(trade_id, date, settlement, &holidays);
     Ok(settlement)

@@ -4,6 +4,9 @@
 use super::*;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use crate::reports::portfolio;
+use crate::reports::snapshot;
+use crate::test_support;
 
 #[tokio::test]
 async fn db_held_listings_excludes_fully_sold() {
@@ -40,7 +43,7 @@ async fn db_held_listings_excludes_fully_sold() {
 async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    crate::test_support::buy(1, 1)
+    test_support::buy(1, 1)
         .date(ymd(2024, 1, 16))
         .qty(Decimal::from(100))
         .price(Decimal::from(10))
@@ -83,7 +86,7 @@ async fn collection_covers_a_listing_sold_inside_the_lookback_window() {
 fn collection_window_covers_the_snapshot_catchup_window() {
     // Read through a runtime binding so this stays a real assertion if the
     // two constants are ever decoupled again.
-    let catchup: i64 = crate::reports::snapshot::CATCHUP_LOOKBACK_DAYS;
+    let catchup: i64 = snapshot::CATCHUP_LOOKBACK_DAYS;
     let collection: i64 = COLLECTION_LOOKBACK_DAYS;
     assert!(
         catchup <= collection,
@@ -101,7 +104,7 @@ fn collection_window_covers_the_snapshot_catchup_window() {
 async fn held_sets_agree(pool: &SqlitePool, as_of: NaiveDate) {
     let ids = db_held_listing_ids(pool, Some(as_of)).await.unwrap();
     let mut conn = pool.acquire().await.unwrap();
-    let holdings = crate::reports::portfolio::db_holdings_on(&mut conn, Some(as_of))
+    let holdings = portfolio::db_holdings_on(&mut conn, Some(as_of))
         .await
         .unwrap();
     let mut from_report: Vec<i64> = holdings.iter().map(|h| h.listing_id.0).collect();
@@ -115,20 +118,20 @@ async fn db_held_listings_match_the_holdings_report_across_a_split() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     // Buy 100, 2:1 split to 200 units, sell 150 of them.
-    crate::test_support::buy(1, 1)
+    test_support::buy(1, 1)
         .date(ymd(2024, 1, 16))
         .qty(Decimal::from(100))
         .price(Decimal::from(10))
         .insert(&pool)
         .await;
     insert_share_split(&pool, ListingId(1), ymd(2024, 3, 1), "2", "1").await;
-    crate::test_support::sell(2, 1)
+    test_support::sell(2, 1)
         .date(ymd(2024, 6, 3))
         .qty(Decimal::from(150))
         .price(Decimal::from(8))
         .insert(&pool)
         .await;
-    crate::test_support::allocate(&pool, 2, 2, 1, Decimal::from(150)).await;
+    test_support::allocate(&pool, 2, 2, 1, Decimal::from(150)).await;
 
     // 50 of the 200 post-split units remain, so the listing is still held
     // — the raw subtraction (100 − 150) used to make it look fully sold.
@@ -146,20 +149,20 @@ async fn db_held_listings_match_the_holdings_report_across_a_consolidation() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     // Buy 1000, 1:10 consolidation to 100 units, sell all 100.
-    crate::test_support::buy(1, 1)
+    test_support::buy(1, 1)
         .date(ymd(2024, 1, 16))
         .qty(Decimal::from(1000))
         .price(Decimal::from(1))
         .insert(&pool)
         .await;
     insert_share_split(&pool, ListingId(1), ymd(2024, 3, 1), "1", "10").await;
-    crate::test_support::sell(2, 1)
+    test_support::sell(2, 1)
         .date(ymd(2024, 6, 3))
         .qty(Decimal::from(100))
         .price(Decimal::from(12))
         .insert(&pool)
         .await;
-    crate::test_support::allocate(&pool, 2, 2, 1, Decimal::from(100)).await;
+    test_support::allocate(&pool, 2, 2, 1, Decimal::from(100)).await;
 
     // Fully sold — the raw subtraction (1000 − 100) used to leave 900
     // phantom units, blocking every later snapshot on a missing price.

@@ -1,11 +1,12 @@
 //! The Yahoo symbol mapping.
 
 use super::*;
+use crate::test_support;
 
 #[test]
 fn yahoo_symbols_cover_asx_us_and_crypto() {
     let mk = |mic: Option<&str>, ticker: &str, ccy: &str| {
-        let b = crate::test_support::listing(1)
+        let b = test_support::listing(1)
             .ticker(ticker)
             .name(ticker)
             .currency(ccy);
@@ -38,7 +39,7 @@ fn yahoo_symbols_cover_asx_us_and_crypto() {
 #[test]
 fn yahoo_symbol_prefers_the_listings_stored_price_symbol_override() {
     let mut market = Market::unrenamed(
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .mic("XLON")
             .security_type(listing::SecurityType::Share)
             .ticker("BARC")
@@ -60,7 +61,7 @@ fn yahoo_symbol_prefers_the_listings_stored_price_symbol_override() {
 #[test]
 fn yahoo_symbol_override_wins_over_the_stored_price_symbol() {
     let mut market = Market::unrenamed(
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .mic("XNYS")
             .security_type(listing::SecurityType::Share)
             .ticker("LAR")

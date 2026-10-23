@@ -41,6 +41,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::future::Future;
+use std::pin::Pin;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
@@ -368,8 +370,7 @@ impl Placement<'_> {
         &'c mut self,
         conn: &'c mut sqlx::SqliteConnection,
         holding: Holding,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), GenerateError>> + Send + 'c>>
-    {
+    ) -> Pin<Box<dyn Future<Output = Result<(), GenerateError>> + Send + 'c>> {
         Box::pin(async move {
             let year_end = self.year_end;
             let moves = db_rollovers_of(&mut *conn, holding.id).await?;
@@ -610,7 +611,13 @@ impl From<GenerateError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain;
+    use crate::domain::cost_base;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::scrip_exchange;
+    use crate::infra::http;
+    use crate::reports;
+    use crate::reports::amit_adjustment_cross_check;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -712,7 +719,7 @@ mod tests {
 
         // And the cross-check now reconciles both statements.
         assert!(
-            crate::reports::amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
+            amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
                 .await
                 .unwrap()
                 .is_empty()
@@ -773,7 +780,7 @@ mod tests {
         let freed: Vec<i64> = fy24.created.iter().map(|a| a.adjustment.id).collect();
         assert_eq!(freed.len(), 2);
         for id in &freed {
-            crate::infra::http::crud_delete::<AmitAdjustment>(&pool, *id)
+            http::crud_delete::<AmitAdjustment>(&pool, *id)
                 .await
                 .unwrap();
         }
@@ -814,7 +821,7 @@ mod tests {
         assert_eq!(result.difference, dec("11"));
         // The rows were still written, and the cross-check keeps it flagged.
         assert_eq!(result.created.len(), 2);
-        let alerts = crate::reports::amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
+        let alerts = amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
             .await
             .unwrap();
         assert_eq!(alerts.len(), 1);
@@ -1091,7 +1098,7 @@ mod tests {
 
         // 100 units × 50c — the post-split 200 units never enter it.
         let mut conn = pool.acquire().await.unwrap();
-        let events = crate::domain::cost_base::db_cost_base_reduction_events(&mut conn, None)
+        let events = cost_base::db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
         let stated: Decimal = events[&TradeId(1)].iter().map(|e| e.amount()).sum();
@@ -1192,7 +1199,7 @@ mod tests {
         // units are 200 units at the year end, so $100 — not the $50 a naive
         // quantity × per-unit multiplication gives.
         let mut conn = pool.acquire().await.unwrap();
-        let events = crate::domain::cost_base::db_cost_base_reduction_events(&mut conn, None)
+        let events = cost_base::db_cost_base_reduction_events(&mut conn, None)
             .await
             .unwrap();
         let stated =
@@ -1410,7 +1417,7 @@ mod tests {
         // 100 units, so the replacement parcel's cost base is $1,000 plus
         // $202.5729007600 — the reduction applies to the parcel the units are in
         // now, which is the whole point.
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         let moved = parcels
@@ -1468,7 +1475,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let replacement = crate::entities::scrip_exchange::db_exchange(&pool, 10)
+        let replacement = scrip_exchange::db_exchange(&pool, 10)
             .await
             .unwrap()
             .replacements[0]
@@ -1506,7 +1513,7 @@ mod tests {
             }),
         )
         .await;
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         let moved = parcels
@@ -1591,7 +1598,7 @@ mod tests {
         assert_eq!(result.units_adjusted, dec("1200"));
         assert_eq!(result.difference, Decimal::ZERO);
         assert!(
-            crate::reports::amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
+            amit_adjustment_cross_check::db_amit_adjustment_alerts(&pool)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1672,7 +1679,7 @@ mod tests {
         assert_eq!(result.difference, Decimal::ZERO);
         // …and the reduction lands on the replacement parcel: 100 × 50c off
         // the cost base it carried over.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1915,7 +1922,7 @@ mod tests {
 
     /// Each open parcel's AMIT reduction, by parcel id.
     async fn reductions(pool: &SqlitePool) -> Vec<(TradeId, Decimal)> {
-        crate::reports::open_parcels::db_open_parcels(pool, None)
+        reports::open_parcels::db_open_parcels(pool, None)
             .await
             .unwrap()
             .iter()

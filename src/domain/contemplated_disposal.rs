@@ -41,6 +41,7 @@
 //! allocation is costed at its own unit count here, which is also what the
 //! recorded Sell does.
 
+use crate::domain::tax_year;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use std::collections::HashMap;
@@ -74,7 +75,7 @@ pub struct Costing {
 impl Costing {
     pub async fn load(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
         Ok(Costing {
-            amit: crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?,
+            amit: cost_base::db_cost_base_reduction_events(&mut *conn, None).await?,
             roc: adjustments::db_return_of_capital_events(&mut *conn).await?,
             splits: adjustments::db_share_split_events(&mut *conn).await?,
             fx: FxRates::load(&mut *conn).await?,
@@ -139,7 +140,7 @@ fn events_with_disposal(
             if sale_date <= e.tax_year_end_date {
                 e.disposed_by_year_end += units_acquired;
             }
-            if sale_date < crate::domain::tax_year::fy_start(e.tax_year_end_date) {
+            if sale_date < tax_year::fy_start(e.tax_year_end_date) {
                 e.disposed_before_year_start += units_acquired;
             }
             e

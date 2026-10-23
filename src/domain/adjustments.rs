@@ -26,13 +26,23 @@
 //! type, its own ratio walk ([`price_basis_ratio`]) and its own loader
 //! (`entities::closing_price::db_price_basis_events`).
 
+use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::decimal::Money;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::Row;
+use sqlx::sqlite::SqliteRow;
+use std::cmp;
 use std::collections::HashMap;
+use std::iter::Sum;
+use std::ops::Add;
+use std::ops::AddAssign;
+use std::ops::Sub;
+use std::ops::SubAssign;
 
 /// A return-of-capital payment, as consumed by the cost-base reports.
 #[derive(Debug, Clone)]
@@ -404,7 +414,7 @@ impl SplitEvent {
     }
 }
 
-fn split_event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SplitEvent, sqlx::Error> {
+fn split_event_from_row(row: &SqliteRow) -> Result<SplitEvent, sqlx::Error> {
     let date = row.try_get("date")?;
     match row.try_get::<String, _>("action_type")?.as_str() {
         "BonusIssue" => Ok(SplitEvent::bonus_issue(
@@ -657,20 +667,20 @@ impl Default for AcquiredUnits {
 
 impl PartialEq for AcquiredUnits {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
+        self.cmp(other) == cmp::Ordering::Equal
     }
 }
 
 impl Eq for AcquiredUnits {}
 
 impl PartialOrd for AcquiredUnits {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for AcquiredUnits {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         match self.over_common_denominator(*other) {
             Some((a, b, _)) => a.cmp(&b),
             None => self.get().cmp(&other.get()),
@@ -678,39 +688,39 @@ impl Ord for AcquiredUnits {
     }
 }
 
-impl From<crate::infra::decimal::Money> for AcquiredUnits {
-    fn from(m: crate::infra::decimal::Money) -> Self {
+impl From<Money> for AcquiredUnits {
+    fn from(m: Money) -> Self {
         Self::new(m.0)
     }
 }
 
-impl std::ops::Add for AcquiredUnits {
+impl Add for AcquiredUnits {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
         self.combine(rhs, Decimal::checked_add)
     }
 }
 
-impl std::ops::Sub for AcquiredUnits {
+impl Sub for AcquiredUnits {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
         self.combine(rhs, Decimal::checked_sub)
     }
 }
 
-impl std::ops::AddAssign for AcquiredUnits {
+impl AddAssign for AcquiredUnits {
     fn add_assign(&mut self, rhs: Self) {
         *self = *self + rhs;
     }
 }
 
-impl std::ops::SubAssign for AcquiredUnits {
+impl SubAssign for AcquiredUnits {
     fn sub_assign(&mut self, rhs: Self) {
         *self = *self - rhs;
     }
 }
 
-impl std::iter::Sum for AcquiredUnits {
+impl Sum for AcquiredUnits {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         iter.fold(Self::ZERO, |acc, u| acc + u)
     }
@@ -873,12 +883,12 @@ pub fn checked_as_acquired_quantity(
     qty: (&str, UnitsAt),
     splits: &[SplitEvent],
     acquired: NaiveDate,
-) -> Result<AcquiredUnits, crate::domain::cost_base::UnrepresentableQuantity> {
+) -> Result<AcquiredUnits, UnrepresentableQuantity> {
     let SplitRatio { new, old } = split_ratio(splits, acquired, qty.1.basis);
     if new == old {
         return Ok(AcquiredUnits::new(qty.1.quantity));
     }
-    crate::domain::cost_base::checked_rebased_quantity(
+    cost_base::checked_rebased_quantity(
         (qty.0, qty.1.quantity),
         ("old units", old),
         ("new units", new),

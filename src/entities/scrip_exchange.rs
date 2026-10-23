@@ -51,7 +51,11 @@
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
 use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::holding_account;
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
@@ -59,6 +63,9 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::apportion;
 use crate::infra::extract::Query;
+use crate::infra::fx::FxOverride;
+use crate::infra::fx::FxRates;
+use crate::infra::fx::RateMonth;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -114,7 +121,7 @@ pub enum ExchangeError {
     /// operation's closing Sell included. Wording and recovery in
     /// `domain::whole_holding`. Mapped to 422.
     #[error("the replacement parcels are dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The ratio applied to the holding produces a replacement quantity past
     /// `Decimal`'s range — a 1000-for-1 exchange of 1e27 units asks for 1e30
     /// replacement units. There is no lesser number of units to write, and
@@ -123,7 +130,7 @@ pub enum ExchangeError {
     /// arithmetic used to panic, which the panic layer answered as a logged
     /// `500` with an empty body). Mapped to 422.
     #[error("the replacement quantity is beyond the representable range: {0}")]
-    UnrepresentableReplacementQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableReplacementQuantity(#[source] UnrepresentableQuantity),
     /// The **replacement listing's** own recorded splits and bonus issues
     /// re-base a replacement parcel past what a `Decimal` can hold — and the
     /// exchange ratio can be entirely ordinary while they do. A 1-for-1
@@ -137,7 +144,7 @@ pub enum ExchangeError {
     /// the operation is about (SCENARIOS V-d's lesson, a second time). Mapped
     /// to 422.
     #[error("the replacement listing re-bases a quantity beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
     /// A cash component in a non-AUD currency whose exchange month has no
     /// imported ATO rate: the endpoint takes no body, so there is no
     /// stated-rate channel, and binding a placeholder 1 would price the cash
@@ -146,8 +153,8 @@ pub enum ExchangeError {
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} for the cash component")]
     MissingFxRate {
-        currency: crate::infra::currency::CurrencyCode,
-        month: crate::infra::fx::RateMonth,
+        currency: CurrencyCode,
+        month: RateMonth,
     },
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the exchange constructs to satisfy them; the reachable case is an
@@ -207,13 +214,9 @@ async fn execute(
     // behind an operation that consumed the whole holding and could never be
     // consumed by it (SCENARIOS V-d). Checked before anything is written, so
     // the exchange's own rows cannot be mistaken for the offender.
-    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
-        &mut tx,
-        terms.scrip_listing_id,
-        action.date,
-        None,
-    )
-    .await?
+    if let Some(back_dated) =
+        whole_holding::db_back_dated_parcel(&mut tx, terms.scrip_listing_id, action.date, None)
+            .await?
     {
         return Err(ExchangeError::BackDatedOverWholeHolding(back_dated));
     }
@@ -258,25 +261,21 @@ async fn execute(
     // until the month's rates are imported. An all-scrip exchange (and a nil
     // cash amount) converts nothing — zero proceeds, rollover disregarded —
     // so a missing month does not block it and parity is bound harmlessly.
-    let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
-    let sell_fx_rate = match fx.resolve_rate(
-        &sell_currency,
-        action.date,
-        crate::infra::fx::FxOverride::None,
-    ) {
+    let fx = FxRates::load(&mut *tx).await?;
+    let sell_fx_rate = match fx.resolve_rate(&sell_currency, action.date, FxOverride::None) {
         Ok(rate) => rate,
         Err(_) if sell_price == Decimal::ZERO => Decimal::ONE,
         Err(_) => {
             return Err(ExchangeError::MissingFxRate {
                 currency: sell_currency.clone(),
-                month: crate::infra::fx::RateMonth::of(action.date),
+                month: RateMonth::of(action.date),
             });
         }
     };
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
-        crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
+        holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
         sell_price,
         sell_currency,
         sell_fx_rate,
@@ -576,9 +575,12 @@ impl From<ExchangeError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::rba_fx_rate;
     use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
+    use crate::reports::open_parcels;
+    use crate::reports::realised_gains;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -806,9 +808,7 @@ mod tests {
         insert_scrip(&pool, 10, d(2024, 7, 1)).await;
         db_exchange(&pool, 10).await.unwrap();
 
-        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let open = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].listing_id, 2);
         assert_eq!(open[0].return_of_capital_reduction, Decimal::ZERO);
@@ -936,6 +936,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use proptest::option;
         use proptest::prelude::*;
         use std::collections::BTreeMap;
 
@@ -955,7 +956,7 @@ mod tests {
             #[test]
             fn the_carried_and_realised_shares_sum_to_the_whole_cost_base(
                 parcels in test_support::parcel_costs(),
-                sold_first in proptest::option::of(1i64..10_000),
+                sold_first in option::of(1i64..10_000),
                 new in 1i64..=10,
                 old in 1i64..=10,
                 cash in 1i64..=5_000,
@@ -1141,9 +1142,7 @@ mod tests {
         );
         assert_eq!(ex.replacements[0].brokerage, dec("1010"));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(
             parcels[0].remaining_quantity,
@@ -1990,7 +1989,7 @@ mod tests {
         insert_listing_in(&pool, 2, "NEW", "USD").await;
         insert_usd_buy(&pool, 1, d(2020, 10, 1), "100", "9").await;
         insert_usd_scrip_cash_terms(&pool, 10, d(2024, 7, 1), ("10", "20")).await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-07", dec("0.5"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-07", dec("0.5"))
             .await
             .unwrap();
 
@@ -1999,9 +1998,7 @@ mod tests {
         assert_eq!(ex.sell.fx_rate, dec("0.5"));
 
         // US$1,000 of cash at 0.5 USD per AUD = A$2,000 of proceeds.
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         assert_eq!(realised[0].proceeds, dec("2000"));
     }

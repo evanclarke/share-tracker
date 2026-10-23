@@ -31,10 +31,17 @@
 //! transaction — **refused** (422) while that Buy is drawn on by a Sell
 //! allocation or AMIT adjustment.
 
+use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableCost;
+use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -234,8 +241,8 @@ pub struct EssStatementListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for EssStatementListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for EssStatementListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("taxing_point_date", self.from, self.to);
@@ -389,7 +396,7 @@ pub enum UpsertError {
     /// a bare `500` with an empty body (SCENARIOS W-e). Wording and limit in
     /// `domain::cost_base`. Mapped to 422.
     #[error("the vesting market value is not representable: {0}")]
-    UnrepresentableMarketValue(#[source] crate::domain::cost_base::UnrepresentableCost),
+    UnrepresentableMarketValue(#[source] UnrepresentableCost),
     #[error("the discount labels total {discount}, above the {market_value} that vests")]
     DiscountExceedsMarketValue {
         discount: Decimal,
@@ -484,14 +491,14 @@ fn validate(s: &EssStatement) -> Result<(), UpsertError> {
     // The vest Buy is dated the taxing point, and `trade::db_upsert` refuses a
     // pre-CGT trade — the vest writes its Buy directly, so without this the
     // statement is the one door a parcel can enter below the CGT floor by.
-    if s.taxing_point_date < crate::entities::trade::CGT_START {
+    if s.taxing_point_date < trade::CGT_START {
         return Err(UpsertError::PreCgtTaxingPoint);
     }
 
     // And bounded above the same way, for the same reason: the vest Buy is
     // dated the taxing point and `trade::check_amounts` refuses a trade dated
     // after today (SCENARIOS S-10).
-    if s.taxing_point_date > crate::infra::date::today() {
+    if s.taxing_point_date > date::today() {
         return Err(UpsertError::FutureTaxingPoint);
     }
 
@@ -534,13 +541,12 @@ fn validate(s: &EssStatement) -> Result<(), UpsertError> {
         // statement is what makes the vest unreachable: a vestable statement
         // is exactly one with both figures positive, so this multiply always
         // runs before any vest can.
-        let market_value = crate::domain::cost_base::checked_cost_base(&[
-            crate::domain::cost_base::Term::Product {
+        let market_value =
+            cost_base::checked_cost_base(&[crate::domain::cost_base::Term::Product {
                 price: ("market_value_per_share", s.market_value_per_share),
                 units: ("quantity", s.quantity),
-            },
-        ])
-        .map_err(UpsertError::UnrepresentableMarketValue)?;
+            }])
+            .map_err(UpsertError::UnrepresentableMarketValue)?;
         if to_cents(discounts) > to_cents(market_value) {
             return Err(UpsertError::DiscountExceedsMarketValue {
                 discount: discounts,
@@ -657,7 +663,7 @@ async fn write(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO ess_statements \
          (id, listing_id, holding_account_id, taxing_point_date, quantity, \
           market_value_per_share, taxed_upfront_eligible, taxed_upfront_not_eligible, \
@@ -955,7 +961,11 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::ess_vest;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::entities::listing;
+    use crate::infra::date;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -1056,7 +1066,7 @@ mod tests {
         db_upsert(&pool, &sample(1)).await.unwrap();
         assert_eq!(db_get(&pool, 1).await.unwrap().unwrap().vest_trade_id, None);
 
-        let vest = crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+        let vest = ess_vest::db_vest(&pool, 1).await.unwrap();
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().vest_trade_id,
             Some(vest.id)
@@ -1164,7 +1174,7 @@ mod tests {
         s.currency = "USD".into();
         s.fx_rate = Some("0.65".parse().unwrap());
         db_upsert(&pool, &s).await.unwrap();
-        crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+        ess_vest::db_vest(&pool, 1).await.unwrap();
 
         s.fx_rate = Some("0.70".parse().unwrap());
         assert!(matches!(
@@ -1324,7 +1334,7 @@ mod tests {
     async fn db_a_future_taxing_point_is_refused_and_today_accepted() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        let today = crate::infra::date::today();
+        let today = date::today();
 
         let mut s = sample(1);
         s.taxing_point_date = today + chrono::Days::new(1);
@@ -1349,7 +1359,7 @@ mod tests {
         insert_listing(&pool, 1).await;
         let body = serde_json::json!({
             "listing_id": 1,
-            "taxing_point_date": (crate::infra::date::today() + chrono::Days::new(1)).to_string(),
+            "taxing_point_date": (date::today() + chrono::Days::new(1)).to_string(),
             "quantity": "100",
             "market_value_per_share": "10",
             "deferral_discount": "1000",
@@ -1645,9 +1655,7 @@ mod tests {
         let stored = db_get(&pool, created.id).await.unwrap().unwrap();
         assert_eq!(stored.id, created.id);
         assert_eq!(stored.deferral_discount, Decimal::from(600));
-        crate::entities::ess_vest::db_vest(&pool, created.id)
-            .await
-            .unwrap();
+        ess_vest::db_vest(&pool, created.id).await.unwrap();
     }
 
     /// The bug this endpoint exists to kill: with an id-less create there is no
@@ -1781,9 +1789,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

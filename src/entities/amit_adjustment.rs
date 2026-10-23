@@ -1,9 +1,12 @@
 use crate::domain::rollover;
 use crate::domain::tax_year::fy_start;
 use crate::entities::corporate_action;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
@@ -65,8 +68,8 @@ pub struct AmitAdjustmentListQuery {
     pub trade_id: Option<TradeId>,
 }
 
-impl crate::infra::http::CrudListFilter for AmitAdjustmentListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for AmitAdjustmentListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("amma_statement_id", self.amma_statement_id);
         clauses.eq("trade_id", self.trade_id);
     }
@@ -528,7 +531,7 @@ async fn db_write_on(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO amit_adjustments (id, amma_statement_id, trade_id, quantity) \
          VALUES (?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
@@ -673,10 +676,15 @@ impl From<UpsertError> for ApiError {
 mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
+    use crate::domain::cost_base::Whereabouts;
     use crate::domain::cost_base::{AmitReductionEvent, db_cost_base_reduction_events};
+    use crate::domain::open_parcels;
+    use crate::entities::demerger;
     use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::scrip_exchange;
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
+    use crate::reports;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
     use std::collections::HashMap;
@@ -838,7 +846,7 @@ mod tests {
             .unwrap();
         let e = events[&TradeId(1)][0];
         assert_eq!(e.disposed_before_year_start, dec("60"));
-        let sold = crate::domain::cost_base::Whereabouts::DisposedOn(ymd(2022, 3, 3));
+        let sold = Whereabouts::DisposedOn(ymd(2022, 3, 3));
         assert_eq!(
             e.reduction_for_units(
                 AcquiredUnits::new(dec("100")),
@@ -848,7 +856,7 @@ mod tests {
             Decimal::ZERO
         );
         // …and the 40 held in the year carry the whole \$40.
-        let held = crate::domain::cost_base::Whereabouts::InParcel;
+        let held = Whereabouts::InParcel;
         assert_eq!(
             e.reduction_for_units(
                 AcquiredUnits::new(dec("100")),
@@ -911,15 +919,13 @@ mod tests {
         .unwrap();
 
         let mut conn = pool.acquire().await.unwrap();
-        let before = crate::domain::open_parcels::load(&mut conn, Some(ymd(2024, 8, 14)))
+        let before = open_parcels::load(&mut conn, Some(ymd(2024, 8, 14)))
             .await
             .unwrap();
         let original = before.iter().find(|p| p.parcel.id == 1).unwrap();
         assert_eq!(original.cost_base.amit_reduction, dec("100"));
         // And the replacement carried that reduced cost base forward.
-        let after = crate::domain::open_parcels::load(&mut conn, None)
-            .await
-            .unwrap();
+        let after = open_parcels::load(&mut conn, None).await.unwrap();
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].cost_base.adjusted, dec("900"));
     }
@@ -1698,7 +1704,7 @@ mod tests {
         let replacement = transfer_out(&pool, TradeId(1), Decimal::from(100)).await;
 
         // 100 × $100 + 9.95 + 0.995 = 10,010.945, less 100 × 5c.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1718,7 +1724,7 @@ mod tests {
         insert_test_listing(&pool, 1, "XASX", "VDHG").await;
         insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         insert_sell_trade(&pool, 2, ListingId(1), Decimal::from(100)).await;
-        crate::test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
+        test_support::allocate(&pool, 1, 2, 1, Decimal::from(100)).await;
         insert_amma(&pool, 1, ListingId(1), "0.05".parse().unwrap()).await;
 
         db_upsert(
@@ -1763,7 +1769,7 @@ mod tests {
         .await
         .unwrap();
         // And it reaches the units: $10,010.945 initial cost less $0.05 × 100.
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         let moved = parcels
@@ -1822,16 +1828,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let exchange = crate::entities::scrip_exchange::db_exchange(pool, action_id)
-            .await
-            .unwrap();
+        let exchange = scrip_exchange::db_exchange(pool, action_id).await.unwrap();
         exchange.replacements[0].id.0
     }
 
     /// The AMIT cost-base reduction the shared pipeline reports against one
     /// open parcel — what the open-parcels and unrealised-gains screens show.
     async fn open_parcel_amit_reduction(pool: &SqlitePool, trade_id: TradeId) -> Decimal {
-        crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap()
             .iter()
@@ -1991,9 +1995,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
         let demerged: i64 = sqlx::query_scalar(
             "SELECT id FROM trades WHERE demerger_action_id = 10 AND trade_type = 'Buy' \
              AND listing_id = 2",

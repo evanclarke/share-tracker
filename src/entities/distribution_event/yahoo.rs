@@ -56,6 +56,7 @@ use crate::entities::closing_price::{self, Market};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use yfinance_rs::core::Action;
 
 /// The most re-reading a date in another timezone can move it: a UTC calendar
 /// date and the exchange-local date of the same instant differ by at most one
@@ -184,7 +185,7 @@ impl DistributionFetcher for YahooDistributionFetcher {
                 .collect();
 
             let dividends = response.actions.iter().filter_map(|action| match action {
-                yfinance_rs::core::Action::Dividend { date, amount } => Some((
+                Action::Dividend { date, amount } => Some((
                     *date,
                     // Yahoo serves figures as float32-precision binary floats,
                     // so a per-unit amount carries the same noise a price does.

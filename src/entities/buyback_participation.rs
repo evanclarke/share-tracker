@@ -29,6 +29,7 @@
 //! adjustments where the participating shareholder is itself a company, and
 //! shares held on revenue account.
 
+use crate::domain::franking_credit;
 use crate::entities::corporate_action::{self, ActionKind};
 use crate::entities::income::Income;
 use crate::entities::sell::{self, AllocationInput, SellBody};
@@ -240,9 +241,7 @@ async fn execute(
     // the row they'd produce must satisfy the same invariant `income` rows
     // entered by hand do (SCENARIOS G-25).
     let (franked, credits) = (dividend * body.units, credit * body.units);
-    if let Some(ceiling) =
-        crate::domain::franking_credit::credit_above_ceiling(franked, credits, body.date)
-    {
+    if let Some(ceiling) = franking_credit::credit_above_ceiling(franked, credits, body.date) {
         return Err(ParticipationError::FrankingCreditAboveMaximum {
             credits,
             franked,
@@ -362,9 +361,13 @@ async fn participate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, income, listing};
     use crate::infra::id::ListingId;
+    use crate::reports::open_parcels;
+    use crate::reports::portfolio;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
@@ -609,9 +612,7 @@ mod tests {
             .await
             .unwrap();
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         let sale = gains
             .iter()
             .find(|g| g.disposal == DisposalId::Sell(p.trade.id))
@@ -680,9 +681,7 @@ mod tests {
         assert_eq!(accepted.income.unwrap().franked_amount, dec("420.00"));
         // The 700 unaccepted units are still held, at their share of the cost
         // base — and only one income row exists for the buy-back.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].remaining_quantity, dec("700"));
         assert_eq!(parcels[0].remaining_cost_base, dec("3500"));
@@ -828,9 +827,7 @@ mod tests {
         // failed buy-back leaves no trace): the full 10,000 units at the
         // original cost base, and the parcel's capacity is freed so a fresh
         // participation for the same units succeeds.
-        let holdings = crate::reports::portfolio::db_holdings(&pool, None)
-            .await
-            .unwrap();
+        let holdings = portfolio::db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
         assert_eq!(holdings[0].quantity, dec("10000"));
         assert_eq!(holdings[0].total_cost_base, dec("60000.00"));
@@ -1064,7 +1061,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        let app = ApiClient::over(crate::entities::router().with_state(pool.clone()));
+        let app = ApiClient::over(entities::router().with_state(pool.clone()));
         let resp = app
             .put(
                 format!("/sells/{trade_id}"),

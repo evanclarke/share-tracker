@@ -92,7 +92,10 @@
 
 use crate::entities::closing_price::{self, FetchError, Market};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::decimal::Money;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -186,8 +189,8 @@ pub struct DistributionEventListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for DistributionEventListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for DistributionEventListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.date_range("ex_date", self.from, self.to);
     }
@@ -633,9 +636,7 @@ pub async fn run_refresh(
         // One transaction per listing: a provider that answers for six
         // listings and fails on the seventh still leaves those six refreshed,
         // and each listing's own set lands atomically.
-        let mut tx = crate::infra::db::write_tx(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut tx = db::write_tx(pool).await.map_err(|e| e.to_string())?;
         let mut failed = None;
         for (symbol, event) in &collected {
             if let Err(e) = db_store(

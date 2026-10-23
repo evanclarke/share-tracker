@@ -82,9 +82,18 @@
 //! A vest so dated is surfaced instead, non-blockingly, by
 //! `reports::health`'s `non_trading_day_trades`.
 
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
+use crate::entities::corporate_action;
 use crate::entities::trade::{self, Trade};
+use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
+use crate::infra::decimal;
 use crate::infra::extract::Query;
+use crate::infra::fx::FxOverride;
+use crate::infra::fx::FxRates;
+use crate::infra::fx::RateMonth;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -116,8 +125,8 @@ pub enum VestError {
     /// at parity. Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the ESS statement states none")]
     MissingFxRate {
-        currency: crate::infra::currency::CurrencyCode,
-        month: crate::infra::fx::RateMonth,
+        currency: CurrencyCode,
+        month: RateMonth,
     },
     /// The vest Buy is dated (the taxing point) on or before an executed
     /// whole-holding operation of its listing — a scrip-for-scrip exchange, a
@@ -127,7 +136,7 @@ pub enum VestError {
     /// `trade::UpsertError::BackDatedOverWholeHolding`; wording and recovery in
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The vested quantity is one the listing's recorded splits and bonus
     /// issues re-base past what a `Decimal` can hold. The ESS side of
     /// `trade::UpsertError::UnrepresentableRebasedQuantity`: the statement's
@@ -135,7 +144,7 @@ pub enum VestError {
     /// leaves the unit count itself unguarded. Same walk, same wording
     /// (`corporate_action::rebased_quantity_beyond_range`). Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
 }
 
 pub fn router() -> OpenApiRouter<SqlitePool> {
@@ -182,13 +191,13 @@ async fn execute(
     let listing_id: ListingId = row.try_get("listing_id")?;
     let holding_account_id: HoldingAccountId = row.try_get("holding_account_id")?;
     let taxing_point_date: chrono::NaiveDate = row.try_get("taxing_point_date")?;
-    let quantity = crate::infra::decimal::parse_dec("quantity", row.try_get("quantity")?)?;
-    let price = crate::infra::decimal::parse_dec(
+    let quantity = decimal::parse_dec("quantity", row.try_get("quantity")?)?;
+    let price = decimal::parse_dec(
         "market_value_per_share",
         row.try_get("market_value_per_share")?,
     )?;
-    let currency: crate::infra::currency::CurrencyCode = row.try_get("currency")?;
-    let stated_fx_rate = crate::infra::decimal::row_opt_dec(&row, "fx_rate")?;
+    let currency: CurrencyCode = row.try_get("currency")?;
+    let stated_fx_rate = decimal::row_opt_dec(&row, "fx_rate")?;
 
     if quantity <= Decimal::ZERO || price <= Decimal::ZERO {
         return Err(VestError::NothingToVest);
@@ -199,13 +208,8 @@ async fn execute(
     // a vest dated on or before it would stay open forever (SCENARIOS V-d).
     // The Buy is dated the taxing point, which is what is compared
     // (`domain::whole_holding`).
-    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
-        &mut tx,
-        listing_id,
-        taxing_point_date,
-        None,
-    )
-    .await?
+    if let Some(back_dated) =
+        whole_holding::db_back_dated_parcel(&mut tx, listing_id, taxing_point_date, None).await?
     {
         return Err(VestError::BackDatedOverWholeHolding(back_dated));
     }
@@ -218,18 +222,14 @@ async fn execute(
     // the taxpayer gave one; otherwise the taxing-point month's ATO rate is
     // resolved and bound (AUD resolves to 1), and a month with neither is
     // refused rather than invented.
-    let fx = crate::infra::fx::FxRates::load(&mut *tx).await?;
+    let fx = FxRates::load(&mut *tx).await?;
     let fx_rate = match stated_fx_rate {
         Some(rate) => rate,
         None => fx
-            .resolve_rate(
-                &currency,
-                taxing_point_date,
-                crate::infra::fx::FxOverride::None,
-            )
+            .resolve_rate(&currency, taxing_point_date, FxOverride::None)
             .map_err(|_| VestError::MissingFxRate {
                 currency: currency.clone(),
-                month: crate::infra::fx::RateMonth::of(taxing_point_date),
+                month: RateMonth::of(taxing_point_date),
             })?,
     };
 
@@ -256,8 +256,7 @@ async fn execute(
     // like every other parcel-creating path
     // (`corporate_action::rebased_quantity_beyond_range`).
     if let Some(beyond) =
-        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, listing_id)
-            .await?
+        corporate_action::rebased_quantity_beyond_range(&mut tx, listing_id).await?
     {
         return Err(VestError::UnrepresentableRebasedQuantity(beyond));
     }
@@ -314,8 +313,21 @@ impl From<VestError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::rba_fx_rate;
+    use crate::entities::sell;
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
+    use crate::entities::transfer;
+    use crate::entities::transfer::TransferBody;
     use crate::entities::{ess_statement, listing};
+    use crate::reports::portfolio;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
@@ -381,10 +393,10 @@ mod tests {
         assert_eq!(parcel.deemed_acquisition_date, None);
 
         // Sold 2025-03-01 — six months after the taxing point.
-        crate::entities::sell::db_upsert_sell(
+        sell::db_upsert_sell(
             &pool,
             TradeId(50),
-            &crate::entities::sell::SellBody {
+            &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: parcel.holding_account_id,
@@ -400,7 +412,7 @@ mod tests {
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: parcel.id,
                     quantity_allocated: Decimal::from(100),
                 }],
@@ -409,9 +421,7 @@ mod tests {
         .await
         .unwrap();
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
         // Proceeds $1,000 − the market-value cost base $600 = a $400 gain,
@@ -441,9 +451,7 @@ mod tests {
             sell_parcel(&pool, id, &parcel, date, Decimal::from(50)).await;
         }
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 2);
         // Each half: $500 proceeds − $300 cost base = a $200 gain.
         let short = realised
@@ -481,24 +489,24 @@ mod tests {
         insert_statement(&pool, 1, "100", "6", "AUD").await; // taxing point 2024-09-01
         let vest = db_vest(&pool, 1).await.unwrap();
 
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Broker".to_owned(),
             },
         )
         .await
         .unwrap();
-        let moved = crate::entities::transfer::db_transfer(
+        let moved = transfer::db_transfer(
             &pool,
             1,
-            &crate::entities::transfer::TransferBody {
+            &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2024, 10, 1),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: vest.id,
                     quantity_allocated: Decimal::from(100),
                 }],
@@ -534,9 +542,7 @@ mod tests {
             Decimal::from(100),
         )
         .await;
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
         assert_eq!(g.holding_account_id, 2);
@@ -559,10 +565,10 @@ mod tests {
         date: NaiveDate,
         qty: Decimal,
     ) {
-        crate::entities::sell::db_upsert_sell(
+        sell::db_upsert_sell(
             pool,
             TradeId(id),
-            &crate::entities::sell::SellBody {
+            &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: parcel.holding_account_id,
@@ -578,7 +584,7 @@ mod tests {
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: parcel.id,
                     quantity_allocated: qty,
                 }],
@@ -611,7 +617,7 @@ mod tests {
     }
 
     async fn import_usd_rate(pool: &SqlitePool, month: &str, rate: &str) {
-        crate::entities::rba_fx_rate::db_import_rate(pool, "USD", month, rate.parse().unwrap())
+        rba_fx_rate::db_import_rate(pool, "USD", month, rate.parse().unwrap())
             .await
             .unwrap();
     }
@@ -645,9 +651,7 @@ mod tests {
         import_usd_rate(&pool, "2024-09", "0.65").await;
         let trade = db_vest(&pool, 1).await.unwrap();
         assert_eq!(trade.fx_rate, "0.65".parse::<Decimal>().unwrap());
-        let holdings = crate::reports::portfolio::db_holdings(&pool, None)
-            .await
-            .unwrap();
+        let holdings = portfolio::db_holdings(&pool, None).await.unwrap();
         assert_eq!(
             holdings[0].total_cost_base,
             (Decimal::from(15000) / "0.65".parse::<Decimal>().unwrap())
@@ -673,9 +677,7 @@ mod tests {
 
         let trade = db_vest(&pool, 1).await.unwrap();
         assert_eq!(trade.fx_rate, "0.6".parse::<Decimal>().unwrap());
-        let holdings = crate::reports::portfolio::db_holdings(&pool, None)
-            .await
-            .unwrap();
+        let holdings = portfolio::db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings[0].total_cost_base, Decimal::from(25000)); // 15000 / 0.6
     }
 
@@ -928,13 +930,13 @@ mod tests {
     /// A `ShareSplit` on listing 1 dated after the taxing point, so the vest
     /// parcel is re-based at read time by 1000-for-1.
     async fn insert_thousand_for_one_split(pool: &SqlitePool) {
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 1),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },

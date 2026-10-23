@@ -34,13 +34,22 @@
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
 use crate::domain::cost_base::ParcelRow;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action::{UnitsAt, checked_as_acquired_quantity};
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
+use crate::infra::fx::FxOverride;
+use crate::infra::fx::FxRates;
+use crate::infra::fx::RateMonth;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -176,7 +185,7 @@ pub enum TransferError {
     /// the guard. Wording and recovery in `domain::whole_holding`. Mapped to
     /// 422.
     #[error("the transfer-in parcels are dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The requested units, re-based back into the parcel's as-acquired basis
     /// across a **consolidation** of the listing, are past `Decimal`'s range.
     ///
@@ -189,7 +198,7 @@ pub enum TransferError {
     /// allocation check could answer at all. Mapped to 422 naming the
     /// arithmetic, which is what says the quantity asked for is impossible.
     #[error("the moved quantity is beyond the representable range: {0}")]
-    UnrepresentableMovedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableMovedQuantity(#[source] UnrepresentableQuantity),
     /// A network-fee disposal on a non-AUD listing whose transfer month has
     /// no imported ATO rate, with no `fee_fx_rate` in the body: the fee Sell
     /// is a real disposal in the gains reports, and binding a placeholder 1
@@ -198,8 +207,8 @@ pub enum TransferError {
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the request states no fee_fx_rate")]
     MissingFeeFxRate {
-        currency: crate::infra::currency::CurrencyCode,
-        month: crate::infra::fx::RateMonth,
+        currency: CurrencyCode,
+        month: RateMonth,
     },
     // There is deliberately no sibling of
     // `trade::UpsertError::UnrepresentableRebasedQuantity` here, though a
@@ -352,8 +361,8 @@ pub struct TransferListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for TransferListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for TransferListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.date_range("date", self.from, self.to);
     }
@@ -459,13 +468,8 @@ async fn write(
     // listing dated on or after it would leave them stranded — consumed by
     // nothing, open forever (SCENARIOS V-d). Checked before anything is
     // written, so this transfer's own rows cannot be mistaken for the offender.
-    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
-        &mut tx,
-        body.listing_id,
-        body.date,
-        None,
-    )
-    .await?
+    if let Some(back_dated) =
+        whole_holding::db_back_dated_parcel(&mut tx, body.listing_id, body.date, None).await?
     {
         return Err(TransferError::BackDatedOverWholeHolding(back_dated));
     }
@@ -473,7 +477,7 @@ async fn write(
     // A bad listing or account id fails the FK here (→ 422 via the shared map).
     // The create branch omits the id column (one placeholder fewer); the upsert
     // branch is otherwise byte-identical.
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id) \
          VALUES (?, ?, ?, ?, ?)",
         id,
@@ -716,16 +720,12 @@ async fn write_fee_sale(
     let fee_fx_rate = match body.fee_fx_rate {
         Some(rate) => rate,
         None => {
-            let fx = crate::infra::fx::FxRates::load(&mut *conn).await?;
-            fx.resolve_rate(
-                &listing_currency,
-                body.date,
-                crate::infra::fx::FxOverride::None,
-            )
-            .map_err(|_| TransferError::MissingFeeFxRate {
-                currency: listing_currency.clone(),
-                month: crate::infra::fx::RateMonth::of(body.date),
-            })?
+            let fx = FxRates::load(&mut *conn).await?;
+            fx.resolve_rate(&listing_currency, body.date, FxOverride::None)
+                .map_err(|_| TransferError::MissingFeeFxRate {
+                    currency: listing_currency.clone(),
+                    month: RateMonth::of(body.date),
+                })?
         }
     };
 
@@ -909,10 +909,17 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::open_parcels;
     use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
     use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::listing::SecurityType;
+    use crate::entities::rba_fx_rate;
     use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
+    use crate::infra::date;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec};
     use axum::http::StatusCode;
@@ -942,7 +949,7 @@ mod tests {
             .mic("XNYS")
             .ticker(ticker)
             .name(ticker)
-            .security_type(crate::entities::listing::SecurityType::Share)
+            .security_type(SecurityType::Share)
             .currency("USD")
             .insert(pool)
             .await;
@@ -1096,7 +1103,7 @@ mod tests {
         assert_eq!(parcel.date, d(2024, 6, 1));
         assert_eq!(parcel.deemed_acquisition_date, Some(d(2023, 3, 1)));
 
-        crate::entities::sell::db_upsert_sell(
+        sell::db_upsert_sell(
             &pool,
             TradeId(30),
             &SellBody {
@@ -1124,9 +1131,7 @@ mod tests {
         .await
         .unwrap();
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         // The zero-proceeds transfer-out Sell is not a disposal.
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
@@ -1237,9 +1242,7 @@ mod tests {
         // 0.001 × 80,000 = A$80, cost base 0.001 × 60,000 = A$60, a A$20 gain,
         // fully discount-eligible (held > 12 months). The transfer-out Sell
         // (zero proceeds, transfer_id) is absent.
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1, "only the fee is a disposal");
         let g = &realised[0];
         assert_eq!(g.disposal, DisposalId::Sell(fee.id));
@@ -1363,9 +1366,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(allocs, 0, "fee + transfer-out allocations freed");
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert!(realised.is_empty());
         // The whole 1.0 BTC parcel is open again in account 2.
         let parcel = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
@@ -1502,9 +1503,7 @@ mod tests {
             .await
             .unwrap();
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert!(
             realised.is_empty(),
             "an own-account transfer is not a disposal"
@@ -1820,12 +1819,10 @@ mod tests {
             // Whichever side of the boundary the payment falls on, the units'
             // reported cost base is the same $11,800 — the payment reduces them
             // exactly once.
-            let parcels = crate::domain::open_parcels::load(
-                &mut pool.acquire().await.unwrap(),
-                Some(d(2024, 6, 30)),
-            )
-            .await
-            .unwrap();
+            let parcels =
+                open_parcels::load(&mut pool.acquire().await.unwrap(), Some(d(2024, 6, 30)))
+                    .await
+                    .unwrap();
             let replacement = parcels
                 .iter()
                 .find(|p| p.parcel.id == group.transfer_ins[0].id)
@@ -1951,7 +1948,7 @@ mod tests {
         // shared `trade::check_amounts` bound reaches every operation that
         // writes its Sell through the Sell core; a transfer's date is the
         // user's own, so it is the one that says so in its own terms.
-        let tomorrow = (crate::infra::date::today() + chrono::Days::new(1)).to_string();
+        let tomorrow = (date::today() + chrono::Days::new(1)).to_string();
         let detail = attempt(3, 2, 1, &tomorrow, 1, "100").await;
         assert!(
             detail.contains("transfer is dated after today"),
@@ -2132,13 +2129,13 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE").await;
         insert_vest(&pool, 1, d(2023, 3, 1), "1000000000000000000000000000", "0").await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: d(2023, 6, 1),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::ONE,
                     split_old_units: Decimal::from(1000),
                 },
@@ -2354,7 +2351,7 @@ mod tests {
     async fn a_foreign_fee_disposal_resolves_the_imported_month_rate_when_fx_omitted() {
         let pool = test_pool().await;
         insert_usd_crypto(&pool, "1.0", "3000").await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", dec("0.5"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-06", dec("0.5"))
             .await
             .unwrap();
 

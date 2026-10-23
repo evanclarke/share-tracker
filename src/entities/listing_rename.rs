@@ -63,8 +63,10 @@
 
 use crate::entities::listing::{self, Listing, SecurityType};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::date;
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
+use crate::infra::http::NoFilter;
 use crate::infra::http::{ApiError, CrudEntity};
 use crate::infra::id::ListingId;
 #[cfg(test)]
@@ -368,7 +370,7 @@ pub async fn db_rename(
     // future-dated one takes effect immediately while its own span says it
     // has not (SCENARIOS R-02). Today itself is allowed — the change is
     // recorded on the day it happens.
-    let today = crate::infra::date::today();
+    let today = date::today();
     if body.effective_date > today {
         return Err(RenameError::FutureDated { today });
     }
@@ -625,14 +627,14 @@ async fn rename(
     get,
     path = "/listings/{id}/renames",
     summary = "List one listing's recorded renames.",
-    params(crate::infra::http::NoFilter)
+    params(NoFilter)
 )]
 async fn list_for_listing(
     State(pool): State<SqlitePool>,
     Path(listing_id): Path<ListingId>,
     // Decoded only so an unrecognised parameter is refused rather than
     // silently ignored, like every other list.
-    Query(_no_filter): Query<crate::infra::http::NoFilter>,
+    Query(_no_filter): Query<NoFilter>,
 ) -> Result<Json<Vec<ListingRename>>, ApiError> {
     Ok(Json(db_list_for_listing(&pool, listing_id).await?))
 }
@@ -668,7 +670,11 @@ async fn undo(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::exchange;
+    use crate::entities::exchange::Exchange;
     use crate::entities::listing;
+    use crate::entities::trade;
+    use crate::infra::date;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -693,9 +699,9 @@ mod tests {
     /// exchanges quote different money (XASX in AUD, XNYS in USD), which is
     /// exactly what `RenameError::ExchangeCurrencyMismatch` refuses.
     async fn insert_aud_exchange(pool: &SqlitePool, mic: &str) {
-        crate::entities::exchange::db_upsert(
+        exchange::db_upsert(
             pool,
-            &crate::entities::exchange::Exchange {
+            &Exchange {
                 mic: mic.to_owned(),
                 name: format!("{mic} test market"),
                 country: "Australia".to_owned(),
@@ -1086,7 +1092,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let today = crate::infra::date::today();
+        let today = date::today();
         for ahead in [1, 30, 365] {
             let date = (today + chrono::Duration::days(ahead)).to_string();
             let err = db_rename(&pool, ListingId(1), &body(&date, "FUTURETICK"))
@@ -1119,7 +1125,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("LAAC").insert(&pool).await;
 
-        let today = crate::infra::date::today();
+        let today = date::today();
         let created = db_rename(&pool, ListingId(1), &body(&today.to_string(), "LAR"))
             .await
             .unwrap();
@@ -1744,7 +1750,7 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("MSFT").insert(&pool).await;
 
-        let today = crate::infra::date::today();
+        let today = date::today();
         let future = today + chrono::Duration::days(365);
         let resp = client(&pool)
             .post(
@@ -1902,10 +1908,7 @@ mod tests {
             .await
             .unwrap();
 
-        let trade = crate::entities::trade::db_get(&pool, TradeId(1))
-            .await
-            .unwrap()
-            .unwrap();
+        let trade = trade::db_get(&pool, TradeId(1)).await.unwrap().unwrap();
         assert_eq!(trade.listing_id, 1);
         assert_eq!(trade.quantity, rust_decimal::Decimal::from(100));
     }

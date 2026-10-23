@@ -21,6 +21,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::fmt;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -547,11 +548,11 @@ fn validate_complete_trading_day(market: &Market, date: NaiveDate) -> Result<(),
     Ok(())
 }
 
-fn internal(e: impl std::fmt::Display) -> ApiError {
+fn internal(e: impl fmt::Display) -> ApiError {
     ApiError::internal(e.to_string())
 }
 
-fn unprocessable(e: impl std::fmt::Display) -> ApiError {
+fn unprocessable(e: impl fmt::Display) -> ApiError {
     ApiError::unprocessable(e.to_string())
 }
 

@@ -94,6 +94,12 @@
 //! residuals back from the most recent prior trade, so undo runs
 //! last-in-first-out.
 
+use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableCost;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
+use crate::entities::corporate_action;
 use crate::entities::{
     drp_enrolment::{self, ResidualHandling},
     income::{Income, IncomeType},
@@ -204,7 +210,7 @@ pub enum ReinvestError {
     /// `domain::cost_base`, shared with `trade::check_amounts` — which this
     /// path does not go through, since the DRP trade is written directly.
     #[error("the reinvested parcel's cost base is not representable: {0}")]
-    UnrepresentableCostBase(#[source] crate::domain::cost_base::UnrepresentableCost),
+    UnrepresentableCostBase(#[source] UnrepresentableCost),
     /// Undo requested on a distribution with no reinvestment trade.
     #[error("this distribution has no reinvestment trade to undo")]
     NotReinvested,
@@ -237,7 +243,7 @@ pub enum ReinvestError {
     /// side of `trade::UpsertError::BackDatedOverWholeHolding`; wording and
     /// recovery in `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The reinvested quantity is one the listing's recorded splits and bonus
     /// issues re-base past what a `Decimal` can hold. The DRP side of
     /// `trade::UpsertError::UnrepresentableRebasedQuantity`, and reachable both
@@ -247,7 +253,7 @@ pub enum ReinvestError {
     /// walk, same wording (`corporate_action::rebased_quantity_beyond_range`).
     /// Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
 }
 
 impl From<ReinvestError> for ApiError {
@@ -484,7 +490,7 @@ async fn execute(
     // state ahead of the distribution's own `date_paid` default
     // (`domain::whole_holding`).
     if let Some(back_dated) =
-        crate::domain::whole_holding::db_back_dated_parcel(&mut tx, listing_id, date, None).await?
+        whole_holding::db_back_dated_parcel(&mut tx, listing_id, date, None).await?
     {
         return Err(ReinvestError::BackDatedOverWholeHolding(back_dated));
     }
@@ -583,12 +589,10 @@ async fn execute(
             // but the type: computed checked, so an unrepresentable pair is a
             // 422 naming it rather than a panic inside this multiply
             // (SCENARIOS W-e).
-            let cost = crate::domain::cost_base::checked_cost_base(&[
-                crate::domain::cost_base::Term::Product {
-                    price: ("reinvestment_price", body.reinvestment_price),
-                    units: ("units", units),
-                },
-            ])
+            let cost = cost_base::checked_cost_base(&[crate::domain::cost_base::Term::Product {
+                price: ("reinvestment_price", body.reinvestment_price),
+                units: ("units", units),
+            }])
             .map_err(ReinvestError::UnrepresentableCostBase)?;
             let step = Decimal::new(1, units.scale());
             if (available - cost).abs() >= step * body.reinvestment_price {
@@ -671,8 +675,7 @@ async fn execute(
     // behind, like every other parcel-creating path
     // (`corporate_action::rebased_quantity_beyond_range`).
     if let Some(beyond) =
-        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, listing_id)
-            .await?
+        corporate_action::rebased_quantity_beyond_range(&mut tx, listing_id).await?
     {
         return Err(ReinvestError::UnrepresentableRebasedQuantity(beyond));
     }
@@ -788,8 +791,21 @@ async fn unreinvest(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::amit_adjustment_generation;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::sell;
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::sell::SellBody;
     use crate::entities::{drp_enrolment, income, listing, trade::TradeType};
     use crate::infra::id::ListingId;
+    use crate::reports::amit_cash_cross_check;
+    use crate::reports::open_parcels;
+    use crate::reports::realised_gains;
+    use crate::reports::tax_summary;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -897,9 +913,9 @@ mod tests {
     /// A second holding account (e.g. an employer share plan) for the
     /// per-account tests.
     async fn insert_account(pool: &SqlitePool, id: i64, name: &str) {
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(id),
                 name: name.to_owned(),
             },
@@ -1025,10 +1041,10 @@ mod tests {
         assert_eq!(june.quantity, Decimal::from(100));
 
         // Both parcels sold on 2025-06-25 at $15.
-        crate::entities::sell::db_upsert_sell(
+        sell::db_upsert_sell(
             &pool,
             TradeId(50),
-            &crate::entities::sell::SellBody {
+            &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: HoldingAccountId(1),
@@ -1045,11 +1061,11 @@ mod tests {
                 spot_fx_rate: None,
                 contract_note_ref: None,
                 allocations: vec![
-                    crate::entities::sell::AllocationInput {
+                    AllocationInput {
                         purchase_trade_id: march.id,
                         quantity_allocated: Decimal::from(100),
                     },
-                    crate::entities::sell::AllocationInput {
+                    AllocationInput {
                         purchase_trade_id: june.id,
                         quantity_allocated: Decimal::from(100),
                     },
@@ -1059,9 +1075,7 @@ mod tests {
         .await
         .unwrap();
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
         assert_eq!(g.cost_base, Decimal::from(2000));
@@ -1089,10 +1103,7 @@ mod tests {
         insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
 
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
-        let stored = crate::entities::trade::db_get(&pool, trade.id)
-            .await
-            .unwrap()
-            .unwrap();
+        let stored = trade::db_get(&pool, trade.id).await.unwrap().unwrap();
         assert!(!stored.brokerage_includes_gst);
         assert_eq!(stored.statement_total, None);
     }
@@ -1158,9 +1169,7 @@ mod tests {
         // carried, not capitalised into the parcel.
         assert_eq!(trade.residual_carried_forward, Decimal::from(5));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].remaining_cost_base, "95.00".parse().unwrap());
     }
@@ -1183,9 +1192,7 @@ mod tests {
             trade.residual_carried_forward,
             "0.0064".parse::<Decimal>().unwrap()
         );
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels[0].remaining_cost_base, "999.9936".parse().unwrap());
     }
 
@@ -1329,10 +1336,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body.contains("USD") && body.contains("AUD"), "{body}");
         assert!(
-            crate::entities::trade::db_list(&pool)
-                .await
-                .unwrap()
-                .is_empty(),
+            trade::db_list(&pool).await.unwrap().is_empty(),
             "nothing persisted"
         );
         assert!(
@@ -1370,21 +1374,17 @@ mod tests {
             matches!(err, ReinvestError::UnitsCashMismatch { .. }),
             "{err:?}"
         );
-        crate::entities::income::db_delete(&pool, 3).await.unwrap();
+        income::db_delete(&pool, 3).await.unwrap();
 
         let trade = db_reinvest(&pool, 1, &body("7")).await.unwrap();
         assert_eq!(trade.quantity, Decimal::from(7));
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(
             parcels[0].remaining_cost_base,
             Decimal::from(49),
             "the dividends applied to the units, not the whole distribution"
         );
-        let years = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let years = tax_summary::db_tax_summary(&pool).await.unwrap();
         assert_eq!(
             years[0].trust_income_unfranked,
             Decimal::from(100),
@@ -1420,10 +1420,9 @@ mod tests {
             .with(|a| a.australian_dividends_unfranked = Decimal::from(500))
             .insert(&pool)
             .await;
-        let generated =
-            crate::entities::amit_adjustment_generation::db_generate(&pool, 1, &Default::default())
-                .await
-                .unwrap();
+        let generated = amit_adjustment_generation::db_generate(&pool, 1, &Default::default())
+            .await
+            .unwrap();
         // The DRP parcel is the parcel the statement's units are adjusted on.
         assert_eq!(generated.created.len(), 1);
         assert_eq!(generated.created[0].adjustment.trade_id, trade.id);
@@ -1432,23 +1431,19 @@ mod tests {
         // Assessable: the AMMA's attribution, not the cash row — which is why
         // an AMIT year with cash but no statement is flagged rather than
         // reported (`reports::amit_cash_cross_check`, empty once entered).
-        let years = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let years = tax_summary::db_tax_summary(&pool).await.unwrap();
         assert_eq!(years.len(), 1);
         assert_eq!(years[0].dividends_assessable, Decimal::ZERO);
         assert_eq!(years[0].amma_dividends_unfranked, Decimal::from(500));
         assert!(
-            crate::reports::amit_cash_cross_check::db_amit_cash_alerts(&pool)
+            amit_cash_cross_check::db_amit_cash_alerts(&pool)
                 .await
                 .unwrap()
                 .is_empty()
         );
 
         // …and the reinvested parcel carries the E10 uplift: $500 + 10 × $1.50.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].trade_id, trade.id);
         assert_eq!(parcels[0].remaining_cost_base, "515.0".parse().unwrap());
@@ -1468,13 +1463,13 @@ mod tests {
         assert_eq!(trade.quantity, Decimal::from(10));
 
         // 2-for-1 split after the reinvestment.
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 1,
                 listing_id: ListingId(1),
                 date: "2024-05-01".parse().unwrap(),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::TWO,
                     split_old_units: Decimal::ONE,
                 },
@@ -1482,26 +1477,19 @@ mod tests {
         )
         .await
         .unwrap();
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels[0].original_quantity, Decimal::from(10));
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(20));
         assert_eq!(parcels[0].remaining_cost_base, Decimal::from(100));
 
         db_unreinvest(&pool, 1).await.unwrap();
         assert!(
-            crate::reports::open_parcels::db_open_parcels(&pool, None)
+            open_parcels::db_open_parcels(&pool, None)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        assert!(
-            crate::entities::trade::db_get(&pool, trade.id)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(trade::db_get(&pool, trade.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2292,10 +2280,7 @@ mod tests {
         db_unreinvest(&pool, 1).await.unwrap();
 
         assert!(
-            crate::entities::trade::db_get(&pool, trade.id)
-                .await
-                .unwrap()
-                .is_none(),
+            trade::db_get(&pool, trade.id).await.unwrap().is_none(),
             "DRP trade must be deleted"
         );
         let inc = income::db_get(&pool, 1).await.unwrap().unwrap();
@@ -2346,10 +2331,10 @@ mod tests {
         enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution(&pool, 1, ListingId(1), Decimal::from(100), Decimal::ZERO).await;
         let trade = db_reinvest(&pool, 1, &body("9")).await.unwrap();
-        crate::entities::sell::db_upsert_sell(
+        sell::db_upsert_sell(
             &pool,
             TradeId(50),
-            &crate::entities::sell::SellBody {
+            &SellBody {
                 date: "2024-06-03".parse().unwrap(),
                 settlement_date: Some("2024-06-05".parse().unwrap()),
                 listing_id: ListingId(1),
@@ -2365,7 +2350,7 @@ mod tests {
                 contract_note_ref: None,
                 statement_total: None,
                 holding_account_id: HoldingAccountId(1),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: trade.id,
                     quantity_allocated: Decimal::from(5),
                 }],
@@ -2380,10 +2365,7 @@ mod tests {
             "expected ReinvestmentConsumed, got: {err:?}"
         );
         assert!(
-            crate::entities::trade::db_get(&pool, trade.id)
-                .await
-                .unwrap()
-                .is_some(),
+            trade::db_get(&pool, trade.id).await.unwrap().is_some(),
             "trade must remain"
         );
         assert_eq!(
@@ -2741,10 +2723,7 @@ mod tests {
     /// One trade's `(residual_carried_forward, residual_paid_out)` as stored,
     /// for reading a trade back after a later write re-derived the chain.
     async fn residuals(pool: &SqlitePool, trade_id: TradeId) -> (Decimal, Decimal) {
-        let t = crate::entities::trade::db_get(pool, trade_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let t = trade::db_get(pool, trade_id).await.unwrap().unwrap();
         (t.residual_carried_forward, t.residual_paid_out)
     }
 
@@ -3079,13 +3058,13 @@ mod tests {
         insert_listing(pool, 1, "AUD").await;
         enrol(pool, ListingId(1), ResidualHandling::CarryForward).await;
         insert_distribution(pool, 1, ListingId(1), cash.parse().unwrap(), Decimal::ZERO).await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: "2024-06-01".parse().unwrap(),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },

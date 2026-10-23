@@ -32,9 +32,11 @@
 //! carried-forward loss chain — is a deliberate scope cut (`docs/API.md`,
 //! Known limitations).
 
+use crate::infra::decimal;
 use chrono::{Datelike, NaiveDate};
 use rust_decimal::{Decimal, RoundingStrategy};
 use sqlx::Row;
+use std::collections::HashMap;
 
 use crate::domain::cost_base::CostBase;
 use crate::infra::currency::Aud;
@@ -81,7 +83,7 @@ pub struct Indexation {
 /// `infra::fx::FxRates` takes for the same reason. 57 rows.
 #[derive(Debug, Clone, Default)]
 pub struct CpiQuarters {
-    quarters: std::collections::HashMap<NaiveDate, Decimal>,
+    quarters: HashMap<NaiveDate, Decimal>,
 }
 
 impl CpiQuarters {
@@ -91,10 +93,10 @@ impl CpiQuarters {
         let rows = sqlx::query("SELECT quarter_end, cpi FROM cpi_quarters")
             .fetch_all(&mut *conn)
             .await?;
-        let mut quarters = std::collections::HashMap::with_capacity(rows.len());
+        let mut quarters = HashMap::with_capacity(rows.len());
         for row in &rows {
             let quarter_end: NaiveDate = row.try_get("quarter_end")?;
-            let cpi = crate::infra::decimal::row_dec(row, "cpi")?;
+            let cpi = decimal::row_dec(row, "cpi")?;
             quarters.insert(quarter_end, cpi);
         }
         Ok(Self { quarters })
@@ -179,6 +181,7 @@ pub fn indexed_cost_base(cost: &CostBase<Aud>, factor: Decimal) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
@@ -220,7 +223,7 @@ mod tests {
     /// after it. The two figures the whole method turns on are pinned here.
     #[tokio::test]
     async fn the_seeded_series_is_the_ato_appendix() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let mut conn = pool.acquire().await.unwrap();
         let cpi = CpiQuarters::load(&mut conn).await.unwrap();
         assert_eq!(cpi.quarters.len(), 57);
@@ -239,7 +242,7 @@ mod tests {
     /// the ATO says can no longer be used for tax purposes.
     #[tokio::test]
     async fn the_earliest_enterable_acquisition_indexes_at_1_730() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let mut conn = pool.acquire().await.unwrap();
         let cpi = CpiQuarters::load(&mut conn).await.unwrap();
         let ix = cpi.indexation_for(d(1985, 9, 20)).unwrap();
@@ -260,7 +263,7 @@ mod tests {
     /// rule* are both right.
     #[tokio::test]
     async fn the_ato_worked_examples_factors_reproduce() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let mut conn = pool.acquire().await.unwrap();
         let cpi = CpiQuarters::load(&mut conn).await.unwrap();
         assert_eq!(
@@ -282,7 +285,7 @@ mod tests {
     /// CPI, so indexation can add nothing.
     #[tokio::test]
     async fn the_twenty_first_of_september_1999_is_the_last_indexable_day() {
-        let pool = crate::test_support::test_pool().await;
+        let pool = test_support::test_pool().await;
         let mut conn = pool.acquire().await.unwrap();
         let cpi = CpiQuarters::load(&mut conn).await.unwrap();
         assert_eq!(

@@ -5,13 +5,22 @@
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
 use super::model::{ActionKind, CorporateAction};
+use crate::domain::adjustments;
+use crate::domain::adjustments::SplitRatio;
 use crate::domain::adjustments::{
     AcquiredUnits, UnitsAt, as_acquired_quantity, db_payment_currency_conflict,
     db_splits_for_listing,
 };
+use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::tax_year;
+use crate::entities::closing_price;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, Upserted};
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -45,8 +54,8 @@ pub struct CorporateActionListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for CorporateActionListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for CorporateActionListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.date_range("date", self.from, self.to);
     }
@@ -62,7 +71,7 @@ impl CrudEntity for CorporateAction {
 
 #[cfg(test)]
 pub async fn db_list(pool: &SqlitePool) -> Result<Vec<CorporateAction>, sqlx::Error> {
-    crate::infra::http::crud_list(pool).await
+    http::crud_list(pool).await
 }
 
 #[cfg(test)]
@@ -136,7 +145,7 @@ pub enum WriteError {
     /// the write leaves behind, so the same edit that brings the ratio back
     /// inside the range still lands. Mapped to `422`.
     #[error("this action re-bases a quantity beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
     /// A `ReturnOfCapital` recorded in one currency while a parcel it reduces
     /// is held in another. The payment reduces each parcel's cost base in the
     /// parcel's own currency and amounts are never netted across currencies,
@@ -345,7 +354,7 @@ async fn allocations_fit_parcels(
 pub async fn rebased_quantity_beyond_range(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
-) -> Result<Option<crate::domain::cost_base::UnrepresentableQuantity>, sqlx::Error> {
+) -> Result<Option<UnrepresentableQuantity>, sqlx::Error> {
     let splits = db_splits_for_listing(&mut *conn, listing_id).await?;
     // Nothing re-bases quantities on this listing, so nothing can overflow.
     if splits.is_empty() {
@@ -368,7 +377,7 @@ pub async fn rebased_quantity_beyond_range(
             }
             new *= split.new_units;
             old *= split.old_units;
-            if let Err(e) = crate::domain::cost_base::checked_rebased_quantity(
+            if let Err(e) = cost_base::checked_rebased_quantity(
                 ("quantity", quantity),
                 ("new units", new),
                 ("old units", old),
@@ -388,9 +397,8 @@ pub async fn rebased_quantity_beyond_range(
         let acquired: NaiveDate = row.try_get("acquired")?;
         let sale_date: NaiveDate = row.try_get("sale_date")?;
         let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        let crate::domain::adjustments::SplitRatio { new, old } =
-            crate::domain::adjustments::split_ratio(&splits, acquired, Some(sale_date));
-        if let Err(e) = crate::domain::cost_base::checked_rebased_quantity(
+        let SplitRatio { new, old } = adjustments::split_ratio(&splits, acquired, Some(sale_date));
+        if let Err(e) = cost_base::checked_rebased_quantity(
             ("quantity_allocated", allocated),
             ("old units", old),
             ("new units", new),
@@ -691,11 +699,7 @@ async fn write(
         // recordable — and editable — after the flag goes on
         // (SCENARIOS F-23). `domain::tax_year::amit_in_tax_year` is the shared rule.
         let amit_year = amit.is_some_and(|(amit, amit_from)| {
-            crate::domain::tax_year::amit_in_tax_year(
-                amit,
-                amit_from,
-                crate::domain::tax_year::tax_year_for(action.date),
-            )
+            tax_year::amit_in_tax_year(amit, amit_from, tax_year::tax_year_for(action.date))
         });
         if amit_year {
             return Err(WriteError::ReturnOfCapitalOnAmit);
@@ -740,7 +744,7 @@ async fn write(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO corporate_actions \
          (id, action_type, listing_id, date, amount_per_unit, currency, \
           split_new_units, split_old_units, bonus_units, bonus_held_units, \
@@ -869,7 +873,7 @@ async fn write(
     // same call; the pass reads nothing at all for a listing with no price
     // re-basing event.
     for &listing_id in &listings {
-        crate::entities::closing_price::db_rebase_listing_prices(&mut tx, listing_id).await?;
+        closing_price::db_rebase_listing_prices(&mut tx, listing_id).await?;
     }
 
     // A return of capital reduces each parcel's cost base in the *parcel's*
@@ -1052,7 +1056,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
     // demerger carrying a stated close — restates the listing's stored closing
     // prices exactly as recording one does, so the same pass runs in the
     // delete's own transaction; see `db_upsert` above.
-    crate::entities::closing_price::db_rebase_listing_prices(&mut tx, action.listing_id).await?;
+    closing_price::db_rebase_listing_prices(&mut tx, action.listing_id).await?;
 
     tx.commit().await?;
     Ok(true)

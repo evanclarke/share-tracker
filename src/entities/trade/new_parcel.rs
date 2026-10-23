@@ -14,6 +14,7 @@
 //! and [`ParcelOrigin`] makes "which provenance column does this row carry" a
 //! type rather than a column name typed at each call site.
 
+use crate::infra::db;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -199,7 +200,7 @@ impl<'a> NewParcel<'a> {
         id: Option<TradeId>,
     ) -> Result<TradeId, sqlx::Error> {
         let link = self.origin.link();
-        let mut query = crate::infra::db::insert_with_optional_id(INSERT_SQL, id.map(|id| id.0))
+        let mut query = db::insert_with_optional_id(INSERT_SQL, id.map(|id| id.0))
             .bind(self.origin.trade_type())
             .bind(self.date)
             .bind(self.date)
@@ -263,6 +264,7 @@ const INSERT_SQL: &str = "INSERT INTO trades \
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::trade;
     use crate::entities::trade::TRADE_PROVENANCE;
 
     const ALL_ORIGINS: [ParcelOrigin; 7] = [
@@ -325,10 +327,7 @@ mod tests {
             .insert(&mut conn)
             .await
             .unwrap();
-            let trade = crate::entities::trade::db_get(&mut *conn, id)
-                .await
-                .unwrap()
-                .unwrap();
+            let trade = trade::db_get(&mut *conn, id).await.unwrap().unwrap();
             assert_eq!(trade.trade_type, origin.trade_type());
             assert_eq!(trade.settlement_date, ymd(2024, 1, 2));
             for column in PARCEL_LINK_COLUMNS {

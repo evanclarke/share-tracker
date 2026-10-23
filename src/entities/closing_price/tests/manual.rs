@@ -3,12 +3,11 @@
 
 use super::*;
 use crate::infra::id::ListingId;
+use crate::reports::row_history;
+use crate::reports::valuation;
+use axum::body::Bytes;
 
-async fn put_json(
-    app: &ApiClient,
-    uri: &str,
-    body: serde_json::Value,
-) -> (StatusCode, axum::body::Bytes) {
+async fn put_json(app: &ApiClient, uri: &str, body: serde_json::Value) -> (StatusCode, Bytes) {
     let resp = app.put(uri, &body).await;
     let status = resp.status;
     let bytes = resp.body;
@@ -77,7 +76,7 @@ async fn manual_price_unblocks_valuation_of_an_errored_day() {
     store_errored(&pool, ymd(2026, 6, 4)).await;
     let now = utc(2026, 6, 8, 9, 0);
 
-    let blocked = crate::reports::valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
+    let blocked = valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
         .await
         .unwrap_err();
     assert!(
@@ -90,7 +89,7 @@ async fn manual_price_unblocks_valuation_of_an_errored_day() {
         put_json(&app, "/closing_prices/1/2026-06-04", manual_body("62.48")).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{:?}", bytes);
 
-    let valuations = crate::reports::valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
+    let valuations = valuation::stored_valuations(&pool, ymd(2026, 6, 4), now)
         .await
         .unwrap();
     assert_eq!(valuations.valuations.len(), 1);
@@ -375,7 +374,7 @@ async fn revising_a_manual_price_retains_the_superseded_provenance() {
     assert_eq!(now.id, stored.id, "the surrogate key survives an upsert");
     assert_eq!(now.price, Some("64.28".parse().unwrap()));
 
-    let history = crate::reports::row_history::db_row_history(&pool, "closing_prices", now.id)
+    let history = row_history::db_row_history(&pool, "closing_prices", now.id)
         .await
         .unwrap();
     assert_eq!(history.len(), 1, "one recorded prior version");

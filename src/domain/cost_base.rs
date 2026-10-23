@@ -48,7 +48,11 @@
 //!    see Known limitations in `docs/API.md`), material only for a non-AUD
 //!    holding receiving non-AUD reductions.
 
+use crate::domain::open_parcels;
+use crate::domain::open_parcels::UnitsConsumed;
+use crate::domain::tax_year;
 use crate::infra::currency::{Aud, CurrencyCode, Native};
+use crate::infra::date;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -749,9 +753,7 @@ impl AmitReductionEvent {
         // statement's year-end position no longer includes those units, which
         // is the same boundary `disposed_by_year_end` was counted on.
         let (coverage, group) = match whereabouts {
-            Whereabouts::DisposedOn(d)
-                if d < crate::domain::tax_year::fy_start(self.tax_year_end_date) =>
-            {
+            Whereabouts::DisposedOn(d) if d < tax_year::fy_start(self.tax_year_end_date) => {
                 return Decimal::ZERO;
             }
             Whereabouts::DisposedOn(d) if d <= self.tax_year_end_date => (
@@ -1294,7 +1296,7 @@ pub async fn db_cost_base_reduction_events(
     conn: &mut sqlx::SqliteConnection,
     up_to: Option<chrono::NaiveDate>,
 ) -> Result<HashMap<TradeId, Vec<AmitReductionEvent>>, sqlx::Error> {
-    let cutoff = crate::infra::date::as_of_or_open(up_to);
+    let cutoff = date::as_of_or_open(up_to);
     let splits = adjustments::db_share_split_events(&mut *conn).await?;
     let rows = sqlx::query(
         "SELECT aa.trade_id, a.id AS amma_statement_id, a.tax_year_end_date, aa.quantity, \
@@ -1320,7 +1322,7 @@ pub async fn db_cost_base_reduction_events(
     // still held here or sold. Counting them as sold flipped a
     // partial-coverage row's split onto an earlier real Sell; counting them
     // as held diluted the units left behind by the ones that moved.
-    let consumed = crate::domain::open_parcels::db_units_sold(&mut *conn, up_to).await?;
+    let consumed = open_parcels::db_units_sold(&mut *conn, up_to).await?;
 
     let mut map: HashMap<TradeId, Vec<AmitReductionEvent>> = HashMap::new();
     for row in &rows {
@@ -1335,9 +1337,8 @@ pub async fn db_cost_base_reduction_events(
         // Units of the parcel already disposed of when the statement's year
         // ended, re-based back to the parcel's as-acquired basis (an
         // allocation is in its own sale date's units).
-        let as_acquired = |c: &crate::domain::open_parcels::UnitsConsumed| {
-            adjustments::as_acquired_quantity(c.quantity, splits, trade_date)
-        };
+        let as_acquired =
+            |c: &UnitsConsumed| adjustments::as_acquired_quantity(c.quantity, splits, trade_date);
         let consumed = consumed.get(&trade_id).map_or(&[][..], |v| v);
         let disposed_by_year_end = consumed
             .iter()
@@ -1381,15 +1382,18 @@ pub async fn db_cost_base_reduction_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::UnitsAt;
     use crate::entities::rba_fx_rate;
     use crate::test_support::test_pool;
+    use std::slice;
+    use std::sync::LazyLock;
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
     /// The fixture parcels' currency, `'static` so `parcel` can lend it.
-    static AUD: std::sync::LazyLock<CurrencyCode> = std::sync::LazyLock::new(CurrencyCode::aud);
+    static AUD: LazyLock<CurrencyCode> = LazyLock::new(CurrencyCode::aud);
 
     fn parcel(qty: i64, price: i64) -> Parcel<'static> {
         Parcel {
@@ -2272,7 +2276,7 @@ mod tests {
             AcquiredUnits::new(Decimal::from(100)),
             &[],
             &events,
-            std::slice::from_ref(&split),
+            slice::from_ref(&split),
             Held::AsAt(None),
         )
         .unwrap();
@@ -2340,7 +2344,7 @@ mod tests {
             &p,
             AcquiredUnits::new(Decimal::from(100)),
             &amit_events,
-            std::slice::from_ref(&roc),
+            slice::from_ref(&roc),
             &[],
             Held::AsAt(None),
         )
@@ -2360,7 +2364,7 @@ mod tests {
             &p,
             AcquiredUnits::new(Decimal::from(100)),
             &amit_events,
-            std::slice::from_ref(&roc),
+            slice::from_ref(&roc),
             &[],
             Held::AsAt(None),
         )
@@ -2457,11 +2461,8 @@ mod tests {
         // The unit count the row would claim to explain is unchanged …
         assert_eq!(
             as_acquired_quantity(
-                crate::entities::corporate_action::UnitsAt::new(
-                    Decimal::from(100),
-                    date(2024, 6, 1),
-                ),
-                std::slice::from_ref(&same_day),
+                UnitsAt::new(Decimal::from(100), date(2024, 6, 1),),
+                slice::from_ref(&same_day),
                 p.trade_date,
             ),
             Decimal::from(100)
@@ -2472,7 +2473,7 @@ mod tests {
             AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[],
-            std::slice::from_ref(&same_day),
+            slice::from_ref(&same_day),
             Held::AsAt(None),
         )
         .unwrap();
@@ -2488,7 +2489,7 @@ mod tests {
             AcquiredUnits::new(Decimal::from(100)),
             &[],
             &[],
-            std::slice::from_ref(&next_day),
+            slice::from_ref(&next_day),
             Held::AsAt(None),
         )
         .unwrap();

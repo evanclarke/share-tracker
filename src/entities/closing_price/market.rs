@@ -10,7 +10,9 @@
 //! exactly for an exchange-less (Crypto) span.
 
 use crate::domain::listing_identity::{Identity, RenameHistory};
+use crate::entities::exchange_holiday;
 use crate::entities::{exchange, listing};
+use crate::infra::db;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
@@ -298,7 +300,7 @@ pub async fn load_market(
     pool: &SqlitePool,
     listing_id: ListingId,
 ) -> Result<Option<Market>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let market = load_market_on(&mut tx, listing_id).await?;
     tx.commit().await?;
     Ok(market)
@@ -335,7 +337,7 @@ pub(crate) async fn load_market_on(
         }
         calendars.holidays.insert(
             mic.to_owned(),
-            crate::entities::exchange_holiday::db_holiday_dates_for(&mut *conn, mic).await?,
+            exchange_holiday::db_holiday_dates_for(&mut *conn, mic).await?,
         );
     }
     Ok(Some(calendars.assemble(listing, spans)))

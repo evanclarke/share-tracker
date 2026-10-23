@@ -4,6 +4,8 @@
 
 use super::fetcher::clean_price;
 use super::model::{ClosingPrice, PriceStatus};
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::PriceBasisEvent;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::id::ListingId;
@@ -182,11 +184,11 @@ where
 /// not be written down as if it recovered more.
 pub(super) fn contemporaneous(
     as_observed: Decimal,
-    events: &[crate::entities::corporate_action::PriceBasisEvent],
+    events: &[PriceBasisEvent],
     price_date: NaiveDate,
     observed: NaiveDate,
 ) -> Decimal {
-    clean_price(crate::entities::corporate_action::contemporaneous_price(
+    clean_price(corporate_action::contemporaneous_price(
         as_observed,
         events,
         price_date,
@@ -273,7 +275,7 @@ fn observation_date(fetched_at: &str) -> Result<NaiveDate, sqlx::Error> {
 pub async fn db_price_basis_events(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
-) -> Result<Vec<crate::entities::corporate_action::PriceBasisEvent>, sqlx::Error> {
+) -> Result<Vec<PriceBasisEvent>, sqlx::Error> {
     use crate::entities::corporate_action::{self, PriceBasisEvent};
 
     let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;

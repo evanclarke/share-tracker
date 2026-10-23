@@ -34,9 +34,11 @@
 //! closes the whole holding), worthless *financial instruments* other than
 //! shares, and the 18-month later-recovery timing rule.
 
+use crate::domain::open_parcels;
 use crate::entities::corporate_action::{
     self, AcquiredUnits, ActionKind, sold_in_acquired_units, split_adjusted_quantity,
 };
+use crate::entities::holding_account;
 use crate::entities::sell::{self, AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
@@ -175,8 +177,7 @@ async fn execute(
     .fetch_all(&mut *tx)
     .await?;
 
-    let qty_sold =
-        crate::domain::open_parcels::db_sales_by_parcel(&mut tx, Some(action.listing_id)).await?;
+    let qty_sold = open_parcels::db_sales_by_parcel(&mut tx, Some(action.listing_id)).await?;
 
     let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
 
@@ -225,7 +226,7 @@ async fn execute(
     let sell_body = SellBody {
         brokerage_includes_gst: false,
         statement_total: None,
-        holding_account_id: crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
+        holding_account_id: holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
         date: action.date,
         settlement_date: Some(action.date),
         listing_id: action.listing_id,
@@ -329,7 +330,11 @@ mod tests {
     use crate::entities::corporate_action::{CorporateAction, WorthlessEvent};
     use crate::entities::listing;
     use crate::entities::trade::TradeType;
+    use crate::infra::date;
     use crate::infra::id::ListingId;
+    use crate::reports;
+    use crate::reports::net_capital_gain;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
@@ -434,9 +439,7 @@ mod tests {
         assert_eq!(n, 2);
 
         // The realised-gains report recognises the loss = total reduced cost base.
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(gains.len(), 1);
         let g = &gains[0];
         assert_eq!(g.disposal, DisposalId::Sell(r.sell.id));
@@ -498,9 +501,7 @@ mod tests {
 
         // The closing Sell's loss is the remaining $900; the earlier Sell's
         // $200 gain (400 × ($2.00 − $1.50)) is a separate row.
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         let closing = gains
             .iter()
             .find(|g| g.disposal == DisposalId::Sell(r.sell.id))
@@ -526,9 +527,7 @@ mod tests {
         .await;
         db_recognise(&pool, 10).await.unwrap();
 
-        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
-            .await
-            .unwrap();
+        let years = net_capital_gain::db_net_capital_gain(&pool).await.unwrap();
         // FY2024/25 (year ending 30 June 2025) carries the $2,000 loss forward
         // (no gains to offset).
         let y = years.iter().find(|y| y.tax_year == 2025).unwrap();
@@ -558,7 +557,7 @@ mod tests {
 
         insert_buy(&pool, 50, ListingId(1), d(2024, 9, 3), "100", "0.50").await;
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -566,9 +565,7 @@ mod tests {
         assert_eq!(parcels[0].acquisition_date, d(2024, 9, 3));
         assert_eq!(parcels[0].remaining_cost_base, dec("50.00"));
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(gains.len(), 1);
         assert_eq!(gains[0].capital_loss, dec("2000"));
     }
@@ -612,9 +609,7 @@ mod tests {
         .await;
         db_recognise(&pool, 10).await.unwrap();
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(gains[0].capital_loss, dec("1950.00"));
 
         // Paid after it, to the holders of record: a C2 gain that year, with
@@ -647,9 +642,7 @@ mod tests {
         .await
         .unwrap();
 
-        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
-            .await
-            .unwrap();
+        let years = net_capital_gain::db_net_capital_gain(&pool).await.unwrap();
         let recognised = years.iter().find(|y| y.tax_year == 2023).unwrap();
         assert_eq!(recognised.capital_losses, dec("2000"));
         let paid = years.iter().find(|y| y.tax_year == 2024).unwrap();
@@ -883,9 +876,7 @@ mod tests {
 
         let r = db_recognise(&pool, 10).await.unwrap();
         assert_eq!(r.sell.quantity, dec("1500"));
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(gains[0].capital_loss, dec("2500"));
     }
 
@@ -951,7 +942,7 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "DEAD").await;
         insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
-        let future = crate::infra::date::today() + chrono::Days::new(1);
+        let future = date::today() + chrono::Days::new(1);
         insert_worthless(
             &pool,
             10,

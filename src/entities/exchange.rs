@@ -125,7 +125,7 @@ impl From<UpsertError> for ApiError {
 impl CrudEntity for Exchange {
     /// Keyed by MIC, not a rowid.
     type Key = String;
-    type Filter = crate::infra::http::NoFilter;
+    type Filter = NoFilter;
     const TABLE: &'static str = "exchanges";
     const COLUMNS: &'static str =
         "mic, name, country, currency, timezone, settlement_days, close_time";

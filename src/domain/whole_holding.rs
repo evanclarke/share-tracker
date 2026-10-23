@@ -42,6 +42,7 @@ use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use sqlx::Row;
+use sqlx::sqlite::SqliteRow;
 
 /// Which of the three whole-holding operations a group is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,7 +142,7 @@ pub fn closing_sell_predicate(alias: &str) -> String {
 /// Which whole-holding operation a row selected with [`closing_sell_columns`]
 /// belongs to, with the action id it hangs off — `None` when it is none of
 /// them (an ordinary Sell, or a transfer's transfer-out).
-pub fn kind_of(row: &sqlx::sqlite::SqliteRow) -> Result<Option<(Kind, i64)>, sqlx::Error> {
+pub fn kind_of(row: &SqliteRow) -> Result<Option<(Kind, i64)>, sqlx::Error> {
     for (column, kind) in CLOSING_SELL_COLUMNS {
         if let Some(action_id) = row.try_get::<Option<i64>, _>(column)? {
             return Ok(Some((kind, action_id)));
@@ -153,7 +154,7 @@ pub fn kind_of(row: &sqlx::sqlite::SqliteRow) -> Result<Option<(Kind, i64)>, sql
 /// Classify a closing-Sell row read with [`closing_sell_columns`]. A row the
 /// query's own predicate admitted always classifies; a `None` would mean the
 /// two fragments had drifted apart, which is a bug rather than a data state.
-fn executed_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Executed, sqlx::Error> {
+fn executed_from_row(row: &SqliteRow) -> Result<Executed, sqlx::Error> {
     let (kind, action_id) = kind_of(row)?.ok_or_else(|| {
         sqlx::Error::Decode("a closing Sell carries none of the whole-holding columns".into())
     })?;

@@ -53,9 +53,14 @@ use crate::entities::corporate_action::{
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
+use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::extract::{Json, Query};
+use crate::infra::fx::FxOverride;
+use crate::infra::fx::FxRates;
+use crate::infra::fx::RateMonth;
 use crate::infra::http::{self, ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -245,8 +250,8 @@ pub enum SellRightsError {
     /// (`ess_vest::VestError::MissingFxRate`). Mapped to 422.
     #[error("no ATO FX rate for {currency} in {month} and the request states none")]
     MissingFxRate {
-        currency: crate::infra::currency::CurrencyCode,
-        month: crate::infra::fx::RateMonth,
+        currency: CurrencyCode,
+        month: RateMonth,
     },
 }
 
@@ -540,20 +545,20 @@ async fn check_parcel_anchoring(
 async fn resolve_fx_rate(
     conn: &mut sqlx::SqliteConnection,
     stated: Option<Decimal>,
-    currency: &crate::infra::currency::CurrencyCode,
+    currency: &CurrencyCode,
     date: NaiveDate,
     converts_nothing: bool,
 ) -> Result<Decimal, SellRightsError> {
     if let Some(rate) = stated {
         return Ok(rate);
     }
-    let fx = crate::infra::fx::FxRates::load(&mut *conn).await?;
-    match fx.resolve_rate(currency, date, crate::infra::fx::FxOverride::None) {
+    let fx = FxRates::load(&mut *conn).await?;
+    match fx.resolve_rate(currency, date, FxOverride::None) {
         Ok(rate) => Ok(rate),
         Err(_) if converts_nothing => Ok(Decimal::ONE),
         Err(_) => Err(SellRightsError::MissingFxRate {
             currency: currency.clone(),
-            month: crate::infra::fx::RateMonth::of(date),
+            month: RateMonth::of(date),
         }),
     }
 }
@@ -761,7 +766,7 @@ pub(crate) async fn db_list(
         .eq("rs.rights_action_id", params.rights_action_id)
         .date_range("rs.date", params.from, params.to);
     qb.push(" ORDER BY rs.date, rs.id");
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let rows = qb.build().fetch_all(&mut *tx).await?;
     let mut sales = rows
         .iter()
@@ -836,7 +841,7 @@ async fn get_one(
     State(pool): State<SqlitePool>,
     Path(id): Path<RightsSaleId>,
 ) -> Result<Json<RightsSale>, ApiError> {
-    let mut tx = crate::infra::db::read_tx(&pool).await?;
+    let mut tx = db::read_tx(&pool).await?;
     let sale = db_get(&mut tx, id).await?;
     tx.commit().await?;
     sale.map(Json)
@@ -860,7 +865,11 @@ async fn delete_one(
 mod tests {
     use super::*;
     use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::rba_fx_rate;
     use crate::entities::{listing, rights_exercise, trade};
+    use crate::reports::open_parcels;
+    use crate::reports::realised_gains;
+    use crate::reports::tax_summary;
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 
@@ -975,9 +984,7 @@ mod tests {
         assert_eq!(sale.allocations[0].units, Decimal::from(250));
 
         // The holding is untouched: selling rights consumes no share parcel.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         assert_eq!(parcels[0].remaining_quantity, Decimal::from(1000));
     }
@@ -1005,9 +1012,7 @@ mod tests {
         premium.proceeds_per_right = Some("0.55".parse().unwrap());
         db_sell_rights(&pool, 10, &premium).await.unwrap();
 
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(gains.len(), 2);
         // The lapse: nothing realised either way.
         assert_eq!(gains[0].proceeds, Decimal::ZERO);
@@ -1021,9 +1026,7 @@ mod tests {
             "82.50".parse::<Decimal>().unwrap()
         );
         // ... and not a cent of it is income.
-        let summary = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let summary = tax_summary::db_tax_summary(&pool).await.unwrap();
         assert!(summary.is_empty(), "{summary:?}");
 
         // Both disposals consumed the entitlement: nothing is left to exercise.
@@ -1826,7 +1829,7 @@ mod tests {
         insert_usd_listing(&pool, 1).await;
         insert_usd_buy(&pool, 1, d(2024, 1, 16), "1000").await;
         insert_usd_rights_issue(&pool, 10, d(2024, 7, 1)).await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-07", dec("0.65"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-07", dec("0.65"))
             .await
             .unwrap();
 

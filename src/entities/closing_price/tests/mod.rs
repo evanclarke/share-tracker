@@ -21,8 +21,15 @@ mod unpriced;
 mod yahoo;
 
 use super::*;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::ActionKind;
+use crate::entities::corporate_action::CorporateAction;
+use crate::entities::listing_rename;
+use crate::entities::listing_rename::RenameBody;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use crate::test_support;
+use axum::body::Bytes;
 
 use crate::entities::exchange_holiday;
 
@@ -56,7 +63,7 @@ fn yahoo_quote(symbol: &str, price: &str, as_of: DateTime<Utc>) -> yfinance_rs::
 }
 
 async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str, mic: &str, currency: &str) {
-    crate::test_support::listing(id)
+    test_support::listing(id)
         .ticker(ticker)
         .name(ticker)
         .mic(mic)
@@ -67,7 +74,7 @@ async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str, mic: &str, cur
 }
 
 async fn insert_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-    crate::test_support::listing(id)
+    test_support::listing(id)
         .crypto()
         .ticker(ticker)
         .name(ticker)
@@ -76,7 +83,7 @@ async fn insert_crypto_listing(pool: &SqlitePool, id: i64, ticker: &str) {
 }
 
 async fn insert_buy(pool: &SqlitePool, id: i64, listing_id: ListingId, qty: &str) {
-    crate::test_support::buy(id, listing_id.0)
+    test_support::buy(id, listing_id.0)
         .date(ymd(2024, 1, 16))
         .qty(qty.parse().unwrap())
         .price(Decimal::from(10))
@@ -91,13 +98,13 @@ async fn sell_everything(
     listing_id: ListingId,
     qty: &str,
 ) {
-    crate::test_support::sell(sell_id.0, listing_id.0)
+    test_support::sell(sell_id.0, listing_id.0)
         .date(ymd(2024, 6, 3))
         .qty(qty.parse().unwrap())
         .price(Decimal::from(12))
         .insert(pool)
         .await;
-    crate::test_support::allocate(pool, sell_id.0, sell_id.0, buy_id.0, qty.parse().unwrap()).await;
+    test_support::allocate(pool, sell_id.0, sell_id.0, buy_id.0, qty.parse().unwrap()).await;
 }
 
 /// Stub provider: per-listing canned closes and latest quotes (keyed by
@@ -272,13 +279,13 @@ async fn insert_share_split(
     new: &str,
     old: &str,
 ) {
-    crate::entities::corporate_action::db_upsert(
+    corporate_action::db_upsert(
         pool,
-        &crate::entities::corporate_action::CorporateAction {
+        &CorporateAction {
             id: 900 + listing_id.0,
             listing_id,
             date,
-            kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+            kind: ActionKind::ShareSplit {
                 split_new_units: new.parse().unwrap(),
                 split_old_units: old.parse().unwrap(),
             },
@@ -297,10 +304,10 @@ async fn rename_listing(
     new_ticker: &str,
     new_mic: Option<&str>,
 ) {
-    crate::entities::listing_rename::db_rename(
+    listing_rename::db_rename(
         pool,
         listing_id,
-        &crate::entities::listing_rename::RenameBody {
+        &RenameBody {
             effective_date,
             ticker: new_ticker.to_owned(),
             exchange_mic: new_mic.map(str::to_owned),
@@ -335,7 +342,7 @@ fn asx_lookback_window() -> Vec<NaiveDate> {
 
 /// Store an ok row directly (as an earlier successful run would have).
 async fn seed_ok_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate) {
-    crate::test_support::closing_price(listing_id.0, date)
+    test_support::closing_price(listing_id.0, date)
         .source(PriceSource::Yahoo)
         .fetched_at("2026-06-01T00:00:00Z")
         .insert(pool)
@@ -344,7 +351,7 @@ async fn seed_ok_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate
 
 /// Store a hand-entered price directly, as `PUT /closing_prices/…` does.
 async fn seed_manual_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, price: &str) {
-    crate::test_support::closing_price(listing_id.0, date)
+    test_support::closing_price(listing_id.0, date)
         .price(price)
         .manual("asx.com.au closing report", "provider serves no candle")
         .insert(pool)
@@ -356,18 +363,14 @@ fn full_router(pool: SqlitePool, fetcher: StubFetcher) -> ApiClient {
     ApiClient::over(router().with_state(pool).layer(Extension(shared)))
 }
 
-async fn post_json(
-    app: &ApiClient,
-    uri: &str,
-    body: serde_json::Value,
-) -> (StatusCode, axum::body::Bytes) {
+async fn post_json(app: &ApiClient, uri: &str, body: serde_json::Value) -> (StatusCode, Bytes) {
     let resp = app.post(uri, &body).await;
     let status = resp.status;
     let bytes = resp.body;
     (status, bytes)
 }
 
-async fn delete_req(app: &ApiClient, uri: &str) -> (StatusCode, axum::body::Bytes) {
+async fn delete_req(app: &ApiClient, uri: &str) -> (StatusCode, Bytes) {
     let resp = app.delete(uri).await;
     let status = resp.status;
     let bytes = resp.body;

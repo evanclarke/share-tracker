@@ -28,10 +28,13 @@
 //!   content type and a download filename.
 //! - `DELETE /attachments/{id}` removes one attachment.
 
+use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::TradeId;
+use crate::infra::security_headers;
+use axum::extract::multipart::Field;
 use std::fmt::Write as _;
 
 use crate::infra::extract::{Json, Query};
@@ -177,7 +180,7 @@ const METADATA_COLS: &str = "id, trade_id, income_id, amma_statement_id, ess_sta
 
 impl CrudEntity for Attachment {
     type Key = i64;
-    type Filter = crate::infra::http::NoFilter;
+    type Filter = NoFilter;
     const TABLE: &'static str = "attachments";
     const COLUMNS: &'static str = METADATA_COLS;
     const NOUN: &'static str = "attachment";
@@ -448,9 +451,7 @@ async fn upload(
     Ok(Created(stored))
 }
 
-async fn read_owner_field(
-    field: axum::extract::multipart::Field<'_>,
-) -> Result<Option<i64>, ApiError> {
+async fn read_owner_field(field: Field<'_>) -> Result<Option<i64>, ApiError> {
     let text = field
         .text()
         .await
@@ -517,13 +518,10 @@ async fn download(
         // Framed by the app's own document pane, so same-origin framing is
         // allowed here where every other response refuses all framing (see
         // `infra::security_headers`, which leaves these two alone).
-        .header(
-            header::X_FRAME_OPTIONS,
-            crate::infra::security_headers::FRAME_SAME_ORIGIN,
-        )
+        .header(header::X_FRAME_OPTIONS, security_headers::FRAME_SAME_ORIGIN)
         .header(
             header::CONTENT_SECURITY_POLICY,
-            crate::infra::security_headers::FRAME_ANCESTORS_SELF,
+            security_headers::FRAME_ANCESTORS_SELF,
         )
         .body(Body::from(bytes))
         .map(Payload::from_response)

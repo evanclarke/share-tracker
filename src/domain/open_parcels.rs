@@ -31,8 +31,10 @@
 //! reference data. What they do share is [`db_units_sold`], the allocations
 //! read.
 
+use crate::domain::rollover;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use sqlx::sqlite::SqliteRow;
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -118,7 +120,7 @@ pub async fn db_units_sold(
     conn: &mut sqlx::SqliteConnection,
     as_of: Option<NaiveDate>,
 ) -> Result<HashMap<TradeId, Vec<UnitsConsumed>>, sqlx::Error> {
-    let no_provenance = crate::domain::rollover::no_provenance_sql("s");
+    let no_provenance = rollover::no_provenance_sql("s");
     let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT pa.purchase_trade_id, pa.quantity_allocated, s.date AS sale_date, \
                 s.settlement_date AS sale_settlement_date, ({no_provenance}) AS is_disposal \
@@ -190,8 +192,7 @@ pub async fn load(
     // Total AMIT cost-base reduction per parcel (statements for years ending
     // after `as_of` excluded — the adjustment arises at its statement's year
     // end).
-    let amit_events =
-        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, as_of).await?;
+    let amit_events = cost_base::db_cost_base_reduction_events(&mut *conn, as_of).await?;
     // Return-of-capital payments (CGT event G1) per listing.
     let roc_events = adjustments::db_return_of_capital_events(&mut *conn).await?;
     // Share splits/consolidations per listing (quantity re-basing).
@@ -299,7 +300,7 @@ pub async fn db_sales_by_parcel(
     Ok(sales)
 }
 
-fn sale_of(row: &sqlx::sqlite::SqliteRow) -> Result<UnitsAt, sqlx::Error> {
+fn sale_of(row: &SqliteRow) -> Result<UnitsAt, sqlx::Error> {
     Ok(UnitsAt::new(
         parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
         row.try_get("sale_date")?,
@@ -310,6 +311,8 @@ fn sale_of(row: &sqlx::sqlite::SqliteRow) -> Result<UnitsAt, sqlx::Error> {
 mod tests {
     use super::*;
     use crate::entities::corporate_action::{self, ActionKind, CorporateAction};
+    use crate::entities::rba_fx_rate;
+    use crate::infra::date;
     use crate::test_support::{self, allocate, dec, test_pool, ymd};
     use rust_decimal::Decimal;
     use sqlx::SqlitePool;
@@ -469,7 +472,7 @@ mod tests {
     #[tokio::test]
     async fn the_live_view_ignores_a_future_dated_corporate_action() {
         let pool = test_pool().await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         let future = today + chrono::Days::new(400);
         test_support::listing(1).insert(&pool).await;
         test_support::buy(1, 1)
@@ -521,7 +524,7 @@ mod tests {
     #[tokio::test]
     async fn the_live_view_ignores_a_future_dated_trade() {
         let pool = test_pool().await;
-        let future = crate::infra::date::today() + chrono::Days::new(30);
+        let future = date::today() + chrono::Days::new(30);
         test_support::listing(1).insert(&pool).await;
         test_support::buy(1, 1)
             .date(ymd(2023, 1, 10))
@@ -665,7 +668,7 @@ mod tests {
             .mic("XNYS")
             .insert(&pool)
             .await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", dec("0.50"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", dec("0.50"))
             .await
             .unwrap();
         test_support::buy(1, 1)
@@ -775,7 +778,7 @@ mod tests {
         use crate::reports::{open_parcels, parcel_optimiser, portfolio, unrealised_gains};
 
         let pool = test_pool().await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         let future = today + chrono::Days::new(400);
         test_support::listing(1).insert(&pool).await;
         test_support::buy(1, 1)

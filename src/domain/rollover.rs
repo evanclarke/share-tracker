@@ -24,11 +24,13 @@
 //! underneath — [`cost_base::adjusted_cost_base`] — which neither
 //! re-implements.
 
+use crate::domain::open_parcels;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -76,9 +78,7 @@ impl CostBaseInputs {
         // exactly as `domain::open_parcels::load` bounds its view of the same
         // events — so the carried cost base and the open-parcels reports can
         // never disagree about which statements have taken effect by a date.
-        let amit_events =
-            crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, Some(up_to))
-                .await?;
+        let amit_events = cost_base::db_cost_base_reduction_events(&mut *conn, Some(up_to)).await?;
         Ok(Self {
             splits,
             roc_events,
@@ -127,8 +127,7 @@ impl CostBaseInputs {
         .fetch_all(&mut *conn)
         .await?;
 
-        let qty_sold =
-            crate::domain::open_parcels::db_sales_by_parcel(&mut *conn, Some(listing_id)).await?;
+        let qty_sold = open_parcels::db_sales_by_parcel(&mut *conn, Some(listing_id)).await?;
 
         let mut open = Vec::with_capacity(parcel_rows.len());
         for parcel in parcel_rows {
@@ -290,7 +289,7 @@ pub async fn source_ancestors(
     conn: &mut sqlx::SqliteConnection,
     parcel_id: TradeId,
 ) -> Result<Vec<TradeId>, sqlx::Error> {
-    let mut seen = std::collections::HashSet::from([parcel_id]);
+    let mut seen = HashSet::from([parcel_id]);
     let mut frontier = vec![parcel_id];
     let mut found = Vec::new();
     for _ in 0..MAX_ROLLOVER_DEPTH {
@@ -336,7 +335,7 @@ pub async fn replacement_descendants(
     conn: &mut sqlx::SqliteConnection,
     parcel_id: TradeId,
 ) -> Result<Vec<TradeId>, sqlx::Error> {
-    let mut seen = std::collections::HashSet::from([parcel_id]);
+    let mut seen = HashSet::from([parcel_id]);
     let mut frontier = vec![parcel_id];
     let mut found = Vec::new();
     for _ in 0..MAX_ROLLOVER_DEPTH {

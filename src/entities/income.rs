@@ -1,7 +1,12 @@
+use crate::domain::franking_credit;
+use crate::domain::tax_year;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -485,8 +490,8 @@ pub struct IncomeListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for IncomeListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for IncomeListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("date_paid", self.from, self.to);
@@ -557,10 +562,10 @@ pub async fn db_assessable_cash_income(
     let mut assessable = Vec::with_capacity(rows.len());
     for row in &rows {
         let income = Income::from_row(row)?;
-        let amit_year = crate::domain::tax_year::amit_in_tax_year(
+        let amit_year = tax_year::amit_in_tax_year(
             row.try_get("listing_amit")?,
             row.try_get("listing_amit_from")?,
-            crate::domain::tax_year::tax_year_for(income.assessment_date()),
+            tax_year::tax_year_for(income.assessment_date()),
         );
         if !amit_year {
             assessable.push(income);
@@ -960,10 +965,10 @@ async fn write(
     // distributions, notional components and tax-deferred amounts included
     // (SCENARIOS F-23). `domain::tax_year::amit_in_tax_year` is the shared rule.
     let row_is_amit = listing_amit.is_some_and(|(amit, amit_from)| {
-        crate::domain::tax_year::amit_in_tax_year(
+        tax_year::amit_in_tax_year(
             amit,
             amit_from,
-            crate::domain::tax_year::tax_year_for(income.assessment_date()),
+            tax_year::tax_year_for(income.assessment_date()),
         )
     });
     if row_is_amit {
@@ -996,7 +1001,7 @@ async fn write(
                 income.franking_credits,
             ));
         }
-        if let Some(ceiling) = crate::domain::franking_credit::credit_above_ceiling(
+        if let Some(ceiling) = franking_credit::credit_above_ceiling(
             income.franked_amount,
             income.franking_credits,
             income.date_paid,
@@ -1028,7 +1033,7 @@ async fn write(
     //
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO income \
          (id, listing_id, date_paid, ex_date, franked_amount, unfranked_amount, \
           foreign_source_income, foreign_tax_paid, tfn_withholding_tax, franking_credits, \
@@ -1333,6 +1338,13 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::franking_credit;
+    use crate::entities::drp_enrolment;
+    use crate::entities::drp_enrolment::DrpEnrolment;
+    use crate::entities::drp_reinvestment;
+    use crate::entities::drp_reinvestment::ReinvestBody;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
     use rust_decimal::Decimal;
@@ -1777,7 +1789,7 @@ mod tests {
         insert_test_listing(&pool).await;
         // Built from the shared fixture rather than spelled out, so a new
         // column is added once, in the builder (CLAUDE.md).
-        let dist = crate::test_support::income(2, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap())
+        let dist = test_support::income(2, 1, NaiveDate::from_ymd_opt(2024, 6, 30).unwrap())
             .with(|i| {
                 i.unfranked_amount = Decimal::from(50);
                 i.foreign_source_income = Decimal::from(10);
@@ -1844,23 +1856,20 @@ mod tests {
     #[tokio::test]
     async fn a_reinvested_distribution_freezes_what_the_reinvestment_used() {
         let pool = test_pool().await;
-        crate::test_support::listing(1).insert(&pool).await;
-        crate::test_support::listing(2)
-            .ticker("XYZ")
-            .insert(&pool)
-            .await;
-        crate::entities::holding_account::db_upsert(
+        test_support::listing(1).insert(&pool).await;
+        test_support::listing(2).ticker("XYZ").insert(&pool).await;
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Broker".to_owned(),
             },
         )
         .await
         .unwrap();
-        crate::entities::drp_enrolment::db_upsert(
+        drp_enrolment::db_upsert(
             &pool,
-            &crate::entities::drp_enrolment::DrpEnrolment {
+            &DrpEnrolment {
                 id: 1,
                 listing_id: ListingId(1),
                 holding_account_id: HoldingAccountId(1),
@@ -1878,10 +1887,10 @@ mod tests {
             })
             .build();
         db_upsert(&pool, &original).await.unwrap();
-        crate::entities::drp_reinvestment::db_reinvest(
+        drp_reinvestment::db_reinvest(
             &pool,
             1,
-            &crate::entities::drp_reinvestment::ReinvestBody {
+            &ReinvestBody {
                 reinvestment_price: Decimal::from(7),
                 units: None,
                 fx_rate: None,
@@ -1949,9 +1958,7 @@ mod tests {
         edited.unfranked_amount = Decimal::from(200);
 
         // Undo the reinvestment and the same edit goes through.
-        crate::entities::drp_reinvestment::db_unreinvest(&pool, 1)
-            .await
-            .unwrap();
+        drp_reinvestment::db_unreinvest(&pool, 1).await.unwrap();
         db_upsert(&pool, &edited).await.unwrap();
         assert_eq!(
             db_get(&pool, 1).await.unwrap().unwrap().unfranked_amount,
@@ -3166,7 +3173,7 @@ mod tests {
         let (status, detail) = resp.status_and_body();
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
         assert_eq!(
-            crate::domain::franking_credit::credit_ceiling(
+            franking_credit::credit_ceiling(
                 "3000000000000000000000000000".parse().unwrap(),
                 ymd(2024, 3, 15)
             ),
@@ -3188,9 +3195,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

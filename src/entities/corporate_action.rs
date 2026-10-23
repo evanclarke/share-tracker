@@ -188,9 +188,17 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::adjustments::RolloverOrigin;
     use crate::domain::adjustments::SplitRatio;
+    use crate::domain::open_parcels;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::entities::sell::{AllocationInput, SellBody, SellError};
+    use crate::entities::transfer;
+    use crate::entities::transfer::TransferBody;
     use crate::entities::{listing, sell};
+    use crate::reports;
+    use crate::reports::realised_gains;
     use crate::test_support::{self, ApiClient, test_pool};
 
     /// Client over this module's own routes.
@@ -677,9 +685,7 @@ mod tests {
 
         async fn open_position(pool: &SqlitePool) -> (Decimal, Decimal) {
             let mut conn = pool.acquire().await.unwrap();
-            let parcels = crate::domain::open_parcels::load(&mut conn, None)
-                .await
-                .unwrap();
+            let parcels = open_parcels::load(&mut conn, None).await.unwrap();
             assert_eq!(parcels.len(), 1);
             (
                 parcels[0].remaining_as_of.quantity(),
@@ -1571,7 +1577,7 @@ mod tests {
                 .expect("same currency")
         };
 
-        let transfer = crate::domain::adjustments::RolloverOrigin {
+        let transfer = RolloverOrigin {
             on: operation,
             registered_from: acquired,
         };
@@ -1581,7 +1587,7 @@ mod tests {
         );
 
         // A scrip exchange's replacement: registered only from the operation.
-        let scrip = crate::domain::adjustments::RolloverOrigin {
+        let scrip = RolloverOrigin {
             on: operation,
             registered_from: operation,
         };
@@ -3126,7 +3132,7 @@ mod tests {
 
         // The parcel still carries the AMMA statement's reduction alone:
         // 1000 − 50, not the 900 the accepted double entry produced.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -3337,7 +3343,7 @@ mod tests {
         .await
         .unwrap();
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         let remaining = parcels[0].remaining_quantity;
@@ -3350,15 +3356,13 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            crate::reports::open_parcels::db_open_parcels(&pool, None)
+            reports::open_parcels::db_open_parcels(&pool, None)
                 .await
                 .unwrap()
                 .is_empty()
         );
         // The whole $1,000 cost base is in the disposal, undiminished.
-        let gains = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let gains = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(gains.len(), 1);
         assert_eq!(gains[0].cost_base.round_dp(6), "1000".parse().unwrap());
     }
@@ -3385,7 +3389,7 @@ mod tests {
             db_get(&pool, 1).await.unwrap().unwrap(),
             roc(1, ListingId(1), d(2024, 3, 1), "0.123456")
         );
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         // 3,333 × 0.123456 = 411.478848, to the last digit.
@@ -3749,9 +3753,9 @@ mod tests {
     async fn events_back_dated_over_a_rollover_are_refused_naming_it() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AAA").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Broker".to_owned(),
             },
@@ -3764,10 +3768,10 @@ mod tests {
             .price(Decimal::from(5))
             .insert(&pool)
             .await;
-        crate::entities::transfer::db_transfer(
+        transfer::db_transfer(
             &pool,
             1,
-            &crate::entities::transfer::TransferBody {
+            &TransferBody {
                 listing_id: ListingId(1),
                 date: d(2023, 8, 1),
                 from_account_id: HoldingAccountId(1),

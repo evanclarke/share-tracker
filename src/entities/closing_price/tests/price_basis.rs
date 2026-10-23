@@ -13,7 +13,11 @@
 //! the last pre-demerger trading day. Evan's LAC history is the live case.
 
 use super::*;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::ActionKind;
+use crate::entities::corporate_action::CorporateAction;
 use crate::infra::id::ListingId;
+use crate::test_support;
 /// The stored price for a listing, and the figure it was observed as.
 async fn stored(pool: &SqlitePool, date: NaiveDate) -> (String, String) {
     let row = db_get_one(pool, ListingId(1), date).await.unwrap().unwrap();
@@ -55,7 +59,7 @@ async fn db_a_price_fetched_after_a_split_is_stored_in_its_own_days_basis() {
 async fn db_a_price_observed_before_the_split_is_untouched_when_it_is_recorded() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
-    crate::test_support::closing_price(1, ymd(2026, 6, 5))
+    test_support::closing_price(1, ymd(2026, 6, 5))
         .price("1208.88")
         .fetched_at("2026-06-05T08:00:00Z")
         .insert(&pool)
@@ -124,13 +128,13 @@ async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
         .await
         .unwrap();
 
-    crate::entities::corporate_action::db_upsert(
+    corporate_action::db_upsert(
         &pool,
-        &crate::entities::corporate_action::CorporateAction {
+        &CorporateAction {
             id: 950,
             listing_id: ListingId(1),
             date: ymd(2026, 6, 10),
-            kind: crate::entities::corporate_action::ActionKind::BonusIssue {
+            kind: ActionKind::BonusIssue {
                 bonus_units: Decimal::ONE,
                 bonus_held_units: Decimal::ONE,
             },
@@ -237,9 +241,7 @@ async fn api_editing_or_deleting_the_split_re_derives_the_stored_prices() {
     );
 
     // …and deleting it altogether leaves the provider's figure standing.
-    crate::entities::corporate_action::db_delete(&pool, 901)
-        .await
-        .unwrap();
+    corporate_action::db_delete(&pool, 901).await.unwrap();
     assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "120.888");
 }
 
@@ -258,9 +260,7 @@ async fn db_deleting_the_last_split_puts_the_prices_back_to_the_observation() {
         .unwrap();
     assert_eq!(stored(&pool, ymd(2026, 6, 5)).await.0, "1208.88");
 
-    crate::entities::corporate_action::db_delete(&pool, 901)
-        .await
-        .unwrap();
+    corporate_action::db_delete(&pool, 901).await.unwrap();
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
         ("120.888".to_owned(), "120.888".to_owned()),
@@ -279,7 +279,7 @@ async fn db_the_rebase_job_repairs_prices_stored_before_the_rule_existed() {
     insert_share_split(&pool, ListingId(1), ymd(2026, 6, 10), "10", "1").await;
     // Stored the way a pre-0034 row was: the provider's post-split figure,
     // observed after the split, with nothing restated out of it.
-    crate::test_support::closing_price(1, ymd(2026, 6, 5))
+    test_support::closing_price(1, ymd(2026, 6, 5))
         .price("120.888")
         .fetched_at("2026-06-15T08:00:00Z")
         .insert(&pool)
@@ -306,13 +306,13 @@ async fn insert_demerger(
     date: NaiveDate,
     stated_close: Option<(NaiveDate, &str)>,
 ) {
-    crate::entities::corporate_action::db_upsert(
+    corporate_action::db_upsert(
         pool,
-        &crate::entities::corporate_action::CorporateAction {
+        &CorporateAction {
             id: 800 + listing_id.0,
             listing_id,
             date,
-            kind: crate::entities::corporate_action::ActionKind::Demerger {
+            kind: ActionKind::Demerger {
                 demerger_listing_id: ListingId(demerged_id),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::ONE,
@@ -395,14 +395,14 @@ async fn db_a_pre_demerger_price_observed_before_the_demerger_is_untouched() {
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
     insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
     // Observed the day it traded — before the demerger, so contemporaneous.
-    crate::test_support::closing_price(1, ymd(2023, 9, 29))
+    test_support::closing_price(1, ymd(2023, 9, 29))
         .price("24.58")
         .fetched_at("2023-09-29T21:00:00Z")
         .insert(&pool)
         .await;
     // …and the reference day, observed long after it, which is what the
     // factor is derived from.
-    crate::test_support::closing_price(1, ymd(2023, 10, 2))
+    test_support::closing_price(1, ymd(2023, 10, 2))
         .price("10.13")
         .fetched_at("2026-07-26T07:44:56Z")
         .insert(&pool)
@@ -573,9 +573,7 @@ async fn db_editing_or_removing_the_stated_close_re_derives_the_prices() {
     )
     .await;
     assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "24.9");
-    crate::entities::corporate_action::db_delete(&pool, 801)
-        .await
-        .unwrap();
+    corporate_action::db_delete(&pool, 801).await.unwrap();
     assert_eq!(stored(&pool, ymd(2023, 10, 2)).await.0, "10.13");
 }
 
@@ -591,7 +589,7 @@ async fn db_the_rebase_job_repairs_prices_a_demerger_restated() {
     // Stored the way the live rows are: the provider's adjusted figure,
     // observed years after the demerger, with nothing taken out of it.
     for (date, price) in [(ymd(2023, 9, 29), "10.00"), (ymd(2023, 10, 2), "10.13")] {
-        crate::test_support::closing_price(1, date)
+        test_support::closing_price(1, date)
             .price(price)
             .fetched_at("2026-07-26T07:44:56Z")
             .insert(&pool)
@@ -632,13 +630,13 @@ async fn api_a_manual_pre_demerger_price_is_never_rebased_by_a_stated_close() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "LAC", "XNYS", "USD").await;
     insert_listing(&pool, 2, "LAR", "XNYS", "USD").await;
-    crate::test_support::closing_price(1, ymd(2023, 9, 29))
+    test_support::closing_price(1, ymd(2023, 9, 29))
         .price("24.58")
         .fetched_at("2026-07-26T07:44:56Z")
         .manual("nyse.com", "provider adjusts the pre-demerger series")
         .insert(&pool)
         .await;
-    crate::test_support::closing_price(1, ymd(2023, 10, 2))
+    test_support::closing_price(1, ymd(2023, 10, 2))
         .price("10.13")
         .fetched_at("2026-07-26T07:44:56Z")
         .insert(&pool)

@@ -2,10 +2,11 @@
 
 use super::*;
 use crate::infra::id::ListingId;
+use crate::test_support;
 
 /// Store an errored row directly (as an earlier failed run would have).
 async fn seed_errored_price(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, msg: &str) {
-    crate::test_support::closing_price(listing_id.0, date)
+    test_support::closing_price(listing_id.0, date)
         .source(PriceSource::Yahoo)
         .fetched_at("2026-06-03T08:00:00Z")
         .errored(msg)

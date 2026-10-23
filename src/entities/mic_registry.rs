@@ -84,7 +84,7 @@ pub struct ImportSummary {
 impl CrudEntity for MicEntry {
     /// Keyed by MIC, not a rowid.
     type Key = String;
-    type Filter = crate::infra::http::NoFilter;
+    type Filter = NoFilter;
     const TABLE: &'static str = "mic_registry";
     const COLUMNS: &'static str =
         "mic, operating_mic, name, country_code, city, status, expiry_date";
@@ -323,8 +323,10 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
+    use tokio::time;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -562,7 +564,7 @@ mod tests {
     /// variant's own `#[error]` wording and carries the transport cause.
     #[tokio::test]
     async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
-        let url = crate::test_support::unreachable_url("ISO10383_MIC.csv");
+        let url = test_support::unreachable_url("ISO10383_MIC.csv");
         let error = fetch(&LiveFeedFetcher, &url)
             .await
             .expect_err("nothing is listening");
@@ -596,7 +598,7 @@ mod tests {
         use crate::infra::fetch::test_support::StalledFeedFetcher;
 
         let pool = test_pool().await;
-        tokio::time::pause();
+        time::pause();
         let app = ApiClient::over(router_with(StalledFeedFetcher::shared()).with_state(pool));
 
         let resp = app.post_empty("/mic_registry/import").await;

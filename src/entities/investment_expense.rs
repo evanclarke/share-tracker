@@ -17,9 +17,12 @@
 //! month of `date_incurred` (failing loudly when no rate exists).
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -152,8 +155,8 @@ pub struct InvestmentExpenseListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for InvestmentExpenseListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for InvestmentExpenseListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("date_incurred", self.from, self.to);
@@ -319,7 +322,7 @@ async fn write(
     check_apportionment(e)?;
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO investment_expenses \
          (id, date_incurred, expense_type, amount, gross_amount, deductible_percentage, \
           currency, description, listing_id, holding_account_id) \
@@ -1099,10 +1102,10 @@ mod tests {
             insert_listing(&pool, id).await;
         }
         for (id, listing, account, date) in [
-            (1, Some(1), Some(1), crate::test_support::ymd(2024, 3, 15)),
-            (2, Some(1), Some(1), crate::test_support::ymd(2024, 4, 15)),
-            (3, Some(2), None, crate::test_support::ymd(2025, 1, 10)),
-            (4, Some(2), None, crate::test_support::ymd(2025, 2, 10)),
+            (1, Some(1), Some(1), test_support::ymd(2024, 3, 15)),
+            (2, Some(1), Some(1), test_support::ymd(2024, 4, 15)),
+            (3, Some(2), None, test_support::ymd(2025, 1, 10)),
+            (4, Some(2), None, test_support::ymd(2025, 2, 10)),
         ] {
             let mut row = sample(id);
             row.listing_id = listing.map(ListingId);

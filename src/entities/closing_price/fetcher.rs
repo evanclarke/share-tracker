@@ -13,6 +13,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     future::Future,
@@ -217,13 +218,13 @@ pub type SharedFetcher = Arc<dyn PriceFetcher>;
 /// by the TTL, and the reason that window is a minute rather than an hour.
 pub struct CachingFetcher {
     inner: SharedFetcher,
-    ttl: std::time::Duration,
+    ttl: Duration,
     /// listing id → when it was fetched, and what came back.
     cached: Mutex<HashMap<ListingId, (Instant, LatestQuote)>>,
 }
 
 impl CachingFetcher {
-    pub fn new(inner: SharedFetcher, ttl: std::time::Duration) -> Self {
+    pub fn new(inner: SharedFetcher, ttl: Duration) -> Self {
         Self {
             inner,
             ttl,

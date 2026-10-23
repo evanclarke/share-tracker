@@ -1,6 +1,8 @@
 //! On-demand live valuation: latest quote per listing, converted to AUD.
 
 use super::*;
+use crate::entities::closing_price::test_support::QuoteStub;
+use crate::infra::currency::Aud;
 use crate::infra::id::ListingId;
 
 #[tokio::test]
@@ -171,7 +173,7 @@ async fn the_default_batch_is_the_per_market_loop_answered_positionally() {
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     insert_listing(&pool, 2, "WBC", "XASX", "AUD").await;
     let as_of = utc(2026, 6, 5, 6, 30);
-    let fetcher = test_support::QuoteStub::default().with_quote(2, "30", "AUD", as_of);
+    let fetcher = QuoteStub::default().with_quote(2, "30", "AUD", as_of);
     let markets = [
         load_market(&pool, ListingId(1)).await.unwrap().unwrap(),
         load_market(&pool, ListingId(2)).await.unwrap().unwrap(),
@@ -245,10 +247,7 @@ async fn resolve_live_prices_skips_overridden_and_respects_the_flag() {
     assert!(off.is_empty());
 
     // live = true, listing 1 overridden → only listing 2 is fetched.
-    let overrides = HashMap::from([(
-        ListingId(1),
-        crate::infra::currency::Aud::stated("99".parse::<Decimal>().unwrap()),
-    )]);
+    let overrides = HashMap::from([(ListingId(1), Aud::stated("99".parse::<Decimal>().unwrap()))]);
     let on = resolve_live_prices(
         &pool,
         Some(&fetcher),

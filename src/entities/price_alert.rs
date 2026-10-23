@@ -46,6 +46,7 @@
 
 use crate::entities::closing_price::{db_held_listing_ids_on, db_price_basis_events};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, row_dec};
 use crate::infra::email::{self, Document, Notifier, Section, Table};
@@ -56,6 +57,7 @@ use crate::infra::scheduler::JobOutcome;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
+use std::cmp::Reverse;
 
 /// One recorded alert — a row of `price_alerts`, and exactly what the email
 /// said about that listing.
@@ -179,7 +181,7 @@ pub async fn db_already_alerted(
     listing_id: ListingId,
     price_date: NaiveDate,
 ) -> Result<bool, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let alerted = db_already_alerted_on(&mut tx, listing_id, price_date).await?;
     tx.commit().await?;
     Ok(alerted)
@@ -242,7 +244,7 @@ pub async fn scan(
     as_of: NaiveDate,
 ) -> Result<Scan, sqlx::Error> {
     let mut scan = Scan::default();
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let listing_ids = db_held_listing_ids_on(&mut tx, Some(as_of)).await?;
 
     for listing_id in listing_ids {
@@ -302,8 +304,7 @@ pub async fn scan(
 
     // Biggest move first, by size rather than direction: an 11% fall leads an
     // 6% rise, which is the order the reader wants to scan.
-    scan.movers
-        .sort_by_key(|m| std::cmp::Reverse(m.change_pct.abs()));
+    scan.movers.sort_by_key(|m| Reverse(m.change_pct.abs()));
     Ok(scan)
 }
 
@@ -420,9 +421,17 @@ fn note(skipped: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::parcel_allocation;
+    use crate::entities::parcel_allocation::ParcelAllocation;
     use crate::infra::email::test_support::Outbox;
+    use crate::test_support;
     use crate::test_support::{dec, test_pool, ymd};
     use sqlx::SqlitePool;
+    use std::time::Duration;
+    use std::time::Instant;
 
     fn now_on(date: NaiveDate) -> DateTime<Utc> {
         date.and_hms_opt(6, 0, 0).unwrap().and_utc()
@@ -432,12 +441,12 @@ mod tests {
     /// every test below uses (2026-03-02 to 03-06) are that week's Monday to
     /// Friday, so nothing here lands on a weekend or a seeded holiday.
     async fn held_listing(pool: &SqlitePool, id: i64, ticker: &str) {
-        crate::test_support::listing(id)
+        test_support::listing(id)
             .ticker(ticker)
             .name(&format!("{ticker} Holdings"))
             .insert(pool)
             .await;
-        crate::test_support::buy(id * 100, id)
+        test_support::buy(id * 100, id)
             .date(ymd(2026, 1, 5))
             .qty(dec("10"))
             .insert(pool)
@@ -445,7 +454,7 @@ mod tests {
     }
 
     async fn close(pool: &SqlitePool, listing_id: ListingId, date: NaiveDate, price: &str) {
-        crate::test_support::closing_price(listing_id.0, date)
+        test_support::closing_price(listing_id.0, date)
             .price(price)
             .insert(pool)
             .await;
@@ -558,13 +567,13 @@ mod tests {
         close(&pool, ListingId(1), ymd(2026, 3, 2), "100").await;
         // A 1-for-2 consolidation between the two closes: the stored prices are
         // in different units, so the apparent 50% fall is a change of unit.
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 1,
                 listing_id: ListingId(1),
                 date: ymd(2026, 3, 3),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: dec("1"),
                     split_old_units: dec("2"),
                 },
@@ -609,16 +618,16 @@ mod tests {
     async fn a_listing_no_longer_held_is_not_alerted() {
         let pool = test_pool().await;
         held_listing(&pool, 1, "AAA").await;
-        crate::test_support::sell(700, 1)
+        test_support::sell(700, 1)
             .date(ymd(2026, 2, 2))
             .qty(dec("10"))
             .insert(&pool)
             .await;
         // The holding is what the *allocations* say, not what a Sell row's
         // quantity says (`HeldTimeline`), so the sale has to consume the parcel.
-        crate::entities::parcel_allocation::db_upsert(
+        parcel_allocation::db_upsert(
             &pool,
-            &crate::entities::parcel_allocation::ParcelAllocation {
+            &ParcelAllocation {
                 id: 1,
                 sale_trade_id: TradeId(700),
                 purchase_trade_id: TradeId(100),
@@ -687,7 +696,7 @@ mod tests {
 
         const LISTINGS: i64 = 20;
         let dir = tempfile::tempdir().unwrap();
-        let pool = crate::test_support::race_pool(&dir).await;
+        let pool = test_support::race_pool(&dir).await;
         for id in 1..=LISTINGS {
             held_listing(&pool, id, &format!("L{id:02}")).await;
             close(&pool, ListingId(id), ymd(2026, 3, 2), "100").await;
@@ -751,9 +760,9 @@ mod tests {
                 // A deadline as well as the flag: if the writer panics the flag
                 // is never set, and this must end so the join below surfaces
                 // that panic rather than hang the suite.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let deadline = Instant::now() + Duration::from_secs(30);
                 let mut reads = 0u32;
-                while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
                     let scan = scan(&pool, dec("5"), ymd(2026, 3, 3))
                         .await
                         .expect("the scan reads");

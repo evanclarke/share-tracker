@@ -1,7 +1,11 @@
 //! Deleting a stored row, and the audit trail it leaves.
 
 use super::*;
+use crate::infra::db;
 use crate::infra::id::ListingId;
+use crate::reports::health;
+use crate::reports::row_history;
+use crate::test_support;
 
 /// An errored row for a day that can never have a price (here: before the
 /// security's first trading day) is deletable, which is the only way to
@@ -29,7 +33,7 @@ async fn api_delete_removes_an_errored_row() {
             .is_none()
     );
     // The health report's standing alarm is cleared with it.
-    let health = crate::reports::health::db_health(&pool, ymd(2026, 6, 3), Utc::now())
+    let health = health::db_health(&pool, ymd(2026, 6, 3), Utc::now())
         .await
         .unwrap();
     assert!(health.errored_prices.is_empty());
@@ -77,7 +81,7 @@ async fn discarding_an_errored_row_is_recorded_in_the_audit_trail() {
     let (status, _) = delete_req(&app, "/closing_prices/1/2026-06-02").await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let history = crate::reports::row_history::db_row_history(&pool, "closing_prices", row.id)
+    let history = row_history::db_row_history(&pool, "closing_prices", row.id)
         .await
         .unwrap();
     assert_eq!(history.len(), 1);
@@ -120,7 +124,7 @@ async fn api_delete_unknown_row_is_404() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
     let dir = tempfile::tempdir().unwrap();
-    let (pool, busy) = crate::test_support::race_pool_with_busy_probe(&dir).await;
+    let (pool, busy) = test_support::race_pool_with_busy_probe(&dir).await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     insert_buy(&pool, 1, ListingId(1), "100").await;
     store_errored(&pool, ymd(2026, 6, 2)).await;
@@ -129,8 +133,8 @@ async fn a_delete_cannot_race_a_concurrent_manual_price_write() {
     // The concurrent manual write, in flight: an ok price for the very
     // (listing, date) the delete is about, stored on a transaction left
     // uncommitted so a pool reader still sees the errored row.
-    let mut tx = crate::infra::db::write_tx(&pool).await.unwrap();
-    let manual = crate::test_support::closing_price(1, ymd(2026, 6, 2))
+    let mut tx = db::write_tx(&pool).await.unwrap();
+    let manual = test_support::closing_price(1, ymd(2026, 6, 2))
         .price("62.48")
         .manual("asx.com.au closing report", "concurrent manual entry")
         .build();

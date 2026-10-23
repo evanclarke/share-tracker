@@ -52,7 +52,12 @@
 //! separate capital returns, and registry cash-in-lieu of fractional
 //! entitlements (the demerge keeps exact fractional unit counts).
 
+use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::holding_account;
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
@@ -115,7 +120,7 @@ pub enum DemergeError {
     /// operation's closing Sell included. Wording and recovery in
     /// `domain::whole_holding`. Mapped to 422.
     #[error("the demerged parcels are dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The entitlement ratio applied to the holding produces a demerged
     /// quantity past `Decimal`'s range — a 1000-for-1 demerger of 1e27 units
     /// asks for 1e30 demerged units. There is no lesser number of units to
@@ -125,7 +130,7 @@ pub enum DemergeError {
     /// panic, which the panic layer answered as a logged `500` with an empty
     /// body). Mapped to 422.
     #[error("the demerged quantity is beyond the representable range: {0}")]
-    UnrepresentableDemergedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableDemergedQuantity(#[source] UnrepresentableQuantity),
     /// The **demerged listing's** own recorded splits and bonus issues re-base
     /// a demerged-entity parcel past what a `Decimal` can hold — and the
     /// entitlement ratio can be entirely ordinary while they do. A 1-for-1
@@ -142,7 +147,7 @@ pub enum DemergeError {
     /// came from at least as far, and that parcel is already bounded. Mapped
     /// to 422.
     #[error("the demerged listing re-bases a quantity beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
     /// The Sell-side invariants failed — defensive as to the allocations,
     /// which the demerge constructs to satisfy them; the reachable case is a
     /// demerger dated after today (SCENARIOS S-10), which the 422 names.
@@ -214,13 +219,8 @@ async fn execute(
     // behind an operation that consumed the whole holding and could never be
     // consumed by it (SCENARIOS V-d). Checked before anything is written, so
     // this demerger's own rows cannot be mistaken for the offender.
-    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
-        &mut tx,
-        demerger_listing_id,
-        action.date,
-        None,
-    )
-    .await?
+    if let Some(back_dated) =
+        whole_holding::db_back_dated_parcel(&mut tx, demerger_listing_id, action.date, None).await?
     {
         return Err(DemergeError::BackDatedOverWholeHolding(back_dated));
     }
@@ -258,7 +258,7 @@ async fn execute(
             // Checked rather than computed: an entitlement ratio greater than
             // one over a very large holding produces a demerged quantity past
             // `Decimal`'s ceiling, and there is no lesser count to write.
-            demerged_quantity: crate::domain::cost_base::checked_rebased_quantity(
+            demerged_quantity: cost_base::checked_rebased_quantity(
                 ("units held", p.at_date_units.quantity()),
                 ("demerger_new_units", new_units),
                 ("demerger_held_units", held_units),
@@ -291,7 +291,7 @@ async fn execute(
     let sell_body = rollover::closing_sell_body(
         action.date,
         action.listing_id,
-        crate::entities::holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
+        holding_account::DEFAULT_HOLDING_ACCOUNT_ID,
         Decimal::ZERO,
         listing_currency,
         Decimal::ONE,
@@ -520,6 +520,8 @@ mod tests {
     use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
     use crate::entities::{corporate_action::CorporateAction, listing};
+    use crate::reports::open_parcels;
+    use crate::reports::realised_gains;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -972,9 +974,7 @@ mod tests {
         assert_eq!(dm.head_replacements[0].brokerage, dec("5400"));
         assert_eq!(dm.demerged_replacements[0].brokerage, dec("600"));
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert!(
             parcels.iter().all(|p| p.acquisition_date == d(2023, 5, 10)),
             "{parcels:?}"
@@ -1103,9 +1103,7 @@ mod tests {
         assert_eq!(dm.head_replacements[0].brokerage, dec("1200"));
         assert_eq!(dm.demerged_replacements[0].brokerage, dec("300"));
 
-        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let open = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         let head = open
             .iter()
             .find(|p| p.listing_id == 1)
@@ -1202,9 +1200,7 @@ mod tests {
         )
         .await;
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         // Only the sale — the demerge's own closing Sell is excluded.
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
@@ -1280,9 +1276,7 @@ mod tests {
         )
         .await;
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
         // The whole $300 carried cost base, spread over the split units —
@@ -1535,7 +1529,7 @@ mod tests {
 
         // A pre-demerger close the provider served afterwards, so it carries
         // the spin-off adjustment.
-        crate::test_support::closing_price(1, d(2024, 6, 28))
+        test_support::closing_price(1, d(2024, 6, 28))
             .price("10.13")
             .fetched_at("2026-07-26T07:44:56Z")
             .insert(&pool)

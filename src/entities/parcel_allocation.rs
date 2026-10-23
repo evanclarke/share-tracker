@@ -1,6 +1,8 @@
 use crate::infra::decimal::Money;
 #[cfg(test)]
 use crate::infra::decimal::parse_dec;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, CrudEntity};
 #[cfg(test)]
 use crate::infra::id::ListingId;
@@ -33,8 +35,8 @@ pub struct ParcelAllocationListQuery {
     pub purchase_trade_id: Option<TradeId>,
 }
 
-impl crate::infra::http::CrudListFilter for ParcelAllocationListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for ParcelAllocationListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("sale_trade_id", self.sale_trade_id);
         clauses.eq("purchase_trade_id", self.purchase_trade_id);
     }

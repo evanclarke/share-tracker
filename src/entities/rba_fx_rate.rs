@@ -1,9 +1,12 @@
 use crate::infra::currency::CurrencyCode;
+use crate::infra::decimal;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
 use crate::infra::http::NoFilter;
 use crate::infra::http::{self, ApiError, CrudEntity};
 use crate::infra::respond::NoContent;
+use crate::reports::snapshot;
+use crate::reports::snapshot::RegenerateSummary;
 use axum::extract::{Extension, Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -82,7 +85,7 @@ pub struct ImportOutcome {
     #[serde(flatten)]
     pub summary: ImportSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot_true_up: Option<crate::reports::snapshot::RegenerateSummary>,
+    pub snapshot_true_up: Option<RegenerateSummary>,
 }
 
 /// After an import added new (currency, month) rows, regenerate the stored
@@ -93,12 +96,11 @@ pub struct ImportOutcome {
 pub async fn true_up_provisional_snapshots(
     pool: &SqlitePool,
     summary: &ImportSummary,
-) -> Result<Option<crate::reports::snapshot::RegenerateSummary>, sqlx::Error> {
+) -> Result<Option<RegenerateSummary>, sqlx::Error> {
     if summary.inserted == 0 {
         return Ok(None);
     }
-    let true_up =
-        crate::reports::snapshot::regenerate_provisional(pool, chrono::Utc::now()).await?;
+    let true_up = snapshot::regenerate_provisional(pool, chrono::Utc::now()).await?;
     tracing::info!(
         regenerated = true_up.regenerated.len(),
         blocked = true_up.blocked.len(),
@@ -109,7 +111,7 @@ pub async fn true_up_provisional_snapshots(
 
 impl CrudEntity for RbaFxRate {
     type Key = i64;
-    type Filter = crate::infra::http::NoFilter;
+    type Filter = NoFilter;
     const TABLE: &'static str = "rba_fx_rates";
     const COLUMNS: &'static str = "id, currency, month, rate";
     const ORDER_BY: &'static str = "currency, month";
@@ -261,7 +263,7 @@ pub async fn db_import_rate(
             .bind(month)
             .fetch_one(pool)
             .await?;
-    let stored_rate = crate::infra::decimal::parse_dec("rate", &stored.1)?;
+    let stored_rate = decimal::parse_dec("rate", &stored.1)?;
     if stored_rate == rate {
         return Ok(ImportOutcomeRow::Skipped);
     }
@@ -474,8 +476,12 @@ impl From<ImportError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::listing::SecurityType;
+    use crate::reports::snapshot;
+    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
+    use tokio::time;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -851,15 +857,15 @@ mod tests {
         let june4 = chrono::NaiveDate::from_ymd_opt(2026, 6, 4).unwrap();
         // A USD holding valued for 2026-06-04 while only May's rate exists:
         // the snapshot generates provisional.
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .ticker("ICE")
             .name("ICE")
             .mic("XNYS")
-            .security_type(crate::entities::listing::SecurityType::Share)
+            .security_type(SecurityType::Share)
             .currency("USD")
             .insert(&pool)
             .await;
-        crate::test_support::buy(1, 1)
+        test_support::buy(1, 1)
             .date(chrono::NaiveDate::from_ymd_opt(2024, 1, 16).unwrap())
             .settlement(chrono::NaiveDate::from_ymd_opt(2024, 1, 17).unwrap())
             .qty("10".parse().unwrap())
@@ -873,16 +879,14 @@ mod tests {
         db_import_rate(&pool, "USD", "2026-05", "2".parse().unwrap())
             .await
             .unwrap();
-        crate::test_support::closing_price(1, june4)
+        test_support::closing_price(1, june4)
             .price("141.50")
             .insert(&pool)
             .await;
-        crate::reports::snapshot::generate(&pool, june4, chrono::Utc::now())
+        snapshot::generate(&pool, june4, chrono::Utc::now())
             .await
             .unwrap();
-        let metas = crate::reports::snapshot::db_list(&pool, None, None, None)
-            .await
-            .unwrap();
+        let metas = snapshot::db_list(&pool, None, None, None).await.unwrap();
         assert!(metas.iter().all(|m| m.provisional), "setup: provisional");
 
         // The import lands June's real rate; the response reports the true-up
@@ -897,9 +901,7 @@ mod tests {
             outcome["snapshot_true_up"]["regenerated"],
             serde_json::json!(["2026-06-04"])
         );
-        let metas = crate::reports::snapshot::db_list(&pool, None, None, None)
-            .await
-            .unwrap();
+        let metas = snapshot::db_list(&pool, None, None, None).await.unwrap();
         assert!(
             metas.iter().all(|m| !m.provisional),
             "finalised by the true-up"
@@ -933,7 +935,7 @@ mod tests {
     /// never the derived `Debug` form (`Fetch("…")`), which is neither.
     #[tokio::test]
     async fn an_unreachable_feed_reports_the_feed_and_the_reason() {
-        let url = crate::test_support::unreachable_url("f11-data.csv");
+        let url = test_support::unreachable_url("f11-data.csv");
         let error = fetch(&LiveFeedFetcher, &url)
             .await
             .expect_err("nothing is listening");
@@ -968,7 +970,7 @@ mod tests {
         use crate::infra::fetch::test_support::StalledFeedFetcher;
 
         let pool = test_pool().await;
-        tokio::time::pause();
+        time::pause();
         let app = ApiClient::over(router_with(StalledFeedFetcher::shared()).with_state(pool));
 
         let resp = app.post_empty("/rba_fx_rates/import").await;

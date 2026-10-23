@@ -1,6 +1,9 @@
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::ListingId;
 use crate::infra::respond::Created;
@@ -8,6 +11,7 @@ use axum::extract::{Path, State};
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 // Variants are serialized verbatim to JSON and persisted to the TEXT
@@ -376,8 +380,8 @@ pub struct ListingListQuery {
     pub security_type: Option<SecurityType>,
 }
 
-impl crate::infra::http::CrudListFilter for ListingListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for ListingListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("exchange_mic", self.exchange_mic.clone());
         clauses.eq("security_type", self.security_type);
     }
@@ -394,9 +398,7 @@ impl CrudEntity for Listing {
 }
 
 /// Every listing's ticker by id — the label the reports put beside a listing.
-pub async fn db_tickers<'e, X>(
-    executor: X,
-) -> Result<std::collections::HashMap<ListingId, String>, sqlx::Error>
+pub async fn db_tickers<'e, X>(executor: X) -> Result<HashMap<ListingId, String>, sqlx::Error>
 where
     X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
@@ -622,7 +624,7 @@ async fn write(
     }
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO listings \
          (id, exchange_mic, ticker, name, isin, security_type, currency, amit, amit_from, \
           unpriced_from, unpriced_before, preference, price_symbol) \
@@ -746,6 +748,7 @@ async fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
     use axum::http::StatusCode;
 
     use crate::test_support::{ApiClient, test_pool, ymd};
@@ -756,7 +759,7 @@ mod tests {
     }
 
     fn xtest() -> Listing {
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .ticker("VAS")
             .name("Vanguard Australian Shares ETF")
             .amit(true)
@@ -766,7 +769,7 @@ mod tests {
 
     /// An exchange-less Crypto listing: BTC is a seeded digital-token code.
     fn crypto() -> Listing {
-        crate::test_support::listing(2)
+        test_support::listing(2)
             .crypto()
             .ticker("BTC")
             .name("Bitcoin")
@@ -830,7 +833,7 @@ mod tests {
     async fn db_amit_from_must_be_a_1_july_date_on_an_amit_listing() {
         let pool = test_pool().await;
         let with_from = |from: Option<NaiveDate>, amit: bool| {
-            crate::test_support::listing(1)
+            test_support::listing(1)
                 .ticker("VAS")
                 .amit(amit)
                 .with(|l| l.amit_from = from)
@@ -872,7 +875,7 @@ mod tests {
     async fn db_unpriced_from_needs_an_earlier_close_and_no_later_fetched_one() {
         let pool = test_pool().await;
         let marked = |from: Option<NaiveDate>| {
-            crate::test_support::listing(1)
+            test_support::listing(1)
                 .ticker("ATVI")
                 .with(|l| l.unpriced_from = from)
                 .build()
@@ -889,7 +892,7 @@ mod tests {
         );
 
         db_upsert(&pool, &marked(None)).await.unwrap();
-        crate::test_support::closing_price(1, ymd(2023, 10, 12))
+        test_support::closing_price(1, ymd(2023, 10, 12))
             .price("94.42")
             .insert(&pool)
             .await;
@@ -906,7 +909,7 @@ mod tests {
         );
 
         // A price the provider served on or after the date contradicts it.
-        crate::test_support::closing_price(1, ymd(2023, 10, 16))
+        test_support::closing_price(1, ymd(2023, 10, 16))
             .price("94.43")
             .insert(&pool)
             .await;
@@ -929,21 +932,18 @@ mod tests {
     #[tokio::test]
     async fn db_a_manual_price_after_unpriced_from_is_allowed() {
         let pool = test_pool().await;
-        crate::test_support::listing(1)
-            .ticker("ATVI")
-            .insert(&pool)
-            .await;
-        crate::test_support::closing_price(1, ymd(2023, 10, 12))
+        test_support::listing(1).ticker("ATVI").insert(&pool).await;
+        test_support::closing_price(1, ymd(2023, 10, 12))
             .price("94.42")
             .insert(&pool)
             .await;
-        crate::test_support::closing_price(1, ymd(2023, 10, 16))
+        test_support::closing_price(1, ymd(2023, 10, 16))
             .price("95.00")
             .manual("administrator statement", "suspended, no provider candle")
             .insert(&pool)
             .await;
 
-        let listing = crate::test_support::listing(1)
+        let listing = test_support::listing(1)
             .ticker("ATVI")
             .unpriced_from(ymd(2023, 10, 13))
             .build();
@@ -980,18 +980,18 @@ mod tests {
             "{text}"
         );
 
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .ticker("ATVI")
             .mic("XNYS")
             .currency("USD")
             .security_type(SecurityType::Share)
             .insert(&pool)
             .await;
-        crate::test_support::closing_price(1, ymd(2023, 10, 12))
+        test_support::closing_price(1, ymd(2023, 10, 12))
             .price("94.42")
             .insert(&pool)
             .await;
-        crate::test_support::closing_price(1, ymd(2023, 10, 16))
+        test_support::closing_price(1, ymd(2023, 10, 16))
             .price("94.43")
             .insert(&pool)
             .await;
@@ -1015,21 +1015,18 @@ mod tests {
     #[tokio::test]
     async fn db_unpriced_before_is_accepted_over_prices_already_stored_before_it() {
         let pool = test_pool().await;
-        crate::test_support::listing(1)
-            .ticker("LAC")
-            .insert(&pool)
-            .await;
-        crate::test_support::closing_price(1, ymd(2022, 9, 19))
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::closing_price(1, ymd(2022, 9, 19))
             .price("10.13")
             .manual("listing 8's stored close", "copied to unblock the date")
             .insert(&pool)
             .await;
-        crate::test_support::closing_price(1, ymd(2023, 9, 29))
+        test_support::closing_price(1, ymd(2023, 9, 29))
             .price("11.02")
             .insert(&pool)
             .await;
 
-        let marked = crate::test_support::listing(1)
+        let marked = test_support::listing(1)
             .ticker("LAC")
             .unpriced_before(ymd(2023, 10, 2))
             .build();
@@ -1045,7 +1042,7 @@ mod tests {
 
         // Nor is a stored price *required* before it: nothing is carried, so
         // nothing needs to exist (the inverse of `unpriced_from`'s rule).
-        let bare = crate::test_support::listing(2)
+        let bare = test_support::listing(2)
             .ticker("NEW")
             .unpriced_before(ymd(2023, 10, 2))
             .build();
@@ -1061,22 +1058,19 @@ mod tests {
     #[tokio::test]
     async fn db_the_two_unpriced_markers_must_leave_a_served_span() {
         let pool = test_pool().await;
-        crate::test_support::listing(1)
-            .ticker("LAC")
-            .insert(&pool)
-            .await;
-        crate::test_support::closing_price(1, ymd(2021, 6, 30))
+        test_support::listing(1).ticker("LAC").insert(&pool).await;
+        test_support::closing_price(1, ymd(2021, 6, 30))
             .price("9.99")
             .manual("another listing's close", "copied to unblock the date")
             .insert(&pool)
             .await;
-        crate::test_support::closing_price(1, ymd(2023, 10, 2))
+        test_support::closing_price(1, ymd(2023, 10, 2))
             .price("24.90")
             .insert(&pool)
             .await;
 
         let marked = |before: NaiveDate, from: NaiveDate| {
-            crate::test_support::listing(1)
+            test_support::listing(1)
                 .ticker("LAC")
                 .unpriced_before(before)
                 .unpriced_from(from)
@@ -1172,7 +1166,7 @@ mod tests {
     async fn db_ticker_or_exchange_change_refused_once_dependents_exist() {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
-        crate::test_support::buy(1, 1).insert(&pool).await;
+        test_support::buy(1, 1).insert(&pool).await;
 
         let mut ticker_changed = xtest();
         ticker_changed.ticker = "VASX".to_owned();
@@ -1223,10 +1217,7 @@ mod tests {
             "USD"
         );
 
-        crate::test_support::buy(1, 1)
-            .currency("USD")
-            .insert(&pool)
-            .await;
+        test_support::buy(1, 1).currency("USD").insert(&pool).await;
         let mut to_eur = xtest();
         to_eur.currency = "EUR".into();
         let err = db_upsert(&pool, &to_eur).await.unwrap_err();
@@ -1925,14 +1916,14 @@ mod tests {
     async fn the_list_narrows_by_exchange_and_security_type() {
         use crate::test_support::assert_list_filters;
         let pool = test_pool().await;
-        crate::test_support::listing(1).insert(&pool).await; // XASX ETF
-        crate::test_support::listing(2).insert(&pool).await; // XASX ETF
-        crate::test_support::listing(3)
+        test_support::listing(1).insert(&pool).await; // XASX ETF
+        test_support::listing(2).insert(&pool).await; // XASX ETF
+        test_support::listing(3)
             .mic("XNYS")
             .security_type(SecurityType::Share)
             .insert(&pool)
             .await;
-        crate::test_support::listing(4)
+        test_support::listing(4)
             .mic("XNYS")
             .security_type(SecurityType::Share)
             .insert(&pool)

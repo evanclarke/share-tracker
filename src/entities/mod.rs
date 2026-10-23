@@ -2,6 +2,7 @@
 //! write-time invariants. Add a new entity by dropping a file here and adding
 //! one `pub mod` line plus one `.merge` below — `main.rs` never changes.
 use sqlx::SqlitePool;
+use utoipa_axum::router::OpenApiRouter;
 
 pub mod amit_adjustment;
 pub mod amit_adjustment_generation;
@@ -45,7 +46,7 @@ pub mod transfer;
 pub mod worthless;
 
 /// Merge every entity's routes into a single router.
-pub fn router() -> utoipa_axum::router::OpenApiRouter<SqlitePool> {
+pub fn router() -> OpenApiRouter<SqlitePool> {
     exchange::router()
         .merge(exchange_holiday::router())
         .merge(listing::router())
@@ -335,9 +336,12 @@ pub(crate) fn filtered_list_routes() -> Vec<(&'static str, &'static [&'static st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities;
     use crate::infra::id::ListingId;
+    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
+    use std::collections::BTreeMap;
 
     /// Every entity DELETE route, with the exact 404 body it must answer.
     ///
@@ -889,7 +893,7 @@ mod tests {
                 case.put_path
             );
 
-            let mut replay = crate::test_support::writable_body(&first, case.read_only);
+            let mut replay = test_support::writable_body(&first, case.read_only);
             if let Some(graft) = case.graft.as_object() {
                 let replay = replay.as_object_mut().expect("read body is a JSON object");
                 for (key, value) in graft {
@@ -997,7 +1001,7 @@ mod tests {
         // The manual closing price: 201 with the freshly stored row (the body
         // POST /closing_prices/fetch answers), then 204.
         let pool = test_pool().await;
-        crate::test_support::listing(1).insert(&pool).await;
+        test_support::listing(1).insert(&pool).await;
         let client = ApiClient::over(router().with_state(pool));
         let price = serde_json::json!({
             "price": "62.48",
@@ -1028,14 +1032,9 @@ mod tests {
         // Exception 1: the RBA rate correction only ever replaces an existing
         // row, so it answers 204 — and a missing id is 404, never a create.
         let pool = test_pool().await;
-        crate::entities::rba_fx_rate::db_import_rate(
-            &pool,
-            "USD",
-            "2024-01",
-            crate::test_support::dec("1.5"),
-        )
-        .await
-        .unwrap();
+        entities::rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", test_support::dec("1.5"))
+            .await
+            .unwrap();
         let id: i64 = sqlx::query_scalar("SELECT id FROM rba_fx_rates")
             .fetch_one(&pool)
             .await
@@ -1124,9 +1123,9 @@ mod tests {
     /// Every list `entities::router` serves — a `GET` answering a JSON array —
     /// with the query parameters its `Query<T>` type declares, read off the
     /// operations utoipa generated from the handlers themselves.
-    fn documented_lists() -> std::collections::BTreeMap<String, Vec<String>> {
+    fn documented_lists() -> BTreeMap<String, Vec<String>> {
         let doc = serde_json::to_value(super::router().into_openapi()).expect("serialises");
-        let mut lists = std::collections::BTreeMap::new();
+        let mut lists = BTreeMap::new();
         for (path, item) in doc["paths"].as_object().expect("paths") {
             let get = &item["get"];
             if get["responses"]["200"]["content"]["application/json"]["schema"]["type"] != "array" {
@@ -1157,7 +1156,7 @@ mod tests {
             "the document carries only {} entity lists",
             documented.len()
         );
-        let classified: std::collections::BTreeMap<String, Vec<String>> = LIST_ROUTES
+        let classified: BTreeMap<String, Vec<String>> = LIST_ROUTES
             .iter()
             .map(|r| {
                 let mut filters: Vec<String> = r.filters.iter().map(|f| f.to_string()).collect();

@@ -10,9 +10,19 @@ use super::checks::{
 use super::model::Trade;
 use super::provenance::{provenance_column_sql, provenance_named};
 use super::{Settlement, SettlementError};
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::open_parcels;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
+use crate::entities::closing_price;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::AcquiredUnits;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -35,8 +45,8 @@ pub struct TradeListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for TradeListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for TradeListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("date", self.from, self.to);
@@ -278,7 +288,7 @@ pub enum UpsertError {
     /// forms for a read-time event; the wording and the recovery live in
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The Buy/DRP leaves this listing holding a quantity its recorded splits
     /// and bonus issues re-base past what a `Decimal` can hold — a nil-priced
     /// parcel of 1e27 units behind a 1000-for-1 split asks every report for
@@ -290,7 +300,7 @@ pub enum UpsertError {
     /// Accepted, such a parcel answered `204` and then killed every
     /// open-holdings read of the **whole** portfolio. Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
     /// The trade is dated on a day its exchange did not trade — a weekend, or
     /// a seeded public holiday on the calendar that was in force then
     /// (SCENARIOS S-08). The trade date is the CGT event date, so it sets the
@@ -674,15 +684,13 @@ async fn write(
     // re-based back across any share splits/consolidations (TD 2000/10)
     // before comparing.
     if let Some(id) = id {
-        let splits =
-            crate::entities::corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id)
-                .await?;
-        let allocated_total = crate::entities::corporate_action::sold_in_acquired_units(
-            crate::domain::open_parcels::db_parcel_sales(&mut tx, id).await?,
+        let splits = corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id).await?;
+        let allocated_total = corporate_action::sold_in_acquired_units(
+            open_parcels::db_parcel_sales(&mut tx, id).await?,
             &splits,
             trade.date,
         );
-        if crate::entities::corporate_action::AcquiredUnits::new(trade.quantity) < allocated_total {
+        if AcquiredUnits::new(trade.quantity) < allocated_total {
             return Err(UpsertError::QuantityBelowAllocated);
         }
     }
@@ -700,7 +708,7 @@ async fn write(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
@@ -781,8 +789,7 @@ async fn write(
     // rule above, after the write so an unknown `listing_id` still meets its
     // foreign-key rejection first.
     if let Some(shut) =
-        crate::entities::closing_price::db_non_trading_day(&mut tx, trade.listing_id, trade.date)
-            .await?
+        closing_price::db_non_trading_day(&mut tx, trade.listing_id, trade.date).await?
     {
         return Err(UpsertError::NonTradingDay(shut.describe(trade.date)));
     }
@@ -800,7 +807,7 @@ async fn write(
     // documents and surfaces — so the stored position is passed in, and only a
     // write that newly strands units is rejected.
     if trade.trade_type != super::model::TradeType::Sell
-        && let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+        && let Some(back_dated) = whole_holding::db_back_dated_parcel(
             &mut tx,
             trade.listing_id,
             trade.date,
@@ -820,11 +827,8 @@ async fn write(
     // edit that brings a stored quantity back inside the range still lands.
     // Only the parcel types carry a quantity a ratio re-bases forward.
     if trade.trade_type != super::model::TradeType::Sell
-        && let Some(beyond) = crate::entities::corporate_action::rebased_quantity_beyond_range(
-            &mut tx,
-            trade.listing_id,
-        )
-        .await?
+        && let Some(beyond) =
+            corporate_action::rebased_quantity_beyond_range(&mut tx, trade.listing_id).await?
     {
         return Err(UpsertError::UnrepresentableRebasedQuantity(beyond));
     }
@@ -837,11 +841,8 @@ async fn write(
     // inside the write's own transaction. A Sell holds no cost base, so only
     // the parcel types can introduce the pair.
     if trade.trade_type != super::model::TradeType::Sell
-        && let Some(conflict) = crate::entities::corporate_action::db_payment_currency_conflict(
-            &mut *tx,
-            trade.listing_id,
-        )
-        .await?
+        && let Some(conflict) =
+            corporate_action::db_payment_currency_conflict(&mut *tx, trade.listing_id).await?
     {
         return Err(UpsertError::PaymentCurrencyMismatch {
             payment_date: conflict.payment_date,

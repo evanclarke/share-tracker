@@ -13,6 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::NoFilter;
@@ -48,7 +49,7 @@ pub struct HoldingAccountBody {
 
 impl CrudEntity for HoldingAccount {
     type Key = HoldingAccountId;
-    type Filter = crate::infra::http::NoFilter;
+    type Filter = NoFilter;
     const TABLE: &'static str = "holding_accounts";
     const COLUMNS: &'static str = "id, name";
     const NOUN: &'static str = "holding account";
@@ -139,7 +140,7 @@ async fn write(
     // `AUTOINCREMENT` (it sits outside the audit scope), so a deleted
     // *highest* id can be re-issued; see
     // `post_holding_account_lands_on_an_unheld_id_and_never_overwrites`.
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO holding_accounts (id, name) VALUES (?, ?) \
          ON CONFLICT(id) DO UPDATE SET name = excluded.name",
         id.map(|id| id.0),
@@ -380,10 +381,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(
-            crate::infra::http::ApiError::from(err),
-            crate::infra::http::ApiError::Unprocessable(_)
-        ));
+        assert!(matches!(ApiError::from(err), ApiError::Unprocessable(_)));
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use sqlx::sqlite::SqliteRow;
+use std::str::FromStr;
 
 /// Which CGT event a [`ActionKind::WorthlessShares`] action records. Both
 /// produce the identical loss arithmetic (close every open parcel at nil
@@ -39,7 +41,7 @@ impl WorthlessEvent {
 pub struct UnknownWorthlessEvent(String);
 
 /// The inverse of [`WorthlessEvent::as_str`]: the stored variant name.
-impl std::str::FromStr for WorthlessEvent {
+impl FromStr for WorthlessEvent {
     type Err = UnknownWorthlessEvent;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -268,8 +270,8 @@ pub struct CorporateAction {
 /// columns are read. The decimal columns still decode through
 /// [`infra::decimal::Money`](crate::infra::decimal::Money) (via `row_dec`/`row_opt_dec`),
 /// so a malformed value is a column-named error here too.
-impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for ActionKind {
-    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
         match row.try_get::<String, _>("action_type")?.as_str() {
             "ReturnOfCapital" => Ok(ActionKind::ReturnOfCapital {
                 amount_per_unit: row_dec(row, "amount_per_unit")?,

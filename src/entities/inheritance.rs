@@ -103,10 +103,25 @@
 //! parcel dated on a closed day is surfaced instead, non-blockingly, by
 //! `reports::health`'s `non_trading_day_trades`.
 
+use crate::domain::cost_base;
+use crate::domain::cost_base::Term;
+use crate::domain::cost_base::UnrepresentableCost;
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::whole_holding;
+use crate::domain::whole_holding::BackDatedParcel;
+use crate::entities::corporate_action;
+use crate::entities::trade::ParcelOrigin;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
+use crate::infra::fx::FxOverride;
+use crate::infra::fx::FxRates;
+use crate::infra::fx::RateMonth;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -248,8 +263,8 @@ pub struct InheritanceListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for InheritanceListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for InheritanceListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("date_of_death", self.from, self.to);
@@ -314,7 +329,7 @@ pub enum UpsertError {
     /// naming nothing. The wording and the limit live in `domain::cost_base`,
     /// shared with `trade::checks`' bound on `average_price × quantity`.
     #[error("the inherited cost base is not representable: {0}")]
-    UnrepresentableCostBase(#[source] crate::domain::cost_base::UnrepresentableCost),
+    UnrepresentableCostBase(#[source] UnrepresentableCost),
     /// `deceased_acquisition_date` must be present exactly when the rule is
     /// `DeceasedCostBase` (it starts the discount clock); a pre-CGT asset's
     /// clock runs from the date of death and the date is not recorded.
@@ -392,8 +407,8 @@ pub enum UpsertError {
     /// answered wrongly (`ess_vest::VestError::MissingFxRate`, the same rule).
     #[error("no ATO FX rate for {currency} in {month} and the inheritance states none")]
     MissingFxRate {
-        currency: crate::infra::currency::CurrencyCode,
-        month: crate::infra::fx::RateMonth,
+        currency: CurrencyCode,
+        month: RateMonth,
     },
     /// The inherited parcel's currency differs from that of a
     /// return-of-capital payment on its listing that reaches it. The payment
@@ -416,14 +431,14 @@ pub enum UpsertError {
     /// `trade::UpsertError::BackDatedOverWholeHolding`; wording and recovery in
     /// `domain::whole_holding`. Mapped to 422.
     #[error("this parcel is dated behind a whole-holding operation: {0}")]
-    BackDatedOverWholeHolding(#[source] crate::domain::whole_holding::BackDatedParcel),
+    BackDatedOverWholeHolding(#[source] BackDatedParcel),
     /// The inherited quantity is one the listing's recorded splits and bonus
     /// issues re-base past what a `Decimal` can hold. The inheritance side of
     /// `trade::UpsertError::UnrepresentableRebasedQuantity`, answered by the
     /// same walk over the same wording
     /// (`corporate_action::rebased_quantity_beyond_range`). Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
-    UnrepresentableRebasedQuantity(#[source] crate::domain::cost_base::UnrepresentableQuantity),
+    UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
 }
 
 impl From<UpsertError> for ApiError {
@@ -609,16 +624,12 @@ async fn check_convertible(
     // this write validates against (the `ess_vest` pattern). Never the
     // valuation fallback: an earlier month's rate is a tax figure computed
     // from the wrong month.
-    let rates = crate::infra::fx::FxRates::load(&mut *tx).await?;
+    let rates = FxRates::load(&mut *tx).await?;
     rates
-        .resolve_rate(
-            &inh.currency,
-            conversion_date(inh),
-            crate::infra::fx::FxOverride::None,
-        )
+        .resolve_rate(&inh.currency, conversion_date(inh), FxOverride::None)
         .map_err(|_| UpsertError::MissingFxRate {
             currency: inh.currency.clone(),
-            month: crate::infra::fx::RateMonth::of(conversion_date(inh)),
+            month: RateMonth::of(conversion_date(inh)),
         })?;
     Ok(())
 }
@@ -640,7 +651,7 @@ fn validate(inh: &Inheritance) -> Result<(), UpsertError> {
     }
     // And bounded above the same way: the parcel Buy is dated the death, and
     // a trade dated after today is refused (SCENARIOS S-10).
-    if inh.date_of_death > crate::infra::date::today() {
+    if inh.date_of_death > date::today() {
         return Err(UpsertError::DeathInFuture);
     }
     match (inh.cost_base_rule, inh.deceased_acquisition_date) {
@@ -726,7 +737,7 @@ async fn write(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO inheritances \
          (id, listing_id, holding_account_id, quantity, date_of_death, cost_base_rule, \
           cost_base, lpr_expenditure, lpr_expenditure_date, deceased_acquisition_date, \
@@ -777,16 +788,16 @@ async fn write(
     // its own product in `trade::check_amounts`; this parcel does not go
     // through it (see the module comment), so the same bound is applied here,
     // over the terms an inheritance actually states.
-    let total_cost_base = crate::domain::cost_base::checked_cost_base(&[
-        crate::domain::cost_base::Term::Amount("cost_base", inh.cost_base),
-        crate::domain::cost_base::Term::Amount("lpr_expenditure", inh.lpr_expenditure),
+    let total_cost_base = cost_base::checked_cost_base(&[
+        Term::Amount("cost_base", inh.cost_base),
+        Term::Amount("lpr_expenditure", inh.lpr_expenditure),
     ])
     .map_err(UpsertError::UnrepresentableCostBase)?;
     // An edit keeps the linked Buy's id (`NewParcel::write` rewrites that row
     // in place); a first entry is written fresh, with an id the database has
     // never issued (SCENARIOS U-a).
     crate::entities::trade::NewParcel::new(
-        crate::entities::trade::ParcelOrigin::Inheritance(assigned_id),
+        ParcelOrigin::Inheritance(assigned_id),
         inh.date_of_death,
         inh.listing_id,
         inh.holding_account_id,
@@ -811,7 +822,7 @@ async fn write(
     // alone — refusing it would make the state the rollover-consistency report
     // asks about unfixable — so the stored position is passed in and only a
     // write that newly strands units is rejected.
-    if let Some(back_dated) = crate::domain::whole_holding::db_back_dated_parcel(
+    if let Some(back_dated) = whole_holding::db_back_dated_parcel(
         &mut tx,
         inh.listing_id,
         inh.date_of_death,
@@ -830,8 +841,7 @@ async fn write(
     // walk runs here — over the state this write leaves behind, so an edit that
     // brings a stored quantity back inside the range still lands.
     if let Some(beyond) =
-        crate::entities::corporate_action::rebased_quantity_beyond_range(&mut tx, inh.listing_id)
-            .await?
+        corporate_action::rebased_quantity_beyond_range(&mut tx, inh.listing_id).await?
     {
         return Err(UpsertError::UnrepresentableRebasedQuantity(beyond));
     }
@@ -843,8 +853,7 @@ async fn write(
     // through it, so the same check runs here, over the written state inside
     // this write's own transaction.
     if let Some(conflict) =
-        crate::entities::corporate_action::db_payment_currency_conflict(&mut *tx, inh.listing_id)
-            .await?
+        corporate_action::db_payment_currency_conflict(&mut *tx, inh.listing_id).await?
     {
         return Err(UpsertError::PaymentCurrencyMismatch {
             payment_date: conflict.payment_date,
@@ -990,9 +999,18 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::entities::rba_fx_rate;
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
+    use crate::infra::date;
+    use crate::reports::open_parcels;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
@@ -1259,7 +1277,7 @@ mod tests {
         // the death, and a trade dated in the future is refused, so the bound
         // is applied here on the date the user typed.
         let mut inh = post_cgt(1);
-        inh.date_of_death = crate::infra::date::today() + chrono::Days::new(1);
+        inh.date_of_death = date::today() + chrono::Days::new(1);
         inh.lpr_expenditure_date = Some(inh.date_of_death);
         assert!(matches!(
             db_upsert(&pool, &inh).await,
@@ -1397,9 +1415,7 @@ mod tests {
         insert_listing(&pool, 1, "AUD").await;
         db_upsert(&pool, &post_cgt(1)).await.unwrap();
 
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let parcels = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(parcels.len(), 1);
         let p = &parcels[0];
         assert_eq!(
@@ -1433,9 +1449,7 @@ mod tests {
         .await
         .unwrap();
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         let g = &realised[0];
         assert_eq!(g.cost_base, dec("3200"));
@@ -1473,9 +1487,7 @@ mod tests {
         .await
         .unwrap();
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 2);
         let within = realised
             .iter()
@@ -1586,7 +1598,7 @@ mod tests {
             "{err:?}"
         );
         // The accepted row is untouched by the rejected write.
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels[0].cost_base.adjusted, dec("6000"));
@@ -1693,7 +1705,7 @@ mod tests {
             ..usd.clone()
         };
         db_upsert(&pool, &stated).await.unwrap();
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         // US$3,000 at the stated 0.75, not at parity.
@@ -1704,7 +1716,7 @@ mod tests {
             .await
             .unwrap();
         db_upsert(&pool, &usd).await.unwrap();
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels[0].cost_base.adjusted, dec("3750"));
@@ -1738,7 +1750,7 @@ mod tests {
             .await;
         }
 
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1769,7 +1781,7 @@ mod tests {
         )
         .await;
 
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1807,7 +1819,7 @@ mod tests {
             .await
             .expect_status(StatusCode::CREATED);
 
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         let head = parcels
@@ -1876,7 +1888,7 @@ mod tests {
         .await
         .expect_status(StatusCode::CREATED);
 
-        let parcels = crate::domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+        let parcels = domain::open_parcels::load(&mut pool.acquire().await.unwrap(), None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -1987,7 +1999,7 @@ mod tests {
         let body = serde_json::json!({
             "listing_id": 1,
             "quantity": "100",
-            "date_of_death": (crate::infra::date::today() + chrono::Days::new(1)).to_string(),
+            "date_of_death": (date::today() + chrono::Days::new(1)).to_string(),
             "cost_base_rule": "MarketValueAtDeath",
             "cost_base": "3000"
         });
@@ -2060,7 +2072,7 @@ mod tests {
         let client = ApiClient::over(router().with_state(pool.clone()));
         let response = client.put("/inheritances/1", &body).await;
         let (status, detail) = response.status_and_body();
-        assert_eq!(status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(detail.contains("worthless-shares recognise"), "{detail}");
         assert!(detail.contains("2024-06-13"), "{detail}");
         assert!(
@@ -2098,11 +2110,7 @@ mod tests {
         let client = ApiClient::over(router().with_state(pool.clone()));
         let response = client.put("/inheritances/1", &body).await;
         let (status, detail) = response.status_and_body();
-        assert_eq!(
-            status,
-            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-            "{detail}"
-        );
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{detail}");
         assert!(
             detail.contains(concat!(
                 "cost_base 70000000000000000000000000000",
@@ -2138,13 +2146,13 @@ mod tests {
     /// A `ShareSplit` on listing 1, so a parcel behind it is re-based at read
     /// time by 1000-for-1.
     async fn insert_thousand_for_one_split(pool: &SqlitePool) {
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 1),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: dec("1000"),
                     split_old_units: Decimal::ONE,
                 },
@@ -2410,9 +2418,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_listing(&pool, 2, "AUD").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

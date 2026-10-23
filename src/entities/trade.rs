@@ -95,6 +95,16 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::closing_price;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::demerger;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::scrip_exchange;
+    use crate::infra;
+    use crate::infra::date;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use rust_decimal::Decimal;
     use std::collections::HashSet;
@@ -520,13 +530,13 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         db_upsert(&pool, &buy_trade()).await.unwrap(); // qty 10, 2024-01-15
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 1,
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -1414,7 +1424,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let mut tx = crate::infra::db::write_tx(&pool).await.unwrap();
+        let mut tx = infra::db::write_tx(&pool).await.unwrap();
         sqlx::query("UPDATE trades SET settlement_date = '2024-01-18' WHERE id = 1")
             .execute(&mut *tx)
             .await
@@ -1477,7 +1487,7 @@ mod tests {
         // The recompute, in flight: it moves the stored date one day. Held
         // uncommitted, so a pool reader still sees the old date — the state the
         // old handler decided on.
-        let mut recompute = crate::infra::db::write_tx(&pool).await.unwrap();
+        let mut recompute = infra::db::write_tx(&pool).await.unwrap();
         sqlx::query("UPDATE trades SET settlement_date = '2024-01-18' WHERE id = 1")
             .execute(&mut *recompute)
             .await
@@ -2086,7 +2096,7 @@ mod tests {
             .name("Ether")
             .insert(&pool)
             .await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         let base = serde_json::json!({
             "trade_type": "Buy",
             "date": (today + chrono::Days::new(1)).to_string(),
@@ -2119,7 +2129,7 @@ mod tests {
         // And the settlement date is allowed past it: a T+2 settlement of a
         // trade dated the market's most recent open day always falls after
         // today, whichever day of the week the suite runs on.
-        let market = crate::entities::closing_price::load_market(&pool, ListingId(1))
+        let market = closing_price::load_market(&pool, ListingId(1))
             .await
             .unwrap()
             .unwrap();
@@ -2403,7 +2413,7 @@ mod tests {
             // the id and the trade's provenance/derived columns, which the
             // body denies rather than ignores (SCENARIOS V-a).
             let read: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-            let body = crate::test_support::writable_body(&read, &[]);
+            let body = test_support::writable_body(&read, &[]);
             let (status, detail) = put_trade_json(&pool, 1, body).await;
             assert_eq!(status, StatusCode::NO_CONTENT, "pass {pass}: {detail}");
             let t = db_get(&pool, TradeId(1)).await.unwrap().unwrap();
@@ -2631,7 +2641,7 @@ mod tests {
         use crate::entities::corporate_action::{ActionKind, CorporateAction};
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
             &CorporateAction {
                 id: 1,
@@ -2877,13 +2887,13 @@ mod tests {
             .date(ymd(2024, 1, 2))
             .insert(pool)
             .await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: ymd(2024, 6, 10),
-                kind: crate::entities::corporate_action::ActionKind::ScripForScrip {
+                kind: ActionKind::ScripForScrip {
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -2895,9 +2905,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(pool, 10).await.unwrap();
     }
 
     /// A HEAD → SPIN demerger that has already run (1 = HEAD, 2 = SPIN,
@@ -2909,13 +2917,13 @@ mod tests {
             .date(ymd(2024, 1, 2))
             .insert(pool)
             .await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: ymd(2024, 6, 11),
-                kind: crate::entities::corporate_action::ActionKind::Demerger {
+                kind: ActionKind::Demerger {
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: dec("5"),
@@ -2929,9 +2937,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(pool, 10).await.unwrap();
     }
 
     /// A Buy of the listing dated `date`, id 900.
@@ -3319,13 +3325,13 @@ mod tests {
     /// A `ShareSplit` on listing 1, so a parcel behind it is re-based at read
     /// time by `new`-for-`old`.
     async fn insert_split(pool: &SqlitePool, id: i64, date: NaiveDate, new: &str, old: &str) {
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id,
                 listing_id: ListingId(1),
                 date,
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: dec(new),
                     split_old_units: dec(old),
                 },
@@ -3682,9 +3688,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

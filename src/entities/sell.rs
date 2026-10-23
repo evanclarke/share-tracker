@@ -12,8 +12,13 @@
 //! id must either be free or already hold a plain Sell — a Buy or DRP parcel
 //! is refused rather than rewritten as a disposal in place (SCENARIOS Z-b).
 
+use crate::domain::open_parcels;
+use crate::entities::closing_price;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::AcquiredUnits;
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::{Json, Query};
@@ -613,8 +618,7 @@ async fn write(
     // `listing_id` meets its foreign-key rejection first — the same ordering
     // `trade::db_upsert` uses.
     if let Some(shut) =
-        crate::entities::closing_price::db_non_trading_day(&mut tx, body.listing_id, body.date)
-            .await?
+        closing_price::db_non_trading_day(&mut tx, body.listing_id, body.date).await?
     {
         return Err(SellError::NonTradingDay(shut.describe(body.date)));
     }
@@ -823,7 +827,7 @@ pub(crate) async fn upsert_sell_in_tx(
     // Upsert the Sell trade row. A NULL id (every server-created Sell) is the
     // database picking one it has never issued
     // (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let result = crate::infra::db::insert_with_optional_id(
+    let result = db::insert_with_optional_id(
         "INSERT INTO trades \
          (id, trade_type, date, settlement_date, settlement_date_source, listing_id, \
           average_price, quantity, \
@@ -966,15 +970,13 @@ pub(crate) async fn upsert_sell_in_tx(
         // date's units, so allocations are re-based back across any share
         // splits/consolidations (TD 2000/10) before comparing — e.g. after a
         // 2-for-1 split a 100-share parcel covers a 200-share sale.
-        let splits =
-            crate::entities::corporate_action::db_splits_for_listing(&mut *tx, purchase_listing)
-                .await?;
-        let total = crate::entities::corporate_action::sold_in_acquired_units(
-            crate::domain::open_parcels::db_parcel_sales(&mut *tx, alloc.purchase_trade_id).await?,
+        let splits = corporate_action::db_splits_for_listing(&mut *tx, purchase_listing).await?;
+        let total = corporate_action::sold_in_acquired_units(
+            open_parcels::db_parcel_sales(&mut *tx, alloc.purchase_trade_id).await?,
             &splits,
             purchase_date,
         );
-        if total > crate::entities::corporate_action::AcquiredUnits::new(purchase_qty) {
+        if total > AcquiredUnits::new(purchase_qty) {
             return Err(SellError::PurchaseQuantityExceeded);
         }
     }
@@ -1048,6 +1050,8 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::open_parcels;
+    use crate::infra::date;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -1270,6 +1274,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use proptest::option;
         use proptest::prelude::*;
         use std::collections::BTreeMap;
 
@@ -1289,7 +1294,7 @@ mod tests {
             let attempt = (
                 prop::collection::btree_map(0usize..3, 1i64..=60_000, 1..=3),
                 prop_oneof![3 => Just(0i64), 1 => -1i64..=1],
-                proptest::option::weighted(0.3, any::<prop::sample::Index>()),
+                option::weighted(0.3, any::<prop::sample::Index>()),
             )
                 .prop_map(|(draws, off_by, replaces)| Attempt {
                     draws,
@@ -1821,7 +1826,7 @@ mod tests {
     /// report — the same read every open-holdings view is built on.
     async fn remaining_quantities(pool: &SqlitePool) -> Vec<(TradeId, Decimal)> {
         let mut conn = pool.acquire().await.unwrap();
-        crate::domain::open_parcels::load(&mut conn, None)
+        open_parcels::load(&mut conn, None)
             .await
             .unwrap()
             .into_iter()
@@ -2143,7 +2148,7 @@ mod tests {
             // route already says, and the DRP residual chain — all denied
             // rather than ignored, SCENARIOS V-a) and plus the allocations
             // PUT /sells needs.
-            let mut body = crate::test_support::writable_body(
+            let mut body = test_support::writable_body(
                 &read,
                 &[
                     "trade_type",
@@ -2380,7 +2385,7 @@ mod tests {
             .qty(Decimal::from(100))
             .insert(&pool)
             .await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         let base = serde_json::json!({
             "date": (today + chrono::Days::new(1)).to_string(),
             "listing_id": 1,

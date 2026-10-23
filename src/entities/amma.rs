@@ -1,7 +1,11 @@
+use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -313,8 +317,8 @@ pub struct AmmaListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for AmmaListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for AmmaListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("tax_year_end_date", self.from, self.to);
@@ -476,7 +480,7 @@ async fn write(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO amma_statements \
          (id, listing_id, tax_year_end_date, units_held, date_received, \
           australian_interest, australian_dividends_unfranked, franked_dividends, \
@@ -548,8 +552,7 @@ async fn write(
     // so an unrecognised currency code meets its own foreign-key rejection
     // first.
     if let Some(listing) =
-        crate::entities::trade::listing_currency_mismatch(&mut tx, stmt.listing_id, &stmt.currency)
-            .await?
+        trade::listing_currency_mismatch(&mut tx, stmt.listing_id, &stmt.currency).await?
     {
         return Err(UpsertError::CurrencyNotListings {
             statement: stmt.currency.clone(),
@@ -632,6 +635,8 @@ async fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 
@@ -1192,9 +1197,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

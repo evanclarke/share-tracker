@@ -15,9 +15,12 @@
 //! exists).
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::respond::Created;
@@ -119,8 +122,8 @@ pub struct InterestIncomeListQuery {
     pub to: Option<NaiveDate>,
 }
 
-impl crate::infra::http::CrudListFilter for InterestIncomeListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for InterestIncomeListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("holding_account_id", self.holding_account_id);
         clauses.date_range("date_paid", self.from, self.to);
     }
@@ -259,7 +262,7 @@ async fn write(
     }
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO interest_income \
          (id, date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
           currency, source, holding_account_id) \
@@ -376,6 +379,7 @@ async fn create(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -779,10 +783,10 @@ mod tests {
         use crate::test_support::assert_list_filters;
         let pool = test_pool().await;
         for (id, account, date) in [
-            (1, Some(1), crate::test_support::ymd(2024, 3, 15)),
-            (2, Some(1), crate::test_support::ymd(2024, 4, 15)),
-            (3, None, crate::test_support::ymd(2025, 1, 10)),
-            (4, None, crate::test_support::ymd(2025, 2, 10)),
+            (1, Some(1), test_support::ymd(2024, 3, 15)),
+            (2, Some(1), test_support::ymd(2024, 4, 15)),
+            (3, None, test_support::ymd(2025, 1, 10)),
+            (4, None, test_support::ymd(2025, 2, 10)),
         ] {
             let mut row = sample(id);
             row.holding_account_id = account.map(HoldingAccountId);

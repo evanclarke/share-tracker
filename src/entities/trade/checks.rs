@@ -6,6 +6,9 @@
 
 use super::model::TradeType;
 use crate::domain::cost_base;
+use crate::domain::cost_base::UnrepresentableCost;
+use crate::infra::currency::CurrencyCode;
+use crate::infra::date;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
@@ -52,7 +55,7 @@ pub(crate) enum SpotFxRateError {
 /// conversion behaviour). Shared by the trade and Sell write paths so the two
 /// can't drift.
 pub(crate) fn validate_spot_fx_rate(
-    currency: &crate::infra::currency::CurrencyCode,
+    currency: &CurrencyCode,
     spot_fx_rate: Option<Decimal>,
 ) -> Result<(), SpotFxRateError> {
     let Some(rate) = spot_fx_rate else {
@@ -159,7 +162,7 @@ pub(crate) enum AmountsError {
     /// the limit live in `domain::cost_base` so the six paths that can reach
     /// this refusal cannot word it differently.
     #[error("the trade's figures are not representable: {0}")]
-    Unrepresentable(#[source] crate::domain::cost_base::UnrepresentableCost),
+    Unrepresentable(#[source] UnrepresentableCost),
 }
 
 /// The core figures every trade/Sell write must satisfy, gathered for
@@ -219,7 +222,7 @@ pub(crate) fn check_amounts(c: &AmountsCheck<'_>) -> Result<(), AmountsError> {
     if c.date < CGT_START {
         return Err(AmountsError::PreCgtDate);
     }
-    if c.date > crate::infra::date::today() {
+    if c.date > date::today() {
         return Err(AmountsError::FutureDate);
     }
     // Last, because it is the only one of these figures that is a *product*:

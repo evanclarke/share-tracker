@@ -18,6 +18,7 @@ use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 /// What to advise when a segment's symbol looks wrong — the remedy that can
@@ -278,7 +279,7 @@ async fn db_listing_ids_held_between(
     to: NaiveDate,
 ) -> Result<Vec<ListingId>, sqlx::Error> {
     let timeline = HeldTimeline::load(pool).await?;
-    let mut ids: std::collections::BTreeSet<ListingId> = std::collections::BTreeSet::new();
+    let mut ids: BTreeSet<ListingId> = BTreeSet::new();
     let mut date = from;
     while date <= to {
         ids.extend(timeline.held_listing_ids(Some(date)));

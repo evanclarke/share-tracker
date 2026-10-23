@@ -3,6 +3,7 @@
 
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, OptMoney};
+use crate::infra::fx::FxOverride;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -285,8 +286,8 @@ impl Trade {
     /// stated here too so a caller holding the model itself (the activity
     /// ledger, the annual tax report) asks rather than re-pairs the two
     /// columns.
-    pub fn fx_override(&self) -> crate::infra::fx::FxOverride {
-        crate::infra::fx::FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
+    pub fn fx_override(&self) -> FxOverride {
+        FxOverride::from_trade(self.fx_rate, self.spot_fx_rate)
     }
 }
 

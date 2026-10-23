@@ -34,9 +34,12 @@
 //! ends.
 
 use crate::entities::income::Income;
+use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
+use crate::infra::http::CrudListFilter;
+use crate::infra::http::FilterClauses;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -164,8 +167,8 @@ pub struct DrpEnrolmentListQuery {
     pub holding_account_id: Option<HoldingAccountId>,
 }
 
-impl crate::infra::http::CrudListFilter for DrpEnrolmentListQuery {
-    fn apply_filter(&self, clauses: &mut crate::infra::http::FilterClauses<'_>) {
+impl CrudListFilter for DrpEnrolmentListQuery {
+    fn apply_filter(&self, clauses: &mut FilterClauses<'_>) {
         clauses.eq("listing_id", self.listing_id);
         clauses.eq("holding_account_id", self.holding_account_id);
     }
@@ -282,7 +285,7 @@ async fn write(
 
     // A create (`id` is `None`) binds a NULL id, so the database picks one
     // it has never issued (`infra::db::insert_with_optional_id`, SCENARIOS U-a).
-    let query = crate::infra::db::insert_with_optional_id(
+    let query = db::insert_with_optional_id(
         "INSERT INTO drp_enrolments \
          (id, listing_id, holding_account_id, enrolment_date, unenrolment_date, residual_handling) \
          VALUES (?, ?, ?, ?, ?, ?) \
@@ -606,7 +609,11 @@ impl From<UpsertError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::entities::listing;
+    use crate::entities::trade::ParcelOrigin;
+    use crate::entities::trade::Residuals;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -944,7 +951,7 @@ mod tests {
     ) {
         let mut conn = pool.acquire().await.unwrap();
         crate::entities::trade::NewParcel::new(
-            crate::entities::trade::ParcelOrigin::DrpReinvestment,
+            ParcelOrigin::DrpReinvestment,
             date.parse().unwrap(),
             listing_id,
             HoldingAccountId(1),
@@ -952,7 +959,7 @@ mod tests {
             "AUD",
         )
         .price(test_support::dec("9"))
-        .residuals(crate::entities::trade::Residuals {
+        .residuals(Residuals {
             carried_forward: test_support::dec(carried),
             paid_out: test_support::dec(paid),
             ..Default::default()
@@ -1104,9 +1111,9 @@ mod tests {
     async fn db_same_listing_may_be_enrolled_per_account() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "ICE Employee Plan".to_owned(),
             },
@@ -1160,9 +1167,9 @@ mod tests {
     async fn db_unenrolment_only_settles_the_periods_accounts_trades() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Personal CHESS".to_owned(),
             },
@@ -1412,9 +1419,9 @@ mod tests {
     async fn db_delete_allowed_when_no_reinvestment_falls_in_the_period() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Personal CHESS".to_owned(),
             },
@@ -1714,9 +1721,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

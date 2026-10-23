@@ -5,7 +5,12 @@
 //! allocations into a per-listing holding timeline the collection window and
 //! the health report both ask questions of.
 
+use crate::domain::open_parcels;
+use crate::entities::corporate_action;
 use crate::entities::corporate_action::AcquiredUnits;
+use crate::entities::corporate_action::SplitEvent;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::decimal::parse_dec;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -14,6 +19,7 @@ use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
+use std::iter;
 
 /// One purchase parcel's contribution to a listing's holding over time: `qty`
 /// units from `acquired`, less the units each sale allocated out of it from
@@ -74,12 +80,12 @@ pub struct HeldTimeline {
     /// can be expressed in the unit basis of a **past** date rather than only
     /// in each parcel's as-acquired one
     /// ([`HeldTimeline::units_by_account_on`]).
-    splits: HashMap<ListingId, Vec<crate::entities::corporate_action::SplitEvent>>,
+    splits: HashMap<ListingId, Vec<SplitEvent>>,
 }
 
 impl HeldTimeline {
     pub async fn load(pool: &SqlitePool) -> Result<Self, sqlx::Error> {
-        let mut tx = crate::infra::db::read_tx(pool).await?;
+        let mut tx = db::read_tx(pool).await?;
         let timeline = HeldTimeline::load_on(&mut tx).await?;
         tx.commit().await?;
         Ok(timeline)
@@ -98,10 +104,9 @@ impl HeldTimeline {
         .await?;
 
         // sale-date-basis units allocated out of each purchase parcel
-        let qty_sold = crate::domain::open_parcels::db_sales_by_parcel(&mut *conn, None).await?;
+        let qty_sold = open_parcels::db_sales_by_parcel(&mut *conn, None).await?;
 
-        let split_events =
-            crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
+        let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
 
         let mut parcels: HashMap<ListingId, Vec<ParcelHolding>> = HashMap::new();
         for row in &buys {
@@ -117,9 +122,7 @@ impl HeldTimeline {
                 .map(|&sold| {
                     (
                         sold.basis().unwrap_or(acquired),
-                        crate::entities::corporate_action::as_acquired_quantity(
-                            sold, splits, acquired,
-                        ),
+                        corporate_action::as_acquired_quantity(sold, splits, acquired),
                     )
                 })
                 .collect();
@@ -177,7 +180,7 @@ impl HeldTimeline {
                 continue;
             }
             *by_account.entry(p.holding_account_id).or_default() +=
-                crate::entities::corporate_action::split_adjusted_quantity(
+                corporate_action::split_adjusted_quantity(
                     remaining,
                     splits,
                     p.acquired,
@@ -196,7 +199,7 @@ impl HeldTimeline {
     /// Listings with a non-zero holding as at `as_of` (live holdings when
     /// `None`) — trades and sales dated after it don't count.
     pub fn held_listing_ids(&self, as_of: Option<NaiveDate>) -> Vec<ListingId> {
-        let cutoff = crate::infra::date::as_of_or_open(as_of);
+        let cutoff = date::as_of_or_open(as_of);
         let mut ids: Vec<ListingId> = self
             .parcels
             .iter()
@@ -238,7 +241,7 @@ impl HeldTimeline {
         };
         let mut events: Vec<NaiveDate> = parcels
             .iter()
-            .flat_map(|p| std::iter::once(p.acquired).chain(p.sales.iter().map(|(date, _)| *date)))
+            .flat_map(|p| iter::once(p.acquired).chain(p.sales.iter().map(|(date, _)| *date)))
             .filter(|date| *date <= until)
             .collect();
         events.sort();
@@ -276,7 +279,7 @@ pub async fn db_held_listing_ids(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<ListingId>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let ids = db_held_listing_ids_on(&mut tx, as_of).await?;
     tx.commit().await?;
     Ok(ids)
