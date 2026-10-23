@@ -1,13 +1,21 @@
 use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
-fn build_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+/// The filter for a `RUST_LOG` value: its directives, or `info` when it is
+/// unset or unparseable. Taking the value rather than reading the environment
+/// is what lets the default be tested without mutating the process
+/// environment, which is unsound while the multithreaded test harness runs.
+fn build_filter(rust_log: Option<&str>) -> EnvFilter {
+    rust_log
+        .and_then(|directives| EnvFilter::try_new(directives).ok())
+        .unwrap_or_else(|| EnvFilter::new("info"))
 }
 
 pub fn init() {
     tracing_subscriber::fmt()
-        .with_env_filter(build_filter())
+        .with_env_filter(build_filter(
+            std::env::var(EnvFilter::DEFAULT_ENV).ok().as_deref(),
+        ))
         // Color only when stdout is a terminal. Under daemon(8) stdout is a
         // pipe into the log file (-o), and tracing's default-on ANSI would
         // litter it with escape codes.
@@ -29,18 +37,51 @@ mod tests {
 
     #[test]
     fn default_level_is_info_when_rust_log_unset() {
-        unsafe { std::env::remove_var("RUST_LOG") };
-        let filter = build_filter();
-        assert_eq!(filter.max_level_hint(), Some(LevelFilter::INFO));
+        assert_eq!(build_filter(None).max_level_hint(), Some(LevelFilter::INFO));
     }
 
     #[test]
-    fn rust_log_env_var_controls_level() {
-        // Verify the filter respects the same directive format used by RUST_LOG
-        let debug_filter: EnvFilter = "debug".parse().unwrap();
-        assert_eq!(debug_filter.max_level_hint(), Some(LevelFilter::DEBUG));
+    fn rust_log_controls_level() {
+        assert_eq!(
+            build_filter(Some("debug")).max_level_hint(),
+            Some(LevelFilter::DEBUG)
+        );
+        assert_eq!(
+            build_filter(Some("warn")).max_level_hint(),
+            Some(LevelFilter::WARN)
+        );
+    }
 
-        let warn_filter: EnvFilter = "warn".parse().unwrap();
-        assert_eq!(warn_filter.max_level_hint(), Some(LevelFilter::WARN));
+    #[test]
+    fn an_unparseable_rust_log_falls_back_to_info() {
+        assert_eq!(
+            build_filter(Some("not=a=directive")).max_level_hint(),
+            Some(LevelFilter::INFO)
+        );
+    }
+
+    /// `unsafe` is confined to `test_support`'s busy-handler FFI, whose blocks
+    /// each carry a `SAFETY:` comment. A test that mutated the environment
+    /// (`std::env::remove_var`) used to be the other one: edition 2024 made
+    /// that `unsafe` because it is unsound while other threads run, and
+    /// `cargo test` always has other threads, so no honest `SAFETY:` comment
+    /// could be written for it.
+    #[test]
+    fn unsafe_code_is_confined_to_test_support() {
+        let offenders: Vec<&str> = crate::test_support::rust_sources()
+            .iter()
+            .filter(|source| source.path != "test_support.rs")
+            .filter(|source| {
+                source
+                    .code
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|word| word == "unsafe")
+            })
+            .map(|source| source.path.as_str())
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "`unsafe` outside test_support.rs: {offenders:?}"
+        );
     }
 }

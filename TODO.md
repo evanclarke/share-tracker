@@ -71,11 +71,13 @@ not apply. Deliberately **not** taken up: the six `macro_rules!` (each exists be
 annotation cannot describe a generic fn), the `Arc`s (shared across spawned tasks), and the 40
 functions over 100 lines (the 2026-08-28 complexity audit decided flat guard chains stay). Where an
 item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is its test.
-- [ ] Unsound test: `infra/logging.rs:32` calls `unsafe { std::env::remove_var("RUST_LOG") }` with
+- [x] Unsound test: `infra/logging.rs:32` calls `unsafe { std::env::remove_var("RUST_LOG") }` with
   no `SAFETY:` comment, and none could honestly be written — edition 2024 made it unsafe because
   mutating the environment while other threads run is unsound, and `cargo test` is multithreaded.
   Make `build_filter` take the `RUST_LOG` value as a parameter and test that pure function, leaving
-  no `unsafe` outside `test_support`'s documented FFI
+  no `unsafe` outside `test_support`'s documented FFI. Done 2026-10-23: `build_filter(Option<&str>)`
+  is tested as a pure function, and `logging::tests::unsafe_code_is_confined_to_test_support`
+  scans every file's code for the `unsafe` keyword
 - [ ] Wildcard arms over first-party enums, where a new variant would silently take the catch-all
   instead of failing to compile — list the variants: `ActionKind` (`buyback_participation.rs:217`,
   `rights_exercise.rs:377`, `rights_sale.rs:608`), `ActionType` (`corporate_action/model.rs:850`),
