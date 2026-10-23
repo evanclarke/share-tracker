@@ -86,12 +86,22 @@ falls under the existing rules.
     would (193 groups rewritten). Enforced by `app::tests::every_use_declaration_imports_from_one_module`
     (test code included; `rustfmt.toml` names it), with the scanner self-tested by
     `the_import_scan_flags_what_module_granularity_would_rewrite`
-- [ ] Non-leaf modules carrying APIs beyond tolerated glue: move `reports/mod.rs`'s
+- [x] Non-leaf modules carrying APIs beyond tolerated glue: move `reports/mod.rs`'s
   `TAXPAYER_BASIS`/`listing_label`/`account_label` into a leaf; slim `entities/mod.rs` (1353 lines)
   and `reports/health/mod.rs` to declarations, re-exports and the router; move the split parents'
   large inline test modules (`trade.rs`, `corporate_action.rs`, `scheduler.rs`) into a `tests`
   submodule as `closing_price` already did — code split and test move in separate commits, per
   CLAUDE.md
+  - Done 2026-10-23: `reports::taxpayer::TAXPAYER_BASIS` and `reports::labels` (callers updated,
+    no alias left on the parent); `reports::health::report` (the report, its assembly and route,
+    re-exported); `entities::route_tables` (the test-only `PUT_ROUTES`/`LIST_ROUTES`), so
+    `entities/mod.rs` is 90 lines of `pub mod` + `router`. The tests moved verbatim, each in its own
+    commit after the code split: `entities/tests/{delete,put,list}`, `trade/tests/` (10 topics),
+    `corporate_action/tests/` (9) and `infra/scheduler/tests/` (8, the DST property's regression
+    seeds moved with it). Test count unchanged across the moves (2816); enforced from here by
+    `app::tests::non_leaf_modules_hold_only_declarations_and_the_router` (a module with Rust
+    submodules defines nothing but `router`; `entities/distribution_event.rs` excepted with its
+    reason), its scanner self-tested by `production_items_finds_definitions_not_mentions` (2818)
 - [ ] Docs: `//!` module headers for the 22 files lacking one; the 160 `clippy::doc_markdown`
   missing-backtick findings (auto-fixable); and item docs across `domain/` (the financial lower
   layer). Blanket `missing_docs` (~2,100 items) is deliberately not adopted — the guide aims it at

@@ -927,4 +927,140 @@ mod tests {
              declaration into the earlier one importing from the same module: {found:?}"
         );
     }
+
+    /// The non-leaf modules that may carry code of their own, each with the
+    /// reason. Everything else with a Rust submodule is glue — see
+    /// [`non_leaf_modules_hold_only_declarations_and_the_router`].
+    const NON_LEAF_MODULES_WITH_CODE: &[(&str, &str)] = &[(
+        "entities/distribution_event.rs",
+        "one entity file whose only submodule is its provider (`yahoo`), split off so \
+         the `PriceFetcher`-style trait stays the swap point; not yet a split parent",
+    )];
+
+    /// Whether `path` (relative to `src`) is compiled only into the test build:
+    /// a `tests` module file or directory, or a `test_support` fixture file.
+    fn is_test_only_source(path: &str) -> bool {
+        path.split('/')
+            .any(|part| part == "tests" || part == "tests.rs" || part == "test_support.rs")
+            || path == "test_support.rs"
+    }
+
+    /// Every item a source file's production code defines, as
+    /// `(keyword, name)` — `fn router` is `("fn", "router")`, an `impl` block
+    /// `("impl", "")`. Reads `code_only` + `strip_test_modules` text, so a
+    /// keyword in a comment, a string or a test module is not an item.
+    fn production_items(production: &str) -> Vec<(&'static str, String)> {
+        const KEYWORDS: [&str; 8] = [
+            "fn",
+            "struct",
+            "enum",
+            "const",
+            "static",
+            "impl",
+            "trait",
+            "macro_rules!",
+        ];
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut items = Vec::new();
+        for (at, _) in production.char_indices() {
+            if production[..at].chars().next_back().is_some_and(ident) {
+                continue;
+            }
+            let rest = &production[at..];
+            for keyword in KEYWORDS {
+                let Some(after) = rest.strip_prefix(keyword) else {
+                    continue;
+                };
+                if !keyword.ends_with('!') && !after.starts_with(char::is_whitespace) {
+                    continue;
+                }
+                let name: String = after
+                    .trim_start()
+                    .chars()
+                    .take_while(|&c| ident(c))
+                    .collect();
+                items.push((
+                    keyword,
+                    if keyword == "impl" {
+                        String::new()
+                    } else {
+                        name
+                    },
+                ));
+            }
+        }
+        items
+    }
+
+    #[test]
+    fn production_items_finds_definitions_not_mentions() {
+        let code = "pub use a::fnord;\npub fn router() {}\nconst fn f() {}\n\
+                    pub(crate) struct S;\nimpl S {}\nlet constant = 1;\nmacro_rules! m {}\n";
+        assert_eq!(
+            production_items(code),
+            [
+                ("fn", "router".to_owned()),
+                ("const", "fn".to_owned()),
+                ("fn", "f".to_owned()),
+                ("struct", "S".to_owned()),
+                ("impl", String::new()),
+                ("macro_rules!", "m".to_owned()),
+            ]
+        );
+    }
+
+    /// A module with Rust submodules (`x/mod.rs`, or `x.rs` beside an `x/`
+    /// directory) is glue: its production code is module declarations,
+    /// re-exports and at most the `router` that merges its children's — no
+    /// function, type, constant or `impl` of its own (Google Rust style guide
+    /// pass, 2026-10-23). An API that grows in one belongs in a leaf beside
+    /// it (`reports::labels`, `reports::health::report`,
+    /// `entities::route_tables`), and a split parent's tests live in its
+    /// `tests/` directory rather than inline. Test-only files are exempt, as
+    /// are the [`NON_LEAF_MODULES_WITH_CODE`] each with its reason.
+    #[test]
+    fn non_leaf_modules_hold_only_declarations_and_the_router() {
+        let sources = test_support::rust_sources();
+        let mut offenders = Vec::new();
+        let mut seen_exempt = Vec::new();
+        for source in sources {
+            let path = source.path.as_str();
+            if is_test_only_source(path) {
+                continue;
+            }
+            let dir = match path.strip_suffix("mod.rs") {
+                Some(dir) => dir.to_owned(),
+                None => format!("{}/", path.trim_end_matches(".rs")),
+            };
+            let non_leaf = sources.iter().any(|other| {
+                other.path != path
+                    && other.path.starts_with(&dir)
+                    && !is_test_only_source(&other.path[dir.len()..])
+            });
+            if !non_leaf {
+                continue;
+            }
+            if NON_LEAF_MODULES_WITH_CODE.iter().any(|(p, _)| *p == path) {
+                seen_exempt.push(path);
+                continue;
+            }
+            for (keyword, name) in production_items(&source.production) {
+                if !(keyword == "fn" && name == "router") {
+                    offenders.push(format!("{path}: {keyword} {name}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a non-leaf module defines code of its own — move it into a leaf module and \
+             re-export it: {offenders:?}"
+        );
+        for (path, _) in NON_LEAF_MODULES_WITH_CODE {
+            assert!(
+                seen_exempt.contains(path),
+                "{path} is in NON_LEAF_MODULES_WITH_CODE but is no longer a non-leaf module \
+                 — drop the entry"
+            );
+        }
+    }
 }
