@@ -13,7 +13,7 @@ use super::{Settlement, SettlementError};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, parse_dec};
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
+use crate::infra::http::{self, ApiError, CrudEntity, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -426,8 +426,7 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     trade: &Trade,
 ) -> Result<http::Upserted<Trade>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(trade.id), trade, None).await?;
-    Ok((outcome, row))
+    write(pool, Some(trade.id), trade, None).await
 }
 
 /// Create or update a trade from a `PUT /trades/{id}` body. `supplied` is the
@@ -452,8 +451,7 @@ pub async fn db_upsert_resolving_settlement(
     trade: &Trade,
     supplied: Option<NaiveDate>,
 ) -> Result<http::Upserted<Trade>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(trade.id), trade, Some(supplied)).await?;
-    Ok((outcome, row))
+    write(pool, Some(trade.id), trade, Some(supplied)).await
 }
 
 /// `POST /trades` — create without naming an id, and return the row the
@@ -464,7 +462,7 @@ pub async fn db_create(
     trade: &Trade,
     supplied: Option<NaiveDate>,
 ) -> Result<Trade, UpsertError> {
-    let (_, _, stored) = write(pool, None, trade, Some(supplied)).await?;
+    let stored = write(pool, None, trade, Some(supplied)).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -479,7 +477,7 @@ async fn write(
     id: Option<TradeId>,
     trade: &Trade,
     settlement_write: SettlementWrite,
-) -> Result<(TradeId, Upsert, Option<Trade>), UpsertError> {
+) -> Result<Upserted<Trade>, UpsertError> {
     // Degenerate figures (zero/negative quantity, negative costs, …) corrupt
     // every downstream report without failing anything — rejected before
     // anything else runs.
@@ -758,8 +756,8 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| TradeId(result.last_insert_rowid()));
 
     // The trade's currency must be the listing's: `average_price` is the price
@@ -852,9 +850,9 @@ async fn write(
         });
     }
 
-    let (outcome, stored) = http::crud_upserted::<Trade, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Trade, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// Outcome of a delete request, so the handler can map to the right status.

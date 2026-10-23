@@ -35,7 +35,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -562,7 +562,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     s: &EssStatement,
-) -> Result<(i64, Upsert, Option<EssStatement>), UpsertError> {
+) -> Result<Upserted<EssStatement>, UpsertError> {
     validate(s)?;
 
     // A statement-AUD override restates a label the statement already gives in
@@ -709,13 +709,12 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
-    let (outcome, stored) =
-        http::crud_upserted::<EssStatement, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<EssStatement, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /ess_statements/:id` — the long-standing upsert on a caller-chosen id.
@@ -723,14 +722,13 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     s: &EssStatement,
 ) -> Result<http::Upserted<EssStatement>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(s.id), s).await?;
-    Ok((outcome, row))
+    write(pool, Some(s.id), s).await
 }
 
 /// `POST /ess_statements` — create the statement without naming an id, and
 /// return the row the database assigned one to.
 pub async fn db_create(pool: &SqlitePool, s: &EssStatement) -> Result<EssStatement, UpsertError> {
-    let (_, _, stored) = write(pool, None, s).await?;
+    let stored = write(pool, None, s).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -830,7 +828,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<EssStatementBody>,
 ) -> Result<UpsertResponse<EssStatement>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &ess_statement_from_body(id, body)).await?;
     http::upsert_response::<EssStatement>(outcome, row)
 }
 

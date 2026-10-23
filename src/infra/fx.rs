@@ -349,9 +349,22 @@ pub struct Provisional<T> {
 
 impl<T> Provisional<T> {
     /// The value and whether it rests on a fallback-month rate.
-    pub fn into_parts(self) -> (T, bool) {
-        (self.value, self.provisional)
+    pub fn into_parts(self) -> Parts<T> {
+        Parts {
+            value: self.value,
+            provisional: self.provisional,
+        }
     }
+}
+
+/// A [`Provisional`] taken apart: named fields rather than a `(T, bool)`, so
+/// a caller destructuring it names the flag (`provisional: _` to set it aside)
+/// rather than holding an anonymous `bool`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Parts<T> {
+    pub value: T,
+    /// The value rests on a fallback month's rate (see [`ValuationRate`]).
+    pub provisional: bool,
 }
 
 /// The valuation month of `date` and its fallback predecessors, newest first:
@@ -962,7 +975,10 @@ mod tests {
             .unwrap();
         let amount = Decimal::from(100);
 
-        let (aud, provisional) = fallback.apply(amount).into_parts();
+        let Parts {
+            value: aud,
+            provisional,
+        } = fallback.apply(amount).into_parts();
         assert_eq!(
             aud.amount(),
             Decimal::from(200),
@@ -974,17 +990,23 @@ mod tests {
         );
         assert_eq!(
             fallback.quoted().into_parts(),
-            ("0.50".parse::<Decimal>().unwrap(), true),
+            Parts {
+                value: "0.50".parse::<Decimal>().unwrap(),
+                provisional: true
+            },
             "so does the rate itself"
         );
         assert!(fallback.is_provisional());
 
-        let (aud, provisional) = real.apply(amount).into_parts();
+        let Parts {
+            value: aud,
+            provisional,
+        } = real.apply(amount).into_parts();
         assert_eq!(aud.amount(), Decimal::from(200));
         assert!(!provisional, "May's own rate is final");
-        assert!(!real.quoted().into_parts().1);
+        assert!(!real.quoted().into_parts().provisional);
         assert_eq!(
-            real.apply(amount).into_parts().0,
+            real.apply(amount).into_parts().value,
             apply_rate_to_aud(amount, "0.50".parse().unwrap()),
             "`apply` is the plain conversion, flag aside"
         );

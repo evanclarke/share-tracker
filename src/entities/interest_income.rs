@@ -18,7 +18,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::respond::Created;
 use axum::extract::{Path, State};
@@ -238,7 +238,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     i: &InterestIncome,
-) -> Result<(i64, Upsert, Option<InterestIncome>), UpsertError> {
+) -> Result<Upserted<InterestIncome>, UpsertError> {
     for (field, value) in [
         ("amount", i.amount),
         ("tfn_withholding_tax", i.tfn_withholding_tax),
@@ -291,13 +291,12 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
-    let (outcome, stored) =
-        http::crud_upserted::<InterestIncome, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<InterestIncome, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /interest_income/:id` — the long-standing upsert on a caller-chosen id.
@@ -305,8 +304,7 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     i: &InterestIncome,
 ) -> Result<http::Upserted<InterestIncome>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(i.id), i).await?;
-    Ok((outcome, row))
+    write(pool, Some(i.id), i).await
 }
 
 /// `POST /interest_income` — create without naming an id, and return the row
@@ -315,7 +313,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     i: &InterestIncome,
 ) -> Result<InterestIncome, UpsertError> {
-    let (_, _, stored) = write(pool, None, i).await?;
+    let stored = write(pool, None, i).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -351,7 +349,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<InterestIncomeBody>,
 ) -> Result<UpsertResponse<InterestIncome>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &interest_income_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &interest_income_from_body(id, body)).await?;
     http::upsert_response::<InterestIncome>(outcome, row)
 }
 

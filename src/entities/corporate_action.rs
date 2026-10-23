@@ -188,6 +188,7 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::adjustments::SplitRatio;
     use crate::entities::sell::{AllocationInput, SellBody, SellError};
     use crate::entities::{listing, sell};
     use crate::test_support::{self, ApiClient, test_pool};
@@ -1305,23 +1306,35 @@ mod tests {
         // Acquired before both: both apply → 2/10.
         assert_eq!(
             split_ratio(&splits, d(2024, 1, 1), None),
-            (Decimal::from(2), Decimal::from(10))
+            SplitRatio {
+                new: Decimal::from(2),
+                old: Decimal::from(10)
+            }
         );
         // Acquired on the first conversion date: already post-split — only the
         // second applies.
         assert_eq!(
             split_ratio(&splits, d(2024, 6, 1), None),
-            (Decimal::ONE, Decimal::from(10))
+            SplitRatio {
+                new: Decimal::ONE,
+                old: Decimal::from(10)
+            }
         );
         // Re-basing to a date on the second conversion: it applies (inclusive end).
         assert_eq!(
             split_ratio(&splits, d(2024, 1, 1), Some(d(2025, 1, 1))),
-            (Decimal::from(2), Decimal::from(10))
+            SplitRatio {
+                new: Decimal::from(2),
+                old: Decimal::from(10)
+            }
         );
         // Re-basing to a date before the second conversion: only the first.
         assert_eq!(
             split_ratio(&splits, d(2024, 1, 1), Some(d(2024, 12, 31))),
-            (Decimal::from(2), Decimal::ONE)
+            SplitRatio {
+                new: Decimal::from(2),
+                old: Decimal::ONE
+            }
         );
     }
 
@@ -1414,7 +1427,10 @@ mod tests {
         let quantity_events = vec![split];
         assert_eq!(
             split_ratio(&quantity_events, d(2024, 2, 20), Some(d(2026, 7, 26))),
-            (Decimal::from(2), Decimal::ONE),
+            SplitRatio {
+                new: Decimal::from(2),
+                old: Decimal::ONE
+            },
             "only the split converts unit bases — the demerger issues units of \
              another listing and moves no count here"
         );
@@ -3292,7 +3308,7 @@ mod tests {
             },
         )
         .await
-        .map(|(outcome, _)| outcome)
+        .map(|upserted| upserted.outcome)
     }
 
     /// SCENARIOS E-09: a consolidation whose ratio does not divide the

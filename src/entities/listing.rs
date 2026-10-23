@@ -1,7 +1,7 @@
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::ListingId;
 use crate::infra::respond::Created;
 use axum::extract::{Path, State};
@@ -455,7 +455,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<ListingId>,
     listing: &Listing,
-) -> Result<(ListingId, Upsert, Option<Listing>), UpsertError> {
+) -> Result<Upserted<Listing>, UpsertError> {
     // A blank ticker or name is refused before the transaction is even opened:
     // it is a pure check on the request, and neither value is inert. The
     // ticker (with the exchange) resolves the provider symbol — a stored blank
@@ -658,13 +658,12 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| ListingId(result.last_insert_rowid()));
-    let (outcome, stored) =
-        http::crud_upserted::<Listing, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Listing, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /listings/:id` — the long-standing upsert on a caller-chosen id.
@@ -672,14 +671,13 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     listing: &Listing,
 ) -> Result<http::Upserted<Listing>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(listing.id), listing).await?;
-    Ok((outcome, row))
+    write(pool, Some(listing.id), listing).await
 }
 
 /// `POST /listings` — create without naming an id, and return the row the
 /// database assigned one to (read inside the write's own transaction).
 pub async fn db_create(pool: &SqlitePool, listing: &Listing) -> Result<Listing, UpsertError> {
-    let (_, _, stored) = write(pool, None, listing).await?;
+    let stored = write(pool, None, listing).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -719,7 +717,10 @@ async fn upsert(
     Path(id): Path<ListingId>,
     Json(body): Json<ListingBody>,
 ) -> Result<UpsertResponse<Listing>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &listing_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &listing_from_body(id, body)).await?;
     http::upsert_response::<Listing>(outcome, row)
 }
 
@@ -1796,11 +1797,17 @@ mod tests {
     async fn db_upsert_returns_the_created_row_and_no_row_on_replace() {
         let pool = test_pool().await;
         let listing = xtest();
-        let (outcome, row) = db_upsert(&pool, &listing).await.unwrap();
-        assert_eq!(outcome, Upsert::Created);
+        let Upserted {
+            outcome,
+            created: row,
+        } = db_upsert(&pool, &listing).await.unwrap();
+        assert_eq!(outcome, http::Upsert::Created);
         assert_eq!(row.expect("a create hands back its row").id, listing.id);
-        let (outcome, row) = db_upsert(&pool, &listing).await.unwrap();
-        assert_eq!(outcome, Upsert::Replaced);
+        let Upserted {
+            outcome,
+            created: row,
+        } = db_upsert(&pool, &listing).await.unwrap();
+        assert_eq!(outcome, http::Upsert::Replaced);
         assert!(
             row.is_none(),
             "a replace answers 204 with no body, so no row is read"

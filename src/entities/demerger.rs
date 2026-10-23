@@ -58,7 +58,7 @@ use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
-use crate::infra::decimal::apportion;
+use crate::infra::decimal::{Apportioned, apportion};
 use crate::infra::extract::Query;
 use crate::infra::http::{ApiError, DryRunQuery};
 use crate::infra::id::HoldingAccountId;
@@ -243,8 +243,10 @@ async fn execute(
         // product would overflow `rust_decimal` — a parcel costed at 1e27 at
         // 99% is `9.9e28` in the working and `9.9e26` in the answer, and this
         // is a write path, so the panic aborted the whole demerge.
-        let (demerged_cost_base, head_cost_base) =
-            apportion(carried_cost_base, cost_base_pct, Decimal::ONE_HUNDRED);
+        let Apportioned {
+            share: demerged_cost_base,
+            rest: head_cost_base,
+        } = apportion(carried_cost_base, cost_base_pct, Decimal::ONE_HUNDRED);
 
         replacements.push(Replacement {
             parcel_id: p.parcel.id,

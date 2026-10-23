@@ -282,7 +282,14 @@ pub fn upsert_response<E: CrudEntity>(
 /// A write that reports create-vs-replace hands back the outcome plus the
 /// stored row for a create, read inside its own write transaction — the
 /// return shape of every entity's `db_upsert` (see [`upsert_response`]).
-pub type Upserted<E> = (Upsert, Option<E>);
+#[derive(Debug)]
+pub struct Upserted<E> {
+    /// Whether the write inserted a row or replaced one.
+    pub outcome: Upsert,
+    /// The row a create stored, read before its `commit`; `None` for a
+    /// replace, which answers `204` with no body.
+    pub created: Option<E>,
+}
 
 impl Upsert {
     /// The outcome of a write whose in-transaction existence check (see
@@ -763,7 +770,10 @@ where
     } else {
         crud_get::<E, X>(executor, key).await?
     };
-    Ok((Upsert::of(existed), stored))
+    Ok(Upserted {
+        outcome: Upsert::of(existed),
+        created: stored,
+    })
 }
 
 /// Delete one row of `E`'s table by primary key; `true` if a row went.

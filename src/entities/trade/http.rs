@@ -9,6 +9,7 @@ use super::{
     resolve_brokerage,
 };
 use crate::infra::extract::{Json, Query};
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, UpsertResponse};
 use crate::infra::id::TradeId;
 use crate::infra::respond::{Created, NoContent};
@@ -142,7 +143,10 @@ async fn upsert(
 ) -> Result<UpsertResponse<Trade>, ApiError> {
     let supplied = body.settlement_date;
     let trade = trade_from_body(id, body)?;
-    let (outcome, row) = db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert_resolving_settlement(&pool, &trade, supplied).await?;
     http::upsert_response::<Trade>(outcome, row)
 }
 

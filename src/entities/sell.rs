@@ -17,7 +17,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::{Json, Query};
-use crate::infra::http::{self, ApiError, DryRunQuery, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, DryRunQuery, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -511,7 +511,7 @@ async fn write(
     id: Option<TradeId>,
     body: &SellBody,
     mode: WriteMode,
-) -> Result<(TradeId, Upsert, Option<Trade>), SellError> {
+) -> Result<Upserted<Trade>, SellError> {
     let mut tx = write_tx(pool).await?;
 
     // The create-vs-replace decision is made inside the write's own
@@ -619,9 +619,9 @@ async fn write(
         return Err(SellError::NonTradingDay(shut.describe(body.date)));
     }
 
-    let (outcome, stored) = http::crud_upserted::<Trade, _>(&mut *tx, existed, written).await?;
+    let upserted = http::crud_upserted::<Trade, _>(&mut *tx, existed, written).await?;
     mode.finish(tx).await?;
-    Ok((written, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /sells/:id` — the long-standing upsert on a caller-chosen id: replaces
@@ -635,8 +635,7 @@ pub async fn db_upsert_sell(
     id: TradeId,
     body: &SellBody,
 ) -> Result<http::Upserted<Trade>, SellError> {
-    let (_, outcome, row) = write(pool, Some(id), body, WriteMode::Commit).await?;
-    Ok((outcome, row))
+    write(pool, Some(id), body, WriteMode::Commit).await
 }
 
 /// `POST /sells` — create without naming an id. The database assigns the
@@ -653,7 +652,7 @@ pub async fn db_create_sell(
     body: &SellBody,
     mode: WriteMode,
 ) -> Result<Trade, SellError> {
-    let (_, _, stored) = write(pool, None, body, mode).await?;
+    let stored = write(pool, None, body, mode).await?.created;
     stored.ok_or(SellError::VanishedAfterCreate)
 }
 
@@ -993,7 +992,10 @@ async fn upsert(
     Path(id): Path<TradeId>,
     Json(body): Json<SellBody>,
 ) -> Result<UpsertResponse<Trade>, ApiError> {
-    let (outcome, row) = db_upsert_sell(&pool, id, &body).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert_sell(&pool, id, &body).await?;
     http::upsert_response::<Trade>(outcome, row)
 }
 

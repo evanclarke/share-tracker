@@ -37,7 +37,7 @@ use crate::entities::income::Income;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
@@ -220,8 +220,7 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     period: &DrpEnrolment,
 ) -> Result<http::Upserted<DrpEnrolment>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(period.id), period).await?;
-    Ok((outcome, row))
+    write(pool, Some(period.id), period).await
 }
 
 /// `POST /drp_enrolments` — create without naming an id, and return the row the
@@ -230,7 +229,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     period: &DrpEnrolment,
 ) -> Result<DrpEnrolment, UpsertError> {
-    let (_, _, stored) = write(pool, None, period).await?;
+    let stored = write(pool, None, period).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -244,7 +243,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     period: &DrpEnrolment,
-) -> Result<(i64, Upsert, Option<DrpEnrolment>), UpsertError> {
+) -> Result<Upserted<DrpEnrolment>, UpsertError> {
     if let Some(end) = period.unenrolment_date
         && end <= period.enrolment_date
     {
@@ -304,16 +303,15 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     recompute_residuals(&mut tx, period).await?;
 
-    let (outcome, stored) =
-        http::crud_upserted::<DrpEnrolment, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<DrpEnrolment, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// Where one reinvestment sits in its period's residual chain — the only
@@ -534,7 +532,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<DrpEnrolmentBody>,
 ) -> Result<UpsertResponse<DrpEnrolment>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
     http::upsert_response::<DrpEnrolment>(outcome, row)
 }
 

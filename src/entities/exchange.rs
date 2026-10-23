@@ -2,6 +2,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::NoFilter;
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
 use axum::extract::{Path, State};
 use chrono::NaiveTime;
@@ -268,7 +269,10 @@ async fn upsert(
         settlement_days: body.settlement_days,
         close_time: body.close_time,
     };
-    let (outcome, row) = db_upsert(&pool, &exchange).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &exchange).await?;
     http::upsert_response::<Exchange>(outcome, row)
 }
 

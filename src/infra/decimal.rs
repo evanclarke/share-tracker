@@ -383,9 +383,19 @@ pub fn mul_div(factors: &[Decimal], divisor: Decimal) -> Decimal {
     if divided { acc } else { acc / divisor }
 }
 
+/// The two halves [`apportion`] answers, named because both are `Decimal`s and
+/// a swapped pair would still compile — and would carry the wrong leg of a
+/// cost base into a replacement parcel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Apportioned {
+    /// The `num / den` share of the whole.
+    pub share: Decimal,
+    /// The whole less the share.
+    pub rest: Decimal,
+}
+
 /// *The* two-way split of a cost base: `whole` divided into the `num / den`
-/// share of it and the rest, answered as `(share, rest)` with `share + rest ==
-/// whole` **exactly**. A demerger's demerged and head legs, and a partial
+/// share of it and the rest, with `share + rest == whole` **exactly**. A demerger's demerged and head legs, and a partial
 /// rollover's cash and scrip sides, are each one such split — and the two
 /// halves are stored or reported in different places (the scrip side carried
 /// into the replacement parcel, the cash side assessed by the realised-gains
@@ -404,7 +414,7 @@ pub fn mul_div(factors: &[Decimal], divisor: Decimal) -> Decimal {
 ///
 /// `num / den` is a fraction between 0 and 1 (`den` non-zero), as every
 /// caller's is.
-pub fn apportion(whole: Decimal, num: Decimal, den: Decimal) -> (Decimal, Decimal) {
+pub fn apportion(whole: Decimal, num: Decimal, den: Decimal) -> Apportioned {
     // The significant digits `rust_decimal` always holds (its 96-bit mantissa
     // holds every 28-digit value, and some 29-digit ones).
     const DIGITS: u32 = 28;
@@ -416,7 +426,10 @@ pub fn apportion(whole: Decimal, num: Decimal, den: Decimal) -> (Decimal, Decima
     let integer_digits = digits.saturating_sub(whole.scale());
     let places = DIGITS.saturating_sub(integer_digits).max(whole.scale());
     let share = mul_div(&[whole, num], den).round_dp(places);
-    (share, whole - share)
+    Apportioned {
+        share,
+        rest: whole - share,
+    }
 }
 
 /// Read a nullable TEXT decimal column via [`OptMoney`]: `NULL` maps to `None`, a
@@ -924,13 +937,16 @@ mod tests {
         let plain = mul_div(&[whole, num], den);
         assert_ne!(plain + (whole - plain), whole);
 
-        let (share, rest) = apportion(whole, num, den);
+        let Apportioned { share, rest } = apportion(whole, num, den);
         assert_eq!(share + rest, whole);
         assert!((share - plain).abs() <= dec("0.1"));
         // A share that already fits is the plain one, digit for digit.
         assert_eq!(
             apportion(dec("2500"), dec("5.063"), Decimal::ONE_HUNDRED),
-            (dec("126.575"), dec("2373.425"))
+            Apportioned {
+                share: dec("126.575"),
+                rest: dec("2373.425")
+            }
         );
     }
 
@@ -952,7 +968,7 @@ mod tests {
             let den = num + Decimal::new(extra, num_scale);
             proptest::prop_assume!(!den.is_zero());
 
-            let (share, rest) = apportion(whole, num, den);
+            let Apportioned { share, rest } = apportion(whole, num, den);
             proptest::prop_assert_eq!(share + rest, whole);
             proptest::prop_assert!(share >= Decimal::ZERO && rest >= Decimal::ZERO);
             let ulp = Decimal::new(1, whole.scale()).max(whole * dec("1e-27"));

@@ -4,6 +4,7 @@ use super::CorporateActionListQuery;
 use super::db::{db_create, db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
 use crate::infra::extract::Json;
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, UpsertResponse};
 use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
@@ -68,7 +69,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<CorporateActionBody>,
 ) -> Result<UpsertResponse<CorporateAction>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &corporate_action_from_body(id, body)?).await?;
     http::upsert_response::<CorporateAction>(outcome, row)
 }
 

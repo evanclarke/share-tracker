@@ -210,7 +210,7 @@ impl SmtpMailer {
     fn message(&self, document: &Document) -> Result<lettre::Message, MailError> {
         use lettre::message::MultiPart;
 
-        let (text, html) = document.render();
+        let Rendered { text, html } = document.render();
         let subject = match &self.subject_prefix {
             Some(prefix) => format!("{prefix} {}", document.subject),
             None => document.subject.clone(),
@@ -336,10 +336,22 @@ impl Table {
     }
 }
 
+/// Both parts of a [`Document`]'s `multipart/alternative` body, named because
+/// the two are the same type and a swapped pair would still compile.
+pub struct Rendered {
+    /// The `text/plain` part.
+    pub text: String,
+    /// The `text/html` part.
+    pub html: String,
+}
+
 impl Document {
-    /// Both message parts: `(text/plain, text/html)`.
-    pub fn render(&self) -> (String, String) {
-        (self.render_text(), self.render_html())
+    /// Both message parts.
+    pub fn render(&self) -> Rendered {
+        Rendered {
+            text: self.render_text(),
+            html: self.render_html(),
+        }
     }
 
     fn render_text(&self) -> String {
@@ -674,7 +686,7 @@ pub mod test_support {
         /// test asserts a figure appears in, without caring which part carried
         /// it (the two say the same thing, by construction).
         pub fn only_body(&self) -> String {
-            let (text, html) = self.only().render();
+            let Rendered { text, html } = self.only().render();
             format!("{text}\n{html}")
         }
 
@@ -764,7 +776,7 @@ mod tests {
 
     #[test]
     fn both_parts_carry_every_figure_and_note() {
-        let (text, html) = document().render();
+        let Rendered { text, html } = document().render();
         for part in [&text, &html] {
             assert!(part.contains("412,880.11"), "{part}");
             assert!(part.contains("418,204.63"), "{part}");
@@ -779,7 +791,7 @@ mod tests {
 
     #[test]
     fn html_escapes_operator_entered_text() {
-        let (_, html) = document().render();
+        let html = document().render().html;
         assert!(html.contains("Smith &amp; Co"), "{html}");
         assert!(!html.contains("Smith & Co"), "{html}");
     }

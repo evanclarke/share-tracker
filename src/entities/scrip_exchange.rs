@@ -416,7 +416,7 @@ impl Terms {
         // way by the realised-gains report, from the same `apportion`). The
         // two sides sum exactly to the reduced cost base.
         let carried_cost_base = match self.cash_apportionment {
-            Some((num, den)) => apportion(reduced_cost_base, num, den).1,
+            Some((num, den)) => apportion(reduced_cost_base, num, den).rest,
             None => reduced_cost_base,
         };
 

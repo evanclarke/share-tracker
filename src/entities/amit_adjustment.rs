@@ -4,6 +4,7 @@ use crate::entities::corporate_action;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -583,7 +584,10 @@ async fn upsert(
     Json(body): Json<AmitAdjustmentBody>,
 ) -> Result<UpsertResponse<AmitAdjustment>, ApiError> {
     let adj = amit_adjustment_from_body(id, body);
-    let (outcome, row) = db_upsert(&pool, &adj).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &adj).await?;
     http::upsert_response::<AmitAdjustment>(outcome, row)
 }
 

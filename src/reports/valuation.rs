@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use crate::entities::closing_price::{self, Market, PriceStatus};
-use crate::infra::fx::{FxRates, ValuationRate};
+use crate::infra::fx::{self, FxRates, ValuationRate};
 
 /// Why valuation could not proceed for one or more held listings.
 /// `Unprocessable` carries the joined per-listing blockers (missing/errored
@@ -360,7 +360,10 @@ pub(crate) async fn valuations_of_markets(
             Ok(rate) => {
                 // The flag stays on the row with `rate`; `provisional()`
                 // reads it from there.
-                let (aud_price, _provisional) = rate.apply(native_price).into_parts();
+                let fx::Parts {
+                    value: aud_price,
+                    provisional: _,
+                } = rate.apply(native_price).into_parts();
                 valuations.push(ListingValuation {
                     listing_id: market.listing.id,
                     currency: market.listing.currency.clone(),

@@ -16,7 +16,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::NoFilter;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
@@ -132,7 +132,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<HoldingAccountId>,
     account: &HoldingAccount,
-) -> Result<(HoldingAccountId, Upsert, Option<HoldingAccount>), sqlx::Error> {
+) -> Result<Upserted<HoldingAccount>, sqlx::Error> {
     // A create (`id` is `None`) binds a NULL id, so the database — not the
     // caller — picks the new row's id (`infra::db::insert_with_optional_id`,
     // SCENARIOS U-a). `holding_accounts` is the one table here that is not
@@ -150,21 +150,19 @@ async fn write(
     let existed = http::crud_exists_opt::<HoldingAccount, _>(&mut *tx, id).await?;
     let result = query.bind(&account.name).execute(&mut *tx).await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| HoldingAccountId(result.last_insert_rowid()));
-    let (outcome, stored) =
-        http::crud_upserted::<HoldingAccount, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<HoldingAccount, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 pub async fn db_upsert(
     pool: &SqlitePool,
     account: &HoldingAccount,
 ) -> Result<http::Upserted<HoldingAccount>, sqlx::Error> {
-    let (_, outcome, row) = write(pool, Some(account.id), account).await?;
-    Ok((outcome, row))
+    write(pool, Some(account.id), account).await
 }
 
 /// `POST /holding_accounts` — create without naming an id, and return the row
@@ -173,7 +171,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     account: &HoldingAccount,
 ) -> Result<HoldingAccount, UpsertError> {
-    let (_, _, stored) = write(pool, None, account).await?;
+    let stored = write(pool, None, account).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -254,7 +252,10 @@ async fn upsert(
     Json(body): Json<HoldingAccountBody>,
 ) -> Result<UpsertResponse<HoldingAccount>, ApiError> {
     // A duplicate name violates the UNIQUE constraint → 422.
-    let (outcome, row) = db_upsert(&pool, &holding_account_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &holding_account_from_body(id, body)).await?;
     http::upsert_response::<HoldingAccount>(outcome, row)
 }
 

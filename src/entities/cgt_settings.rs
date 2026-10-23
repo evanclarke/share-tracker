@@ -11,6 +11,7 @@ use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
 use crate::infra::http::NoFilter;
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
 use axum::extract::{Path, State};
 use rust_decimal::Decimal;
@@ -137,7 +138,10 @@ async fn upsert(
         opening_capital_loss: body.opening_capital_loss,
     };
     // id != 1 violates the singleton CHECK → 422.
-    let (outcome, row) = db_upsert(&pool, &settings).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &settings).await?;
     http::upsert_response::<CgtSettings>(outcome, row)
 }
 

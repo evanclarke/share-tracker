@@ -12,7 +12,7 @@ use crate::domain::adjustments::{
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert};
+use crate::infra::http::{self, ApiError, CrudEntity, Upserted};
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use chrono::NaiveDate;
@@ -388,7 +388,7 @@ pub async fn rebased_quantity_beyond_range(
         let acquired: NaiveDate = row.try_get("acquired")?;
         let sale_date: NaiveDate = row.try_get("sale_date")?;
         let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        let (new, old) =
+        let crate::domain::adjustments::SplitRatio { new, old } =
             crate::domain::adjustments::split_ratio(&splits, acquired, Some(sale_date));
         if let Err(e) = crate::domain::cost_base::checked_rebased_quantity(
             ("quantity_allocated", allocated),
@@ -497,7 +497,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     action: &CorporateAction,
-) -> Result<(i64, Upsert, Option<CorporateAction>), WriteError> {
+) -> Result<Upserted<CorporateAction>, WriteError> {
     // Spread the variant's payload over the per-type columns; the other
     // types' columns are NULL (the table CHECKs require exactly this shape).
     #[derive(Default)]
@@ -826,8 +826,8 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // Editing an action is deliberately *not* frozen the way deleting one is
@@ -887,10 +887,10 @@ async fn write(
         });
     }
 
-    let (outcome, stored) =
+    let upserted =
         http::crud_upserted::<CorporateAction, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /corporate_actions/:id` — the long-standing upsert on a caller-chosen
@@ -899,8 +899,7 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     action: &CorporateAction,
 ) -> Result<http::Upserted<CorporateAction>, WriteError> {
-    let (_, outcome, row) = write(pool, Some(action.id), action).await?;
-    Ok((outcome, row))
+    write(pool, Some(action.id), action).await
 }
 
 /// `POST /corporate_actions` — create the action without naming an id, and
@@ -909,7 +908,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     action: &CorporateAction,
 ) -> Result<CorporateAction, WriteError> {
-    let (_, _, stored) = write(pool, None, action).await?;
+    let stored = write(pool, None, action).await?.created;
     stored.ok_or(WriteError::VanishedAfterCreate)
 }
 

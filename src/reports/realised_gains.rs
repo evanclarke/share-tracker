@@ -570,7 +570,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // same `apportion` — so the two sum to the full reduced cost base).
         let cash_apportionment = sale.scrip_cash_apportionment()?;
         let alloc_cost = match cash_apportionment {
-            Some((num, den)) => apportion(alloc_cost, num, den).0,
+            Some((num, den)) => apportion(alloc_cost, num, den).share,
             None => alloc_cost,
         };
 
@@ -593,7 +593,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             // The cash apportionment is a share of the *whole* cost base, so
             // it applies to the indexed figure exactly as it did above.
             match cash_apportionment {
-                Some((num, den)) => apportion(indexed, num, den).0,
+                Some((num, den)) => apportion(indexed, num, den).share,
                 None => indexed,
             }
         });

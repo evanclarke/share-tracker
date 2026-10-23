@@ -92,12 +92,21 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   The SellError pass-throughs and the `#[non_exhaustive]` third-party matches (yfinance `YfError`/
   `Action`, sqlx `ErrorKind`) carry a reasoned fn-level `#[expect]`, because an arm-level attribute
   is not honoured. Gate mutation-checked: a restored `_` in `new_parcel.rs` fails clippy
-- [ ] Named fields over tuples, worst first where the pair is same-typed and swappable:
+- [x] Named fields over tuples, worst first where the pair is same-typed and swappable:
   `email::Document::render -> (String, String)` (HTML vs plain text), `decimal::apportion ->
   (Decimal, Decimal)` (share, rest), `adjustments::split_ratio`/`rebase_ratio -> (Decimal, Decimal)`
   (new, old) and `Ratio::parts`, `http::Upserted<E> = (Upsert, Option<E>)`, the
   `(id, Upsert, Option<T>)` returns of `listing.rs:458`/`amma.rs:407`/`drp_enrolment.rs:247`, and
   `fx::Provisional::into_parts -> (T, bool)` (also a bool-as-enum case)
+  Done 2026-10-23: `email::Rendered { text, html }`, `decimal::Apportioned { share, rest }`,
+  `adjustments::SplitRatio { new, old }` (from `split_ratio`, `rebase_ratio` and also
+  `price_basis_ratio`, which had the same `(new, old)` shape) and `Fraction { num, den }` (from
+  `AcquiredUnits::parts`; `Ratio::parts` was a misnaming of it), `http::Upserted { outcome,
+  created }`, and `fx::Parts { value, provisional }`. The twelve private `write` fns returned
+  `(id, Upsert, Option<T>)`, but every caller discarded the id, so they now return `Upserted<T>`
+  instead. The compiler enforces the shapes; the existing tests for each (the `apportion`
+  property, the `split_ratio` interval tests, every upsert round-trip, the fx fallback test)
+  now assert against the named fields
 - [ ] `bool` parameters whose meaning is invisible at the call site (19 fns): `Written::new(dry_run:
   bool, …)` (`infra/respond.rs:160`) should take the existing `WriteMode`; the auth flag threaded as
   `bool` through `web::router`, `web::index_html`, `app::api_routes` and `RequestGuard::new` should

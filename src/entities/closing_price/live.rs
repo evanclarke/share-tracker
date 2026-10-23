@@ -7,6 +7,7 @@
 use super::fetcher::PriceFetcher;
 use super::market::{Market, load_market};
 use crate::infra::currency::Aud;
+use crate::infra::fx;
 use crate::infra::id::ListingId;
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
@@ -80,15 +81,14 @@ pub async fn fetch_live_aud_prices(
                 // exist yet — a flagged valuation beats an unvalued holding).
                 // A gap beyond the fallback bound is surfaced as the row's
                 // reason, never a silent or zeroed value.
-                match crate::infra::fx::resolve_valuation_rate(
-                    pool,
-                    &quote.currency,
-                    quote.as_of.date_naive(),
-                )
-                .await
+                match fx::resolve_valuation_rate(pool, &quote.currency, quote.as_of.date_naive())
+                    .await
                 {
                     Ok(vr) => {
-                        let (aud_price, fx_provisional) = vr.apply(quote.price).into_parts();
+                        let fx::Parts {
+                            value: aud_price,
+                            provisional: fx_provisional,
+                        } = vr.apply(quote.price).into_parts();
                         Ok(LiveValuation {
                             aud_price,
                             as_of: quote.as_of.to_rfc3339(),

@@ -9,6 +9,7 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use crate::infra::id::ListingId;
 use crate::infra::respond::NoContent;
@@ -156,7 +157,10 @@ pub async fn db_upsert(
         None
     };
     tx.commit().await?;
-    Ok((Upsert::of(!created), stored))
+    Ok(Upserted {
+        outcome: Upsert::of(!created),
+        created: stored,
+    })
 }
 
 pub async fn db_delete(pool: &SqlitePool, mic: &str, date: NaiveDate) -> Result<bool, sqlx::Error> {
@@ -297,7 +301,10 @@ async fn upsert(
         holiday_date,
         name: body.name,
     };
-    let (outcome, row) = db_upsert(&pool, &holiday).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &holiday).await?;
     http::upsert_response_of(outcome, row)
 }
 

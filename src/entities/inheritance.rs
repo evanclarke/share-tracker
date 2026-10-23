@@ -107,7 +107,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -689,7 +689,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     inh: &Inheritance,
-) -> Result<(i64, Upsert, Option<Inheritance>), UpsertError> {
+) -> Result<Upserted<Inheritance>, UpsertError> {
     validate(inh)?;
 
     let mut tx = write_tx(pool).await?;
@@ -853,10 +853,9 @@ async fn write(
         });
     }
 
-    let (outcome, stored) =
-        http::crud_upserted::<Inheritance, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<Inheritance, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /inheritances/:id` — the long-standing upsert on a caller-chosen id.
@@ -864,14 +863,13 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     inh: &Inheritance,
 ) -> Result<http::Upserted<Inheritance>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(inh.id), inh).await?;
-    Ok((outcome, row))
+    write(pool, Some(inh.id), inh).await
 }
 
 /// `POST /inheritances` — create without naming an id, and return the row (and
 /// the linked parcel Buy) the database assigned one to.
 pub async fn db_create(pool: &SqlitePool, inh: &Inheritance) -> Result<Inheritance, UpsertError> {
-    let (_, _, stored) = write(pool, None, inh).await?;
+    let stored = write(pool, None, inh).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -946,7 +944,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<InheritanceBody>,
 ) -> Result<UpsertResponse<Inheritance>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &inheritance_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &inheritance_from_body(id, body)).await?;
     http::upsert_response::<Inheritance>(outcome, row)
 }
 

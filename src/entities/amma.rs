@@ -2,7 +2,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::respond::Created;
@@ -380,8 +380,7 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     stmt: &AmmaStatement,
 ) -> Result<http::Upserted<AmmaStatement>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(stmt.id), stmt).await?;
-    Ok((outcome, row))
+    write(pool, Some(stmt.id), stmt).await
 }
 
 /// `POST /amma_statements` — create without naming an id, and return the row
@@ -390,7 +389,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     stmt: &AmmaStatement,
 ) -> Result<AmmaStatement, UpsertError> {
-    let (_, _, stored) = write(pool, None, stmt).await?;
+    let stored = write(pool, None, stmt).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -404,7 +403,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     stmt: &AmmaStatement,
-) -> Result<(i64, Upsert, Option<AmmaStatement>), UpsertError> {
+) -> Result<Upserted<AmmaStatement>, UpsertError> {
     // No component of the statement may be negative: every figure is the
     // fund's own attributed amount, and the ATO's AMMA guidance notes state
     // the rule outright — "An AMIT or attribution CCIV sub-fund trust
@@ -540,8 +539,8 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
 
     // The statement's currency must be the listing's, as a trade's must
@@ -558,10 +557,9 @@ async fn write(
         });
     }
 
-    let (outcome, stored) =
-        http::crud_upserted::<AmmaStatement, _>(&mut *tx, existed, assigned_id).await?;
+    let upserted = http::crud_upserted::<AmmaStatement, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and
@@ -606,7 +604,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<AmmaStatementBody>,
 ) -> Result<UpsertResponse<AmmaStatement>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &amma_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &amma_from_body(id, body)).await?;
     http::upsert_response::<AmmaStatement>(outcome, row)
 }
 

@@ -885,14 +885,14 @@ fn disposal_parcel_rows(
                                 r.per_unit = r.per_unit.map(|pu| pu / rate);
                             }
                             if let Some((num, den)) = apportionment {
-                                r.amount = apportion(r.amount, *num, *den).0;
-                                r.per_unit = r.per_unit.map(|pu| apportion(pu, *num, *den).0);
+                                r.amount = apportion(r.amount, *num, *den).share;
+                                r.per_unit = r.per_unit.map(|pu| apportion(pu, *num, *den).share);
                             }
                             r
                         })
                         .collect();
                     let aud_initial = match apportionment {
-                        Some((num, den)) => apportion(aud_initial, *num, *den).0,
+                        Some((num, den)) => apportion(aud_initial, *num, *den).share,
                         None => aud_initial,
                     };
                     (aud_rows, aud_initial)

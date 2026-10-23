@@ -169,7 +169,7 @@ impl RocEvent {
                 .into(),
             ));
         }
-        let (new, old) = split_ratio(splits, acquired, Some(self.date));
+        let SplitRatio { new, old } = split_ratio(splits, acquired, Some(self.date));
         Ok(Some(if new == old {
             self.amount_per_unit
         } else {
@@ -471,17 +471,41 @@ where
     rows.iter().map(split_event_from_row).collect()
 }
 
-/// Cumulative conversion ratio `(new, old)` between unit bases: the product of
+/// A conversion ratio between unit bases: `new` units for every `old`. Named
+/// because both terms are `Decimal`s, and a swapped pair still compiles — and
+/// re-bases every quantity the wrong way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitRatio {
+    /// The units held in the later basis for every `old`.
+    pub new: Decimal,
+    /// The units held in the earlier basis.
+    pub old: Decimal,
+}
+
+impl SplitRatio {
+    /// The ratio that converts no units: 1 for 1.
+    pub const IDENTITY: Self = Self {
+        new: Decimal::ONE,
+        old: Decimal::ONE,
+    };
+
+    /// The same conversion run backwards, from the later basis to the
+    /// earlier.
+    fn inverse(self) -> Self {
+        Self {
+            new: self.old,
+            old: self.new,
+        }
+    }
+}
+
+/// Cumulative conversion ratio between unit bases: the product of
 /// `new_units`/`old_units` over the splits dated in `(from, up_to]` (`None` =
 /// every split after `from`). A holding of `q` units in the basis of `from` is
 /// `q × new / old` units in the basis of `up_to`. The interval is half-open
 /// because a trade dated on a conversion date is already in post-split units,
 /// while a sale or payment dated on it is post-split too.
-pub fn split_ratio(
-    splits: &[SplitEvent],
-    from: NaiveDate,
-    up_to: Option<NaiveDate>,
-) -> (Decimal, Decimal) {
+pub fn split_ratio(splits: &[SplitEvent], from: NaiveDate, up_to: Option<NaiveDate>) -> SplitRatio {
     let mut new = Decimal::ONE;
     let mut old = Decimal::ONE;
     for s in splits {
@@ -491,7 +515,7 @@ pub fn split_ratio(
         new *= s.new_units;
         old *= s.old_units;
     }
-    (new, old)
+    SplitRatio { new, old }
 }
 
 /// A quantity in one parcel's own **as-acquired** unit basis — the basis
@@ -567,10 +591,13 @@ impl AcquiredUnits {
         }
     }
 
-    /// The count as `(numerator, denominator)`, for a caller that folds the
+    /// The count as an exact fraction, for a caller that folds the
     /// denominator into a division of its own rather than rounding twice.
-    pub(crate) fn parts(self) -> (Decimal, Decimal) {
-        (self.num, self.den)
+    pub(crate) fn parts(self) -> Fraction {
+        Fraction {
+            num: self.num,
+            den: self.den,
+        }
     }
 
     /// The two counts' numerators over one common denominator, or `None`
@@ -593,6 +620,15 @@ impl AcquiredUnits {
             .and_then(|(a, b, den)| Some(Self::fraction(op(a, b)?, den)))
             .unwrap_or_else(|| Self::new(op(self.get(), rhs.get()).expect("unit count overflow")))
     }
+}
+
+/// An [`AcquiredUnits`] count as the exact fraction `num / den` it holds —
+/// see [`AcquiredUnits::parts`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Fraction {
+    pub num: Decimal,
+    /// Always positive.
+    pub den: Decimal,
 }
 
 /// The least common multiple of two positive ratio denominators: their
@@ -748,7 +784,7 @@ fn rebase(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> Decimal {
-    let (new, old) = rebase_ratio(splits, from, to);
+    let SplitRatio { new, old } = rebase_ratio(splits, from, to);
     if new == old {
         qty
     } else {
@@ -756,21 +792,18 @@ fn rebase(
     }
 }
 
-/// The `(new, old)` ratio [`rebase`] multiplies by, for a caller that keeps
-/// the division to itself.
+/// The ratio [`rebase`] multiplies by, for a caller that keeps the division
+/// to itself.
 fn rebase_ratio(
     splits: &[SplitEvent],
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
-) -> (Decimal, Decimal) {
+) -> SplitRatio {
     match (from, to) {
-        (None, None) => (Decimal::ONE, Decimal::ONE),
+        (None, None) => SplitRatio::IDENTITY,
         (Some(f), None) => split_ratio(splits, f, None),
         (Some(f), Some(t)) if f <= t => split_ratio(splits, f, Some(t)),
-        (f, Some(t)) => {
-            let (new, old) = split_ratio(splits, t, f);
-            (old, new)
-        }
+        (f, Some(t)) => split_ratio(splits, t, f).inverse(),
     }
 }
 
@@ -784,8 +817,8 @@ pub fn split_adjusted_quantity(
     acquired: NaiveDate,
     up_to: Option<NaiveDate>,
 ) -> UnitsAt {
-    let (new, old) = rebase_ratio(splits, Some(acquired), up_to);
-    let (num, den) = qty.parts();
+    let SplitRatio { new, old } = rebase_ratio(splits, Some(acquired), up_to);
+    let Fraction { num, den } = qty.parts();
     // One division for the fraction's denominator and the ratio's together:
     // a remainder kept exact is not rounded on its way out either.
     let quantity = if new == old {
@@ -810,7 +843,7 @@ pub fn as_acquired_quantity(
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> AcquiredUnits {
-    let (new, old) = rebase_ratio(splits, qty.basis, Some(acquired));
+    let SplitRatio { new, old } = rebase_ratio(splits, qty.basis, Some(acquired));
     if new == old {
         return AcquiredUnits::new(qty.quantity);
     }
@@ -836,7 +869,7 @@ pub fn checked_as_acquired_quantity(
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> Result<AcquiredUnits, crate::domain::cost_base::UnrepresentableQuantity> {
-    let (new, old) = split_ratio(splits, acquired, qty.1.basis);
+    let SplitRatio { new, old } = split_ratio(splits, acquired, qty.1.basis);
     if new == old {
         return Ok(AcquiredUnits::new(qty.1.quantity));
     }
@@ -985,7 +1018,7 @@ where
         .collect()
 }
 
-/// Cumulative price-recovery ratio `(new, old)` between price bases: the
+/// Cumulative price-recovery ratio between price bases (a [`SplitRatio`]): the
 /// product of `recover_new`/`recover_old` over the events dated in
 /// `(from, up_to]`. A figure observed at `up_to` for the trading day `from` is
 /// `figure × new / old` in that day's own basis.
@@ -1000,7 +1033,7 @@ pub fn price_basis_ratio(
     events: &[PriceBasisEvent],
     from: NaiveDate,
     up_to: NaiveDate,
-) -> (Decimal, Decimal) {
+) -> SplitRatio {
     let mut new = Decimal::ONE;
     let mut old = Decimal::ONE;
     for e in events {
@@ -1010,7 +1043,7 @@ pub fn price_basis_ratio(
         new *= e.recover_new;
         old *= e.recover_old;
     }
-    (new, old)
+    SplitRatio { new, old }
 }
 
 /// A per-unit *price* observed in the basis in force at `observed`, restated
@@ -1031,7 +1064,7 @@ pub fn contemporaneous_price(
     price_date: NaiveDate,
     observed: NaiveDate,
 ) -> Decimal {
-    let (new, old) = price_basis_ratio(events, price_date, observed);
+    let SplitRatio { new, old } = price_basis_ratio(events, price_date, observed);
     if new == old {
         price
     } else {
@@ -1194,11 +1227,11 @@ mod tests {
             mid in 0i64..=2000,
         ) {
             let mid = acquired() + chrono::Duration::days(mid);
-            let (whole_new, whole_old) = split_ratio(&splits, acquired(), Some(after_all()));
-            let (first_new, first_old) = split_ratio(&splits, acquired(), Some(mid));
-            let (second_new, second_old) = split_ratio(&splits, mid, Some(after_all()));
-            prop_assert_eq!(whole_new, first_new * second_new);
-            prop_assert_eq!(whole_old, first_old * second_old);
+            let whole = split_ratio(&splits, acquired(), Some(after_all()));
+            let first = split_ratio(&splits, acquired(), Some(mid));
+            let second = split_ratio(&splits, mid, Some(after_all()));
+            prop_assert_eq!(whole.new, first.new * second.new);
+            prop_assert_eq!(whole.old, first.old * second.old);
         }
     }
 }

@@ -19,6 +19,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::http::NoFilter;
+use crate::infra::http::Upserted;
 use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
@@ -174,7 +175,10 @@ async fn upsert(
         tax_year,
         ess_taxed_upfront_reduction_eligible: body.ess_taxed_upfront_reduction_eligible,
     };
-    let (outcome, row) = db_upsert(&pool, &settings).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &settings).await?;
     http::upsert_response::<TaxYearSettings>(outcome, row)
 }
 

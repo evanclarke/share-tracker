@@ -40,7 +40,7 @@
 use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::extract::{Json, Query};
-use crate::infra::fx::{FxError, FxRates};
+use crate::infra::fx::{self, FxError, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -359,8 +359,14 @@ pub async fn compute(
                     None => fx.resolve_valuation_rate(&val_to.currency, from)?,
                 };
                 let exposure = qty1 * val_to.native_price;
-                let (at_to, to_provisional) = val_to.rate.apply(exposure).into_parts();
-                let (at_from, from_provisional) = rate_from.apply(exposure).into_parts();
+                let fx::Parts {
+                    value: at_to,
+                    provisional: to_provisional,
+                } = val_to.rate.apply(exposure).into_parts();
+                let fx::Parts {
+                    value: at_from,
+                    provisional: from_provisional,
+                } = rate_from.apply(exposure).into_parts();
                 let either_provisional = from_provisional || to_provisional;
                 if either_provisional {
                     provisional = true;
@@ -368,8 +374,14 @@ pub async fn compute(
                 let movement = at_to.amount() - at_from.amount();
                 // The rates shown are the ones just applied, so their flags
                 // are the two already folded in above.
-                let (shown_from, _) = rate_from.quoted().into_parts();
-                let (shown_to, _) = val_to.rate.quoted().into_parts();
+                let fx::Parts {
+                    value: shown_from,
+                    provisional: _,
+                } = rate_from.quoted().into_parts();
+                let fx::Parts {
+                    value: shown_to,
+                    provisional: _,
+                } = val_to.rate.quoted().into_parts();
                 let acc = currency_acc.entry(val_to.currency.clone()).or_default();
                 acc.total += movement;
                 if !acc.rates_set {

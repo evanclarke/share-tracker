@@ -20,7 +20,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney, mul_div};
 use crate::infra::extract::Json;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::respond::Created;
@@ -302,7 +302,7 @@ async fn write(
     pool: &SqlitePool,
     id: Option<i64>,
     e: &InvestmentExpense,
-) -> Result<(i64, Upsert, Option<InvestmentExpense>), UpsertError> {
+) -> Result<Upserted<InvestmentExpense>, UpsertError> {
     // A negative expense is not an expense: it would reduce the year's
     // deduction total, and — since the tax summary subtracts that total from
     // gross assessable investment income — lift the net line above the gross.
@@ -353,13 +353,13 @@ async fn write(
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
-    // explicit one it was handed. Either way the caller gets the id the row
-    // actually holds.
+    // explicit one it was handed. Either way the created row is read back
+    // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| result.last_insert_rowid());
-    let (outcome, stored) =
+    let upserted =
         http::crud_upserted::<InvestmentExpense, _>(&mut *tx, existed, assigned_id).await?;
     tx.commit().await?;
-    Ok((assigned_id, outcome, stored))
+    Ok(upserted)
 }
 
 /// `PUT /investment_expenses/:id` — the long-standing upsert on a caller-chosen
@@ -368,8 +368,7 @@ pub async fn db_upsert(
     pool: &SqlitePool,
     e: &InvestmentExpense,
 ) -> Result<http::Upserted<InvestmentExpense>, UpsertError> {
-    let (_, outcome, row) = write(pool, Some(e.id), e).await?;
-    Ok((outcome, row))
+    write(pool, Some(e.id), e).await
 }
 
 /// `POST /investment_expenses` — create without naming an id, and return the
@@ -378,7 +377,7 @@ pub async fn db_create(
     pool: &SqlitePool,
     e: &InvestmentExpense,
 ) -> Result<InvestmentExpense, UpsertError> {
-    let (_, _, stored) = write(pool, None, e).await?;
+    let stored = write(pool, None, e).await?.created;
     stored.ok_or(UpsertError::VanishedAfterCreate)
 }
 
@@ -415,7 +414,10 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<InvestmentExpenseBody>,
 ) -> Result<UpsertResponse<InvestmentExpense>, ApiError> {
-    let (outcome, row) = db_upsert(&pool, &investment_expense_from_body(id, body)).await?;
+    let Upserted {
+        outcome,
+        created: row,
+    } = db_upsert(&pool, &investment_expense_from_body(id, body)).await?;
     http::upsert_response::<InvestmentExpense>(outcome, row)
 }
 
