@@ -41,9 +41,9 @@ The 2026-10-11 sweep for invariants stated only in comments (moving each into a 
 archived in [`DONE/reviews.md`](DONE/reviews.md), and so is the re-basing exactness section found
 verifying it (closed 2026-10-11: `AcquiredUnits` is now an exact fraction).
 
-The 2026-10-23 Google Rust style guide pass's correctness-adjacent findings and mechanical clean-ups
-are closed and archived in [`DONE/reviews.md`](DONE/reviews.md); its imports, module layout and docs
-section below remains open.
+The 2026-10-23 Google Rust style guide pass is closed and archived in
+[`DONE/reviews.md`](DONE/reviews.md): its correctness-adjacent findings, its mechanical clean-ups,
+and its imports, module layout and docs section.
 
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
@@ -65,44 +65,3 @@ falls under the existing rules.
 - [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
-
-## Google Rust style guide pass (2026-10-23) — imports, module layout and docs
-- [x] 656 inline fully-qualified paths where the guide wants types imported and used unqualified
-  (hotspots: `api_spec.rs` 121, `infra/db.rs` 37, `scheduler/registry.rs` 20, `inheritance.rs` 19,
-  `app.rs` 19; mostly `crate::infra::http::…`, `crate::domain::cost_base::…`,
-  `crate::infra::fx::…`). Keep *functions* module-qualified (`fx::to_aud`); import types
-  - Done 2026-10-23: enforced by `clippy::absolute_paths` (Cargo.toml `[lints.clippy]`,
-    `absolute-paths-max-segments = 2` in `clippy.toml`, no crate exempt, test code included),
-    which counts every crate-rooted path deeper than two segments — `std::…` and third-party
-    ones as well as `crate::…`: 1684 sites before, 0 after. Types/traits/macros imported, functions
-    and consts called through their imported module; a clashing name keeps its module
-    (`io::Error`, `fmt::Write`, `process::Command`), and two test-module renames
-    (`StdInstant`, `AsyncMutex` in `scheduler.rs`) where the std and tokio types meet
-- [x] 84 `use` lines nesting a path inside braces (`use utoipa_axum::{router::OpenApiRouter,
-  routes};`) → one module per `use` statement. Needs a scan test, since the rustfmt option that
-  would enforce it is nightly-only
-  - Done 2026-10-23: 102 nested-brace declarations (in 84 import groups) split per module, and the
-    same-module declarations of each import group merged, as `imports_granularity = "Module"`
-    would (193 groups rewritten). Enforced by `app::tests::every_use_declaration_imports_from_one_module`
-    (test code included; `rustfmt.toml` names it), with the scanner self-tested by
-    `the_import_scan_flags_what_module_granularity_would_rewrite`
-- [x] Non-leaf modules carrying APIs beyond tolerated glue: move `reports/mod.rs`'s
-  `TAXPAYER_BASIS`/`listing_label`/`account_label` into a leaf; slim `entities/mod.rs` (1353 lines)
-  and `reports/health/mod.rs` to declarations, re-exports and the router; move the split parents'
-  large inline test modules (`trade.rs`, `corporate_action.rs`, `scheduler.rs`) into a `tests`
-  submodule as `closing_price` already did — code split and test move in separate commits, per
-  CLAUDE.md
-  - Done 2026-10-23: `reports::taxpayer::TAXPAYER_BASIS` and `reports::labels` (callers updated,
-    no alias left on the parent); `reports::health::report` (the report, its assembly and route,
-    re-exported); `entities::route_tables` (the test-only `PUT_ROUTES`/`LIST_ROUTES`), so
-    `entities/mod.rs` is 90 lines of `pub mod` + `router`. The tests moved verbatim, each in its own
-    commit after the code split: `entities/tests/{delete,put,list}`, `trade/tests/` (10 topics),
-    `corporate_action/tests/` (9) and `infra/scheduler/tests/` (8, the DST property's regression
-    seeds moved with it). Test count unchanged across the moves (2816); enforced from here by
-    `app::tests::non_leaf_modules_hold_only_declarations_and_the_router` (a module with Rust
-    submodules defines nothing but `router`; `entities/distribution_event.rs` excepted with its
-    reason), its scanner self-tested by `production_items_finds_definitions_not_mentions` (2818)
-- [ ] Docs: `//!` module headers for the 22 files lacking one; the 160 `clippy::doc_markdown`
-  missing-backtick findings (auto-fixable); and item docs across `domain/` (the financial lower
-  layer). Blanket `missing_docs` (~2,100 items) is deliberately not adopted — the guide aims it at
-  public library APIs
