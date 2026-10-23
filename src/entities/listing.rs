@@ -1,3 +1,7 @@
+//! Listings: a security on an exchange (or, for crypto, on none) — ticker, name, security type,
+//! trading currency and its AMIT and pricing settings. CRUD with its write-time invariants, plus
+//! the ticker-by-id read the reports label rows with.
+
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::db::write_tx;

@@ -1,3 +1,7 @@
+//! The AMIT cash cross-check: flags every (AMIT listing, holding account, financial year) with cash
+//! distributions but no AMMA statement for that account and year, since AMIT cash rows are excluded
+//! from the tax summary and the missing attribution would drop the year's income. Non-blocking.
+
 use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::income::Income;
 use crate::infra::db;

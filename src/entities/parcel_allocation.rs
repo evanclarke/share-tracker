@@ -1,3 +1,7 @@
+//! Parcel allocations: which purchase parcels each Sell consumed, and how many units of each.
+//! Read-only over HTTP — the rows are written only with their Sell, atomically, by `sell` — so the
+//! list and get-one routes are all this module serves.
+
 use crate::infra::decimal::Money;
 #[cfg(test)]
 use crate::infra::decimal::parse_dec;

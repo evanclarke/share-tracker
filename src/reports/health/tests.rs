@@ -1,3 +1,6 @@
+//! Tests for the health report: each check family's alerts and the assembled report, driven through
+//! the database and the `GET /reports/health` route.
+
 use super::*;
 use crate::entities::closing_price::{self, NonTradingReason, PriceSource};
 use crate::entities::exchange::Exchange;

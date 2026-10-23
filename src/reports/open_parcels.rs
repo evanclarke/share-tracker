@@ -1,3 +1,7 @@
+//! The open-parcels schedule: every purchase parcel still (partly) held at the valuation date, per
+//! parcel rather than aggregated, with its remaining units and AUD cost base — the view reconciled
+//! against a broker statement. Built on `domain::open_parcels`.
+
 use crate::domain::open_parcels;
 use crate::entities::listing;
 use crate::infra::db;

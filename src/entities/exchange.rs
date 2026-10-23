@@ -1,3 +1,7 @@
+//! Exchanges, keyed by ISO 10383 MIC: the trading currency, timezone, T+n settlement convention and
+//! session close time a listing's settlement dates and price collection are computed from. CRUD
+//! with its write-time checks.
+
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;

@@ -1,3 +1,8 @@
+//! The per-financial-year tax summary: assessable investment income by tax-return question
+//! (dividends, interest, trust and AMMA components, ESS discounts), franking and foreign tax
+//! offsets, deductions by destination and the net investment income, all in AUD — served as JSON
+//! and as a CSV export.
+
 use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::{Income, IncomeType};

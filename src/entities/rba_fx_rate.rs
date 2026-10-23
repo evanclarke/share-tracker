@@ -1,3 +1,8 @@
+//! The RBA's monthly F11 foreign-exchange rates (foreign units per 1 AUD) every AUD conversion
+//! reads: the import from the published CSV (or a supplied body), which records a conflicting
+//! re-published rate rather than overwriting it, the single-field correction route, and the true-up
+//! of provisional valuation snapshots once a month's rate lands.
+
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal;
 use crate::infra::extract::Json;

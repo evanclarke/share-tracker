@@ -1,3 +1,9 @@
+//! AMIT cost-base adjustments: one row per (AMMA statement, parcel) applying the statement's
+//! per-unit `cost_base_adjustment` to the units of that parcel it covers (CGT event E10). CRUD with
+//! its write-time checks — the parcel's units cap the quantity and the parcel must sit in the
+//! statement's own holding account — plus the connection-level writes the AMMA statement's
+//! `generate_adjustments` operation builds a whole set from.
+
 use crate::domain::rollover;
 use crate::domain::tax_year::fy_start;
 use crate::entities::corporate_action;

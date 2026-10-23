@@ -1,3 +1,7 @@
+//! Command-line flags, parsed with `clap`. Every one is optional so that
+//! `config::Settings::resolve` can tell a flag left off from one set to its default when merging
+//! with the config file.
+
 use clap::Parser;
 
 /// CLI flags. Every setting is optional here: defaults are applied by

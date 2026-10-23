@@ -1,3 +1,6 @@
+//! Tracing subscriber setup: the `RUST_LOG` filter (defaulting to `info`), with ANSI colour only
+//! when stdout is a terminal.
+
 use std::io::IsTerminal;
 use std::{env, io};
 use tracing_subscriber::EnvFilter;

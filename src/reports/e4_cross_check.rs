@@ -1,3 +1,7 @@
+//! The CGT event E4 cross-check: flags every trust income row with a tax-deferred amount whose
+//! listing has no `ReturnOfCapital` corporate action in the same financial year, since the
+//! cost-base reduction would otherwise be missing. Non-blocking.
+
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
 use crate::infra::db;

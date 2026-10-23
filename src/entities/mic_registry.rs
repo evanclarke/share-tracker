@@ -1,3 +1,7 @@
+//! The ISO 10383 Market Identifier Code registry: reference data only, imported from the published
+//! CSV (or a supplied body) and read by the exchange MIC-validation report — never used to populate
+//! `exchanges`.
+
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};

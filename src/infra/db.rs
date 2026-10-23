@@ -1,3 +1,7 @@
+//! The database layer: opening the SQLite pool and running the migrations, the `write_tx`/`read_tx`
+//! transaction discipline every write and multi-query read goes through, `WriteMode` for a write's
+//! commit-or-dry-run ending, and the weekly backup with its verification and retention pruning.
+
 use chrono::{DateTime, Local, NaiveDateTime};
 use sqlx::sqlite::{
     SqliteArguments, SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,

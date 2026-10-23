@@ -1,3 +1,6 @@
+//! Server startup: parse the arguments and config file, open and migrate the database, build the
+//! job registry and spawn the scheduler, then serve the application router until a shutdown signal.
+
 // A test's catch-all (`_ => panic!(…)`) is itself the decision a new variant
 // needs, so the wildcard-arm lint `Cargo.toml` enables gates production code.
 #![cfg_attr(test, allow(clippy::wildcard_enum_match_arm))]

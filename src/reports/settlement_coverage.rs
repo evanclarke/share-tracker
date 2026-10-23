@@ -1,3 +1,7 @@
+//! The settlement-date coverage report: flags every trade whose settlement date cannot be trusted —
+//! its window falls outside the seeded exchange-holiday calendar, or the stored date is not a
+//! trading day. Non-blocking.
+
 use crate::entities::closing_price::{self, NonTradingReason};
 use crate::entities::exchange_holiday::{coverage_span_for, window_outside_coverage};
 use crate::infra::db;

@@ -1,3 +1,7 @@
+//! The exchange MIC-validation report: each curated exchange's MIC checked against the imported ISO
+//! 10383 registry (unknown, expired or otherwise worth a second look). Non-blocking — exchange
+//! writes are never rejected for it.
+
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use axum::extract::State;

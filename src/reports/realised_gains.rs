@@ -1,3 +1,7 @@
+//! Realised capital gains and losses: one row per disposal (a Sell or a rights sale) with its
+//! proceeds, the adjusted cost base of the parcels it consumed, the gain or loss in AUD and the
+//! CGT-discount and indexation figures, plus the per-parcel detail behind each.
+
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::{cgt_discount, indexation};
 use crate::entities::corporate_action;

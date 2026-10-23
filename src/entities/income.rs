@@ -1,3 +1,8 @@
+//! Income rows: dividends, trust distributions (with their franking, foreign and tax-deferred
+//! components), employment income and other income received on a listing. CRUD with its write-time
+//! invariants (incl. the per-share cross-check), plus the read of which rows are assessable as cash
+//! income in their year.
+
 use crate::domain::{franking_credit, tax_year};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;

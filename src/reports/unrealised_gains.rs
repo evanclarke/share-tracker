@@ -1,3 +1,7 @@
+//! Unrealised gains and losses on the open holdings per (listing, holding account): market value
+//! against AUD cost base, priced from the request's price map or, when it asks, live quotes. Built
+//! on `domain::open_parcels`.
+
 use crate::domain::{cgt_discount, open_parcels};
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::currency::Aud;

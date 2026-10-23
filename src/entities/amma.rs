@@ -1,3 +1,7 @@
+//! AMMA statements: an AMIT's annual attribution (income components and the net cost-base
+//! adjustment) for one listing, holding account and 30 June year end. CRUD with its write-time
+//! invariants; the per-parcel adjustments the statement drives are `amit_adjustment`'s.
+
 use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;

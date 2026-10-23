@@ -1063,4 +1063,22 @@ mod tests {
             );
         }
     }
+
+    /// Every source file opens with a `//!` module doc saying what the module
+    /// is for (the Google Rust style guide's module headers): its first line
+    /// is one, ahead of any attribute, `use` or plain comment, so the header
+    /// is the first thing a reader of the file meets.
+    #[test]
+    fn every_source_file_opens_with_a_module_doc() {
+        let missing: Vec<_> = test_support::rust_sources()
+            .iter()
+            .filter(|source| !source.raw.starts_with("//! "))
+            .map(|source| source.path.as_str())
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "open each of these files with a `//!` module doc stating what the module \
+             is for: {missing:?}"
+        );
+    }
 }

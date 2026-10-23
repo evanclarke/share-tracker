@@ -1,3 +1,7 @@
+//! The attachments register: every stored document joined out to the activity it is attached to
+//! and, where it has one, that activity's listing — the whole-portfolio view of what has been filed
+//! against what.
+
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
