@@ -255,7 +255,7 @@ pub async fn db_list(pool: &SqlitePool, q: &ListQuery) -> Result<Vec<Attachment>
 /// exchanges, demergers, and worthless-shares sells trace to a corporate
 /// action row, which *can* own attachments directly (0017) — but one action
 /// can spawn many trades over time (e.g. several exercise Buys against one
-/// RightsIssue), so "the action's document" doesn't map onto "this trade's
+/// `RightsIssue`), so "the action's document" doesn't map onto "this trade's
 /// linked document" the way the 1:1 cases above do; its paperwork is reached
 /// via the Corporate Actions screen instead.
 pub async fn db_list_with_linked(

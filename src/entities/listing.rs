@@ -32,7 +32,7 @@ pub enum SecurityType {
     /// A crypto asset held as an investment: a CGT asset like the others
     /// (docs/ato/crypto-cgt.md), but listed on no exchange — `exchange_mic`
     /// is NULL, settlement is same-day, and the ticker must be a recognised
-    /// digital-token code in `currencies` (kind DigitalToken).
+    /// digital-token code in `currencies` (kind `DigitalToken`).
     Crypto,
 }
 
@@ -41,7 +41,7 @@ pub struct Listing {
     pub id: ListingId,
     /// NULL exactly for Crypto listings (CHECK-enforced): a crypto asset
     /// trades on no MIC-coded venue. Exchange-less listings are unique by
-    /// ticker (partial unique index); the rest by (exchange_mic, ticker).
+    /// ticker (partial unique index); the rest by (`exchange_mic`, ticker).
     pub exchange_mic: Option<String>,
     pub ticker: String,
     pub name: String,
@@ -187,7 +187,7 @@ pub(crate) const BLANK_NAME: &str = "name cannot be blank — it is what every s
 #[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
     /// A Crypto listing's ticker is not a recognised digital-token code in
-    /// `currencies` (kind DigitalToken — the ISO 24165 / DTIF list, matched on
+    /// `currencies` (kind `DigitalToken` — the ISO 24165 / DTIF list, matched on
     /// the DTI `code` or the human `short_name` ticker the import carries).
     #[error("a Crypto listing's ticker must be a recognised digital-token code")]
     UnrecognisedDigitalToken,

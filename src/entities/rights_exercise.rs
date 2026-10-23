@@ -98,7 +98,7 @@ pub enum ExerciseError {
     /// No corporate action with that id.
     #[error("no corporate action with that id")]
     ActionNotFound,
-    /// The action is not a RightsIssue.
+    /// The action is not a `RightsIssue`.
     #[error("that corporate action is not a rights issue")]
     NotARightsIssue,
     /// `units` is not strictly positive.

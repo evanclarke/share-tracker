@@ -478,7 +478,7 @@ mod tests {
 
     /// `require_auth` is layered onto the merged router before `nest`, so it
     /// covers everything nested under the prefix — one route from each of
-    /// the entity, report, scheduler, api_spec and web routers merged in
+    /// the entity, report, scheduler, `api_spec` and web routers merged in
     /// `router`, mirroring
     /// `a_base_path_moves_the_whole_application_under_the_prefix`'s own route
     /// list but proving each one is actually gated rather than just reachable.

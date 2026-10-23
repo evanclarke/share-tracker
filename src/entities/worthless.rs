@@ -72,7 +72,7 @@ pub enum RecogniseError {
     /// No corporate action with that id.
     #[error("no corporate action with that id")]
     ActionNotFound,
-    /// The action is not a WorthlessShares.
+    /// The action is not a `WorthlessShares`.
     #[error("that corporate action is not a worthless-shares event")]
     NotWorthlessShares,
     /// The action has already been recognised (a Sell references it). Delete

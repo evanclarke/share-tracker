@@ -675,7 +675,7 @@ mod tests {
     }
 
     /// The read half needs no source check — `Decimal` has no `sqlx::Type<Sqlite>`
-    /// impl (rust_decimal's sqlx feature is deliberately off), so a `FromRow` derive
+    /// impl (`rust_decimal`'s sqlx feature is deliberately off), so a `FromRow` derive
     /// over a `Decimal` field without `#[sqlx(try_from = "Money")]` does not compile.
     /// The write half has no such backstop: `String` *is* bindable, so
     /// `.bind(x.to_string())` would silently compile and reintroduce the untyped path.
@@ -1119,7 +1119,7 @@ mod tests {
     }
 
     /// The codec is *selected*, not defaulted into: the manifest keeps
-    /// rust_decimal's explicit string codec on and both number codecs off.
+    /// `rust_decimal`'s explicit string codec on and both number codecs off.
     ///
     /// The two tests above pin the behaviour; this pins the declaration, so
     /// the named codec cannot quietly leave `Cargo.toml` (and so the reason

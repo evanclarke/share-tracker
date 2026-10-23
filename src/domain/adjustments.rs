@@ -1,6 +1,6 @@
 //! Cost-base/quantity adjustment events derived from corporate actions:
 //! return-of-capital payments ([`RocEvent`]), quantity re-basing events
-//! ([`SplitEvent`], covering both ShareSplit and BonusIssue) and — a
+//! ([`SplitEvent`], covering both `ShareSplit` and `BonusIssue`) and — a
 //! deliberately *different* set — price re-basing events
 //! ([`PriceBasisEvent`]). Loaded by the reports and write-time checks, which
 //! never re-derive this arithmetic inline.
@@ -184,7 +184,7 @@ impl RocEvent {
     }
 }
 
-/// All ReturnOfCapital actions keyed by listing, each list sorted by payment
+/// All `ReturnOfCapital` actions keyed by listing, each list sorted by payment
 /// date (then id). Shared by the portfolio/unrealised/realised/open-parcels
 /// reports to reduce affected parcels' cost bases, and by the net-capital-gain
 /// report's G1 walk. Generic over the executor so reports can run it on their
@@ -353,8 +353,8 @@ fn ratio(new: Decimal, old: Decimal) -> String {
 
 /// A quantity re-basing event, as consumed by the reports and write-time
 /// checks: on `date`, every `old_units` existing units become `new_units`.
-/// A ShareSplit (TD 2000/10) is stored as its ratio directly; a
-/// non-assessable BonusIssue (`docs/ato/bonus-shares.md`) is its equivalent
+/// A `ShareSplit` (TD 2000/10) is stored as its ratio directly; a
+/// non-assessable `BonusIssue` (`docs/ato/bonus-shares.md`) is its equivalent
 /// split — every `bonus_held_units` units become `bonus_held_units +
 /// bonus_units` units — because both preserve the parcel's total cost base
 /// and acquisition date while scaling the unit count.
@@ -426,7 +426,7 @@ fn split_event_from_row(row: &SqliteRow) -> Result<SplitEvent, sqlx::Error> {
     }
 }
 
-/// All quantity re-basing actions (ShareSplit + BonusIssue, each expressed as
+/// All quantity re-basing actions (`ShareSplit` + `BonusIssue`, each expressed as
 /// its equivalent split) keyed by listing, each list sorted by event date
 /// (then id). The reports use these to re-base parcel quantities between unit
 /// bases. Generic over the executor so reports can run it on their read
@@ -455,7 +455,7 @@ where
     Ok(map)
 }
 
-/// The quantity re-basing actions (ShareSplit + BonusIssue) for one listing,
+/// The quantity re-basing actions (`ShareSplit` + `BonusIssue`) for one listing,
 /// sorted by event date (then id). Generic over the executor so write-time
 /// validators (sells/trades) can run it inside their transaction.
 pub async fn db_splits_for_listing<'e, E>(

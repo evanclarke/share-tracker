@@ -2276,8 +2276,8 @@ mod tests {
         assert!(!trade_exists(&pool, 3).await);
     }
 
-    /// The Sell path shares trade::check_amounts: degenerate core figures
-    /// (zero quantity, negative price/costs, non-positive fx_rate, settlement
+    /// The Sell path shares `trade::check_amounts`: degenerate core figures
+    /// (zero quantity, negative price/costs, non-positive `fx_rate`, settlement
     /// before the sale date) are rejected with the same per-shape 422s.
     #[tokio::test]
     async fn api_degenerate_sell_amounts_are_rejected_per_shape() {

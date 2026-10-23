@@ -657,8 +657,8 @@ mod tests {
   </CcyTbl>
 </ISO_4217>"#;
 
-    /// A trimmed DTI registry: Bitcoin (ShortNames as `{ShortName}` objects), Ether
-    /// (ShortNames as bare strings), and a metadata record with no `Header.DTI`
+    /// A trimmed DTI registry: Bitcoin (`ShortNames` as `{ShortName}` objects), Ether
+    /// (`ShortNames` as bare strings), and a metadata record with no `Header.DTI`
     /// (must be skipped).
     const SAMPLE_JSON: &str = r#"{
       "header": { "generated": "2026-05-01" },

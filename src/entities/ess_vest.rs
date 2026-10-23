@@ -107,7 +107,7 @@ use utoipa_axum::routes;
 pub enum VestError {
     #[error("ESS vest write failed: {0}")]
     Db(#[from] sqlx::Error),
-    /// No ess_statements row with that id.
+    /// No `ess_statements` row with that id.
     #[error("no ESS statement with that id")]
     StatementNotFound,
     /// The statement already has a vest Buy. Delete the statement to redo it.

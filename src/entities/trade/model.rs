@@ -112,7 +112,7 @@ pub struct Trade {
     pub brokerage_includes_gst: bool,
     pub brokerage_currency: CurrencyCode,
     /// Manual foreign-per-AUD override (same convention as the ATO rate: AUD =
-    /// foreign / fx_rate). Reports prefer the ATO RBA rate for the trade's month
+    /// foreign / `fx_rate`). Reports prefer the ATO RBA rate for the trade's month
     /// and fall back to this field only when no ATO rate exists (see `infra::fx`).
     /// 1.0 for AUD trades.
     #[sqlx(try_from = "Money")]

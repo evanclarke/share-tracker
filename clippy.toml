@@ -17,3 +17,18 @@ allow-unwrap-in-tests = true
 # root may have at most two segments — `fx::to_aud`, `io::Error`,
 # `sqlx::Error` — so anything deeper is imported. No crate is exempt.
 absolute-paths-max-segments = 2
+
+# `clippy::doc_markdown` (Cargo.toml's `[lints.clippy]`) wants a code
+# identifier in a doc comment backticked; these are proper nouns and prose
+# words that only look like identifiers, so they stay plain. `".."` keeps
+# clippy's own default list (`GitHub`, `JavaScript`, `OAuth`, …).
+doc-valid-idents = [
+    "..",
+    "SQLite", "OpenAPI", "CodeQL", "RustSec", "DeFi", "WebKit",
+    # LSE's pence-sterling quote unit.
+    "GBp",
+    # HTTP verbs and SQL/networking terms used as verbs in prose.
+    "PUTting", "POSTing", "POSTed", "ANDed", "NATed",
+    # Naming-convention names.
+    "PascalCase", "snake_case",
+]

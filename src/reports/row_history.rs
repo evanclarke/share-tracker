@@ -1228,7 +1228,7 @@ mod tests {
     /// the demerge itself created and the allocation it wrote, rows whose ids
     /// the user never saw and which are in no list endpoint afterwards. The
     /// browse form finds them from *when it happened* alone, and each entry
-    /// names the (table, row_id) that drills into its own trail.
+    /// names the (table, `row_id`) that drills into its own trail.
     #[tokio::test]
     async fn a_demerger_group_delete_is_findable_without_knowing_any_ids() {
         let pool = test_pool().await;
@@ -2355,7 +2355,7 @@ mod tests {
     /// The migration is purely additive: it creates the trail and its
     /// triggers but touches no existing row — line-level pin that no
     /// statement alters, drops, updates, deletes, or inserts into anything
-    /// but row_history (the global no-DROP/no-REAL migration tests apply on
+    /// but `row_history` (the global no-DROP/no-REAL migration tests apply on
     /// top of this).
     #[test]
     fn migration_0013_preserves_existing_data() {

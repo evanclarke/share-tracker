@@ -71,7 +71,7 @@ pub struct RealisedGainLoss {
     /// Adjusted cost base of the sold parcels (AMIT-reduced, pro-rated to allocated
     /// qty), converted to AUD at the purchase's ATO FX rate.
     pub cost_base: Decimal,
-    /// proceeds − cost_base in AUD (positive = gain, negative = loss).
+    /// proceeds − `cost_base` in AUD (positive = gain, negative = loss).
     pub capital_gain_loss: Decimal,
     /// Portion of the capital gain from parcels held strictly more than 12 months
     /// (eligible for the 50% CGT discount). Always ≥ 0; losses are excluded.
@@ -115,7 +115,7 @@ pub struct ParcelDetail {
     pub cost_base: Decimal,
     /// This allocation's share of the proceeds, AUD.
     pub proceeds: Decimal,
-    /// proceeds − cost_base (positive = gain, negative = loss).
+    /// proceeds − `cost_base` (positive = gain, negative = loss).
     pub capital_gain_loss: Decimal,
     /// Held strictly more than 12 months at the sale date (50% CGT discount).
     pub discount_eligible: bool,
@@ -223,7 +223,7 @@ impl SellInfo {
 ///
 /// A cash component with any of its companion terms missing is a corrupt
 /// action row — `corporate_actions` CHECKs `scrip_market_value` and
-/// `scrip_cash_per_unit` present together, and a ScripForScrip action always
+/// `scrip_cash_per_unit` present together, and a `ScripForScrip` action always
 /// carries its exchange ratio — so it is an error, never a silently
 /// un-apportioned (and so overstated) cost base.
 ///
@@ -267,7 +267,7 @@ struct Allocation {
 }
 
 /// A rights sale/lapse as the report reads it (`rights_sales` joined to its
-/// RightsIssue action for the listing and currency): a disposal of the rights
+/// `RightsIssue` action for the listing and currency): a disposal of the rights
 /// themselves (see `entities::rights_sale`). Proceeds are
 /// `units × proceeds_per_right`; the cost base is `rights_cost` (nil for
 /// rights issued free), apportioned over the anchoring allocations. Both

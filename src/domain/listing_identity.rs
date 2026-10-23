@@ -62,7 +62,7 @@ pub struct RenameHistory {
 }
 
 /// One `listing_renames` row as selected by [`RenameHistory::load`]:
-/// (listing_id, effective_date, old_ticker, new_ticker, old_mic, new_mic).
+/// (`listing_id`, `effective_date`, `old_ticker`, `new_ticker`, `old_mic`, `new_mic`).
 type RenameRow = (
     ListingId,
     NaiveDate,

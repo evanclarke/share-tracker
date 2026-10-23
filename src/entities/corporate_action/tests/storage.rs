@@ -458,7 +458,7 @@ async fn db_check_rejects_self_demerger() {
     );
 }
 
-/// A ScripForScrip never appears in the split-event or return-of-capital
+/// A `ScripForScrip` never appears in the split-event or return-of-capital
 /// streams — recording one changes no existing parcel (the exchange
 /// operation does the substitution).
 #[tokio::test]
@@ -502,7 +502,7 @@ async fn db_check_rejects_self_exchange() {
     );
 }
 
-/// A BuyBack never appears in the split-event or return-of-capital
+/// A `BuyBack` never appears in the split-event or return-of-capital
 /// streams — recording one changes no existing parcel.
 #[tokio::test]
 async fn db_buy_back_is_not_a_split_or_payment_event() {
@@ -533,7 +533,7 @@ async fn db_buy_back_is_not_a_split_or_payment_event() {
     assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
 }
 
-/// A RightsIssue never appears in the split-event or return-of-capital
+/// A `RightsIssue` never appears in the split-event or return-of-capital
 /// streams — recording one changes no existing parcel.
 #[tokio::test]
 async fn db_rights_issue_is_not_a_split_or_payment_event() {
@@ -836,7 +836,7 @@ async fn db_split_events_grouped_by_listing_sorted_by_date() {
     assert_eq!(for_listing[0].date, d(2024, 11, 30));
 }
 
-/// A BonusIssue is folded into the split-event stream as its equivalent
+/// A `BonusIssue` is folded into the split-event stream as its equivalent
 /// split: every `bonus_held_units` units become `bonus_held_units +
 /// bonus_units` units (a 1-for-10 bonus issue re-bases 11-for-10).
 #[tokio::test]

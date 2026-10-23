@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(a.tax_year, 2025);
     }
 
-    /// Entering the matching same-FY ReturnOfCapital action clears the flag.
+    /// Entering the matching same-FY `ReturnOfCapital` action clears the flag.
     #[tokio::test]
     async fn db_same_fy_return_of_capital_clears_the_flag() {
         let pool = test_pool().await;

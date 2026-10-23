@@ -1,4 +1,4 @@
-//! HTTP routes: list/get/upsert/delete over the corporate_actions table.
+//! HTTP routes: list/get/upsert/delete over the `corporate_actions` table.
 
 use super::CorporateActionListQuery;
 use super::db::{db_create, db_delete, db_upsert};

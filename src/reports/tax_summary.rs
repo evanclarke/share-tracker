@@ -33,7 +33,7 @@ pub struct TaxYearSummary {
     /// Australian tax year: the calendar year in which June 30 falls (e.g. 2024 = FY2023/24).
     pub tax_year: i32,
     /// Assessable dividend income **from companies** (question 11): the
-    /// franked_amount + unfranked_amount of income records that are *not*
+    /// `franked_amount` + `unfranked_amount` of income records that are *not*
     /// `trust_income` — so the single column really is 11S + 11T and splits
     /// per the underlying records.
     ///
@@ -172,8 +172,8 @@ pub struct TaxYearSummary {
     /// Franking credits attached but denied by the holding-period rule (the
     /// amount excluded from `franking_credits`).
     pub franking_credits_denied: Decimal,
-    /// Claimable foreign income tax offset (income foreign_tax_paid + AMMA
-    /// foreign_tax_credits), capped at the A$1,000 FITO de-minimis: above that
+    /// Claimable foreign income tax offset (income `foreign_tax_paid` + AMMA
+    /// `foreign_tax_credits`), capped at the A$1,000 FITO de-minimis: above that
     /// the ATO requires the offset-limit calculation, which needs the
     /// taxpayer's full income-tax position and is outside this system's data
     /// (see `docs/ato/fito-limit.md`).
@@ -1499,7 +1499,7 @@ mod tests {
         assert_eq!(result[1].trust_income_unfranked, Decimal::ZERO);
     }
 
-    /// Without an entitlement date a trust row keeps the date_paid attribution
+    /// Without an entitlement date a trust row keeps the `date_paid` attribution
     /// (existing rows are unaffected by the new column).
     #[tokio::test]
     async fn db_trust_without_entitlement_date_assessed_by_date_paid() {
@@ -2908,8 +2908,8 @@ mod tests {
         assert_eq!(result[0].foreign_tax_offset_excess, Decimal::from(2400));
     }
 
-    /// The cap is a per-year total across sources: income foreign_tax_paid and
-    /// AMMA foreign_tax_credits combine before the A$1,000 test, and each year
+    /// The cap is a per-year total across sources: income `foreign_tax_paid` and
+    /// AMMA `foreign_tax_credits` combine before the A$1,000 test, and each year
     /// is capped independently.
     #[tokio::test]
     async fn db_fito_cap_combines_income_and_amma_per_year() {

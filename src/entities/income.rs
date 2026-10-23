@@ -465,7 +465,7 @@ pub struct IncomeBody {
     pub securities_held: Option<Decimal>,
     /// Non-AMIT trust rows only: the statement's tax-deferred amount
     /// (decimal string, non-negative). Informational — the cost-base
-    /// reduction itself is entered as a ReturnOfCapital corporate action.
+    /// reduction itself is entered as a `ReturnOfCapital` corporate action.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
@@ -703,7 +703,7 @@ pub enum PerShareError {
     /// the cross-check needs both (or neither).
     #[error("amount_per_security and securities_held must be supplied together")]
     SuppliedAlone,
-    /// amount_per_security × securities_held, cent-rounded, does not equal
+    /// `amount_per_security` × `securities_held`, cent-rounded, does not equal
     /// the gross cash components (carried so the rejection can say what the
     /// statement figures actually multiply to).
     #[error("the per-share figures multiply to {product}, which is not the gross cash components")]
@@ -711,7 +711,7 @@ pub enum PerShareError {
 }
 
 /// Cross-check the optional per-share statement figures against the entered
-/// amounts: amount_per_security × securities_held, rounded to the cent (half
+/// amounts: `amount_per_security` × `securities_held`, rounded to the cent (half
 /// away from zero, matching statements), must equal the gross cash components
 /// `franked + unfranked + foreign_source_income` — franking credits are
 /// notional and TFN withholding is deducted from (not part of) the gross.

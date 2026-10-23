@@ -85,13 +85,13 @@ pub struct HoldingPerformance {
     /// Total AUD cash income received (dividends/distributions net of foreign
     /// tax and TFN withholding; franking credits are not cash).
     pub income: Decimal,
-    /// quantity_held × the supplied AUD price. `None` when open but unpriced
+    /// `quantity_held` × the supplied AUD price. `None` when open but unpriced
     /// (OVERALL: the sum, `None` unless every open holding is priced).
     pub market_value: Option<Decimal>,
     /// proceeds + income + market value − invested, AUD. `None` when the
     /// market value is unknown.
     pub total_return: Option<Decimal>,
-    /// total_return / invested × 100. `None` when total_return is unknown or
+    /// `total_return` / invested × 100. `None` when `total_return` is unknown or
     /// nothing was invested.
     pub total_return_pct: Option<Decimal>,
     /// Annualised money-weighted return (IRR over the dated flows + market

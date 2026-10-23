@@ -16,7 +16,7 @@
 //!
 //! Staleness: recording a back-dated fact marks every snapshot dated on or
 //! after the fact stale, atomically with the fact write — enforced by the
-//! `*_stale_snapshots_*` triggers (0001_schema.sql), so no write path can
+//! `*_stale_snapshots_*` triggers (`0001_schema.sql`), so no write path can
 //! bypass it. A stale snapshot keeps showing its stored result (flagged)
 //! until regenerated on demand via `POST /report_snapshots/generate`, which
 //! re-runs the reports with the stored prices and the *new* facts. Which

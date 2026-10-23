@@ -2279,7 +2279,7 @@ mod tests {
     /// entry, not a second copy of it: the derivation expression must be in
     /// the bundle, and each shared field's constructor call must appear
     /// exactly once (in config.js). A hand-maintained copy in app.js drifted
-    /// twice (a stale settlement_date hint, a missing fx_rate hint), and a
+    /// twice (a stale `settlement_date` hint, a missing `fx_rate` hint), and a
     /// second `dt('settlement_date'…)` in the bundle is exactly a shadow copy
     /// growing back.
     #[tokio::test]
@@ -2686,7 +2686,7 @@ mod tests {
     }
 
     /// "Log out" (nav.js) renders in the top bar only when `[auth]` is
-    /// configured, as a real form POST — not a fetch() or a hash route — so
+    /// configured, as a real form POST — not a `fetch()` or a hash route — so
     /// it works with no JS beyond building the element and needs no CSRF
     /// token beyond the session cookie's own `SameSite=Lax`.
     #[tokio::test]
@@ -2711,7 +2711,7 @@ mod tests {
 
     /// An entity with a `custom` view is reached at its own hash route
     /// (`#/jobs`, `#/prices`, `#/sells`, `#/transfers`) — the generic
-    /// `#/e/<slug>` cannot render it and used to print the raw TypeError the
+    /// `#/e/<slug>` cannot render it and used to print the raw `TypeError` the
     /// generic list view threw as the whole page body (SCENARIOS Y-f).
     /// Nothing in the app emits such a URL, so it is only ever hand-typed or
     /// a stale bookmark; the router now sends it on to the real route.

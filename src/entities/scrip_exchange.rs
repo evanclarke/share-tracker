@@ -90,7 +90,7 @@ pub enum ExchangeError {
     /// No corporate action with that id.
     #[error("no corporate action with that id")]
     ActionNotFound,
-    /// The action is not a ScripForScrip.
+    /// The action is not a `ScripForScrip`.
     #[error("that corporate action is not a scrip-for-scrip exchange")]
     NotAScripForScrip,
     /// The action has already been exchanged (trades reference it). Delete

@@ -12,7 +12,7 @@
 //! the chain can't be falsified — and updates the listing, atomically.
 //! `exchange_mic` and `name` are optional in the request: omitted, they keep
 //! their current value (a rename never needs to *clear* a non-Crypto
-//! listing's exchange — that would violate the exchange/security_type CHECK
+//! listing's exchange — that would violate the `exchange/security_type` CHECK
 //! pairing, which a rename does not change). `price_symbol` is likewise
 //! optional and, when omitted, is left exactly as it was — it is not part of
 //! the tracked identity chain (an override that matched the old ticker

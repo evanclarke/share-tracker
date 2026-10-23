@@ -1203,7 +1203,7 @@ fn error_bodies_listed_codes(paragraph: &str) -> Vec<&str> {
         .collect()
 }
 
-/// The codes with a `| \`NNN …\` |` row in the Response codes table — the
+/// The codes with a `` | `NNN …` | `` row in the Response codes table — the
 /// neighbouring enumeration the Error bodies list must not contradict.
 fn response_code_table_codes() -> Vec<String> {
     let section = md_section(API_MD, "# Response codes");
@@ -1235,7 +1235,7 @@ fn response_code_table_codes() -> Vec<String> {
 /// paragraph and the Response-codes table gain it.
 ///
 /// The cross-check with the Response codes table runs **both ways**: every
-/// listed code has a `| \`NNN …\` |` row, and every text-carrying row of the
+/// listed code has a `` | `NNN …` | `` row, and every text-carrying row of the
 /// matrix is in the list — so the mirror image of the bug this audit fixed (a
 /// `409` row reappearing in the table) fails too.
 ///

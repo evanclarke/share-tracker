@@ -84,14 +84,14 @@ pub enum ActionKind {
     BonusIssue {
         /// Every `bonus_held_units` units held receive `bonus_units`
         /// additional units on the issue date (both positive; a 1-for-10
-        /// bonus issue is bonus_units=1 / bonus_held_units=10).
+        /// bonus issue is `bonus_units=1` / `bonus_held_units=10`).
         bonus_units: Decimal,
         bonus_held_units: Decimal,
     },
     RightsIssue {
         /// Every `rights_held_units` units held at the record date entitle
         /// the holder to acquire `rights_units` new units (both positive; a
-        /// 1-for-4 rights issue is rights_units=1 / rights_held_units=4).
+        /// 1-for-4 rights issue is `rights_units=1` / `rights_held_units=4`).
         rights_units: Decimal,
         rights_held_units: Decimal,
         /// Per-new-unit price paid on exercise, in `currency` (positive).
@@ -154,7 +154,7 @@ pub enum ActionKind {
         #[serde(default)]
         scrip_market_value: Option<Decimal>,
         /// Currency of the cash and market value. Its own column: the shared
-        /// `currency` column stays NULL for ScripForScrip.
+        /// `currency` column stays NULL for `ScripForScrip`.
         #[serde(default)]
         scrip_cash_currency: Option<CurrencyCode>,
     },
@@ -244,17 +244,17 @@ impl ActionKind {
 pub struct CorporateAction {
     pub id: i64,
     pub listing_id: ListingId,
-    /// ReturnOfCapital: payment date — parcels settled (registered) on/before
+    /// `ReturnOfCapital`: payment date — parcels settled (registered) on/before
     /// it are affected, unless the action carries a `record_date`, which then
-    /// decides entitlement instead (settled on/before the record date). ShareSplit: conversion date — parcels acquired before it are
+    /// decides entitlement instead (settled on/before the record date). `ShareSplit`: conversion date — parcels acquired before it are
     /// converted (a trade dated on the conversion date is already in
-    /// post-split units). BonusIssue: issue date — parcels acquired before it
+    /// post-split units). `BonusIssue`: issue date — parcels acquired before it
     /// receive bonus units (a trade dated on the issue date is ex-bonus).
-    /// RightsIssue: record date — units on the register at it earn the
+    /// `RightsIssue`: record date — units on the register at it earn the
     /// entitlement (a buy settled on/before it, less sales settled on/before
     /// it, so a trade on the ex-date is ex-rights to the buyer and cum-rights
     /// to the seller); exercises are dated on/after it.
-    /// ScripForScrip: exchange date — every parcel still open on it is
+    /// `ScripForScrip`: exchange date — every parcel still open on it is
     /// exchanged; the closing Sell and replacement Buys are dated on it.
     /// Demerger: demerger date — every head parcel still open on it
     /// participates; the closing Sell and the head/demerged Buys are dated
@@ -360,46 +360,46 @@ pub struct CorporateActionBody {
     /// The action type; the row must carry exactly that type's payload fields — a field
     /// belonging to another type is refused.
     action_type: ActionType,
-    /// The listing the action applies to (the original holding for ScripForScrip, the head
+    /// The listing the action applies to (the original holding for `ScripForScrip`, the head
     /// entity for Demerger).
     pub listing_id: ListingId,
-    /// `YYYY-MM-DD`. ReturnOfCapital: payment date. ShareSplit: conversion date (parcels
-    /// acquired before it are converted). BonusIssue: issue date. RightsIssue: record date
-    /// (units held before it earn the entitlement). BuyBack: buy-back date. ScripForScrip /
+    /// `YYYY-MM-DD`. `ReturnOfCapital`: payment date. `ShareSplit`: conversion date (parcels
+    /// acquired before it are converted). `BonusIssue`: issue date. `RightsIssue`: record date
+    /// (units held before it earn the entitlement). `BuyBack`: buy-back date. `ScripForScrip` /
     /// Demerger: exchange / demerger date (every parcel still open on it takes part).
-    /// WorthlessShares: declaration (G3) or deregistration (C2) date.
+    /// `WorthlessShares`: declaration (G3) or deregistration (C2) date.
     pub date: NaiveDate,
-    /// ReturnOfCapital only (required): per-unit non-assessable payment in `currency`
+    /// `ReturnOfCapital` only (required): per-unit non-assessable payment in `currency`
     /// (decimal string, positive); reduces affected parcels' cost bases.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     amount_per_unit: Option<Decimal>,
-    /// ISO 4217 code. Required by ReturnOfCapital (must match the affected parcels'
-    /// currency), RightsIssue (the exercise price's currency) and BuyBack (the buy-back
+    /// ISO 4217 code. Required by `ReturnOfCapital` (must match the affected parcels'
+    /// currency), `RightsIssue` (the exercise price's currency) and `BuyBack` (the buy-back
     /// price's currency); refused on every other type.
     #[serde(default)]
     currency: Option<CurrencyCode>,
-    /// ReturnOfCapital only (optional): the date entitlement was fixed, on or before
+    /// `ReturnOfCapital` only (optional): the date entitlement was fixed, on or before
     /// `date`. Parcels acquired before it earn the payment; omitted, the payment date
     /// decides.
     #[serde(default)]
     record_date: Option<NaiveDate>,
-    /// ShareSplit only (required): every `split_old_units` existing units become
+    /// `ShareSplit` only (required): every `split_old_units` existing units become
     /// `split_new_units` units (decimal string, positive; a consolidation has new < old).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     split_new_units: Option<Decimal>,
-    /// ShareSplit only (required): see `split_new_units`.
+    /// `ShareSplit` only (required): see `split_new_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     split_old_units: Option<Decimal>,
-    /// BonusIssue only (required): every `bonus_held_units` units held receive
+    /// `BonusIssue` only (required): every `bonus_held_units` units held receive
     /// `bonus_units` additional units (decimal string, positive; a 1-for-10 issue is 1 /
     /// 10).
     #[serde(
@@ -407,13 +407,13 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     bonus_units: Option<Decimal>,
-    /// BonusIssue only (required): see `bonus_units`.
+    /// `BonusIssue` only (required): see `bonus_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     bonus_held_units: Option<Decimal>,
-    /// RightsIssue only (required): every `rights_held_units` units held at the record date
+    /// `RightsIssue` only (required): every `rights_held_units` units held at the record date
     /// entitle the holder to `rights_units` new units (decimal string, positive; a 1-for-4
     /// issue is 1 / 4).
     #[serde(
@@ -421,31 +421,31 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     rights_units: Option<Decimal>,
-    /// RightsIssue only (required): see `rights_units`.
+    /// `RightsIssue` only (required): see `rights_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     rights_held_units: Option<Decimal>,
-    /// RightsIssue only (required): price paid per new unit on exercise, in `currency`
+    /// `RightsIssue` only (required): price paid per new unit on exercise, in `currency`
     /// (decimal string, positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     exercise_price: Option<Decimal>,
-    /// RightsIssue only (required): whether the rights could be traded. Decides how a
+    /// `RightsIssue` only (required): whether the rights could be traded. Decides how a
     /// retail premium is taxed — renounceable: capital proceeds via `sell_rights`;
     /// non-renounceable: unfranked dividend income.
     #[serde(default)]
     renounceable: Option<bool>,
-    /// BuyBack only (required): per-unit buy-back price in `currency` (decimal string, positive).
+    /// `BuyBack` only (required): per-unit buy-back price in `currency` (decimal string, positive).
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_price: Option<Decimal>,
-    /// BuyBack only (optional, 0 when omitted): per-unit dividend component of the price
+    /// `BuyBack` only (optional, 0 when omitted): per-unit dividend component of the price
     /// (decimal string, non-negative, at most the price; 0 for a listed-company buy-back
     /// announced after 25 Oct 2022). Assessable income, excluded from capital proceeds.
     #[serde(
@@ -453,7 +453,7 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_dividend: Option<Decimal>,
-    /// BuyBack only (optional, 0 when omitted): per-unit franking credit attached to the
+    /// `BuyBack` only (optional, 0 when omitted): per-unit franking credit attached to the
     /// dividend component (decimal string, non-negative; must be 0 when there is no
     /// dividend).
     #[serde(
@@ -461,7 +461,7 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_franking_credit: Option<Decimal>,
-    /// BuyBack only (optional): per-unit market value had the buy-back not been proposed
+    /// `BuyBack` only (optional): per-unit market value had the buy-back not been proposed
     /// (decimal string, positive); capital proceeds cannot be less than it. Omit when the
     /// price is at or above market value.
     #[serde(
@@ -469,11 +469,11 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     buyback_market_value: Option<Decimal>,
-    /// ScripForScrip only (required): the replacement listing the holding converts into;
+    /// `ScripForScrip` only (required): the replacement listing the holding converts into;
     /// must differ from `listing_id`.
     #[serde(default)]
     scrip_listing_id: Option<ListingId>,
-    /// ScripForScrip only (required): every `scrip_old_units` units held at the exchange
+    /// `ScripForScrip` only (required): every `scrip_old_units` units held at the exchange
     /// date become `scrip_new_units` units of `scrip_listing_id` (decimal string,
     /// positive).
     #[serde(
@@ -481,13 +481,13 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_new_units: Option<Decimal>,
-    /// ScripForScrip only (required): see `scrip_new_units`.
+    /// `ScripForScrip` only (required): see `scrip_new_units`.
     #[serde(
         default,
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_old_units: Option<Decimal>,
-    /// ScripForScrip only (optional): cash received per OLD unit exchanged, in
+    /// `ScripForScrip` only (optional): cash received per OLD unit exchanged, in
     /// `scrip_cash_currency` (decimal string, positive) — a partial rollover. The three
     /// `scrip_cash_*`/`scrip_market_value` fields are given together or all omitted.
     #[serde(
@@ -495,7 +495,7 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_cash_per_unit: Option<Decimal>,
-    /// ScripForScrip only (with `scrip_cash_per_unit`): market value of one NEW unit just
+    /// `ScripForScrip` only (with `scrip_cash_per_unit`): market value of one NEW unit just
     /// after issue, in `scrip_cash_currency` (decimal string, positive) — the scrip side of
     /// the cost-base apportionment.
     #[serde(
@@ -503,7 +503,7 @@ pub struct CorporateActionBody {
         deserialize_with = "crate::infra::decimal::strict_optional_decimal"
     )]
     scrip_market_value: Option<Decimal>,
-    /// ScripForScrip only (with `scrip_cash_per_unit`): ISO 4217 code of the cash and market value.
+    /// `ScripForScrip` only (with `scrip_cash_per_unit`): ISO 4217 code of the cash and market value.
     #[serde(default)]
     scrip_cash_currency: Option<CurrencyCode>,
     /// Demerger only (required): the demerged entity's listing; must differ from `listing_id`.
@@ -551,7 +551,7 @@ pub struct CorporateActionBody {
     /// Informational provenance.
     #[serde(default)]
     demerger_close_reason: Option<String>,
-    /// WorthlessShares only (required): the CGT event the loss is recognised under —
+    /// `WorthlessShares` only (required): the CGT event the loss is recognised under —
     /// `G3Declaration` (liquidator/administrator declaration) or `C2Cancellation`
     /// (deregistration).
     #[serde(default)]
@@ -567,8 +567,8 @@ pub struct CorporateActionBody {
 /// ignored — quietly dropping it would store an action that reads as one thing
 /// and was entered as another. Two groups are shared rather than owned by one
 /// type, and they are the only thing that varies between arms: `currency`,
-/// which ReturnOfCapital, RightsIssue and BuyBack require and the other five
-/// forbid, and `record_date`, which ReturnOfCapital alone may carry.
+/// which `ReturnOfCapital`, `RightsIssue` and `BuyBack` require and the other five
+/// forbid, and `record_date`, which `ReturnOfCapital` alone may carry.
 #[derive(Clone, Copy)]
 struct Presence(u16);
 
@@ -657,25 +657,25 @@ impl Presence {
 
 impl CorporateActionBody {
     /// Each action type carries exactly its own payload (mirrors the table
-    /// CHECKs, plus positivity): ReturnOfCapital needs a positive payment and
+    /// CHECKs, plus positivity): `ReturnOfCapital` needs a positive payment and
     /// a currency, and may carry a `record_date` no later than the payment
     /// date it fixes entitlement for (a later one is rejected, not ignored —
     /// it would read as an entitlement fixed after the money was paid);
-    /// ShareSplit a positive conversion ratio; BonusIssue a
-    /// positive bonus ratio; RightsIssue a positive entitlement ratio,
+    /// `ShareSplit` a positive conversion ratio; `BonusIssue` a
+    /// positive bonus ratio; `RightsIssue` a positive entitlement ratio,
     /// exercise price, a currency, and whether the offer was renounceable
     /// (stated, never assumed — a retail premium's treatment turns on it);
-    /// BuyBack a positive per-unit price and
+    /// `BuyBack` a positive per-unit price and
     /// a currency (dividend/franking-credit components default to 0; the
     /// dividend may not exceed the price — it is part of it — and a credit
     /// needs a dividend to attach to; market value, when given, is positive)
     /// — each with every other type's fields absent (`None` otherwise), which
     /// each arm states as the groups it allows via [`Presence::only`] rather
     /// than by negating the other seven; `currency` is shared by
-    /// ReturnOfCapital, RightsIssue, and BuyBack but forbidden for the
+    /// `ReturnOfCapital`, `RightsIssue`, and `BuyBack` but forbidden for the
     /// ratio-only types. A zero/negative payment would
     /// silently *increase* cost bases; a zero/negative ratio would zero out
-    /// or invert holdings or entitlements. ScripForScrip needs a positive
+    /// or invert holdings or entitlements. `ScripForScrip` needs a positive
     /// exchange ratio and a replacement listing different from the original —
     /// exchanging a listing into itself would consume its parcels and
     /// recreate them in place — and may carry a cash component: per-old-unit
@@ -685,7 +685,7 @@ impl CorporateActionBody {
     /// demerged listing different from the head, and a cost-base percentage
     /// strictly between 0 and 100 — 0 or 100 would zero out one side's cost
     /// base entirely, and anything outside would make one side negative.
-    /// WorthlessShares needs only the `worthless_event` discriminator (the CGT
+    /// `WorthlessShares` needs only the `worthless_event` discriminator (the CGT
     /// event basis), with every numeric/listing payload absent.
     pub(crate) fn kind(self) -> Option<ActionKind> {
         // Entitlement can never be fixed after the payment it entitles the

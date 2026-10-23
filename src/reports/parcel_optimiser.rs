@@ -450,7 +450,7 @@ pub struct HypotheticalAllocation {
     pub cost_base: Decimal,
     /// This allocation's share of the proceeds, AUD.
     pub proceeds: Decimal,
-    /// proceeds − cost_base (positive = gain, negative = loss).
+    /// proceeds − `cost_base` (positive = gain, negative = loss).
     pub capital_gain_loss: Decimal,
     /// Held strictly more than 12 months at the sale date.
     pub discount_eligible: bool,
@@ -849,7 +849,7 @@ mod tests {
     /// it applies is `domain::cgt_discount`'s (pinned by its own test) rather
     /// than one of its own. Asserted here through `allocate_parcels` so the
     /// wiring — not just the rule — is covered: a parcel one day short of 12
-    /// months is a non-discountable gain and so sorts last under MaxDiscount.
+    /// months is a non-discountable gain and so sorts last under `MaxDiscount`.
     #[test]
     fn max_discount_treats_a_parcel_one_day_short_as_non_discountable() {
         let parcel = |trade_id, acquired| CandidateParcel {

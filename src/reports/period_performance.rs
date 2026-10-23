@@ -217,7 +217,7 @@ async fn valuations_or_empty(
     Ok(valuation::valuations_of_markets(conn, &markets, date, now).await?)
 }
 
-/// Per-currency FX accumulator: the running total, the (rate_from, rate_to)
+/// Per-currency FX accumulator: the running total, the (`rate_from`, `rate_to`)
 /// pair while every listing seen so far agrees (cleared to `None` the moment
 /// one disagrees), and whether any contributor was provisional.
 #[derive(Default)]

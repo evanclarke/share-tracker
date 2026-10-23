@@ -184,7 +184,7 @@ pub(crate) struct AmountsCheck<'a> {
 }
 
 /// Validate a trade's core figures: quantity > 0, price ≥ 0, brokerage and
-/// GST ≥ 0, brokerage billed in the trade's own currency, fx_rate > 0,
+/// GST ≥ 0, brokerage billed in the trade's own currency, `fx_rate` > 0,
 /// settlement on or after the trade date, the trade date itself inside
 /// [`CGT_START`]..=today, and `average_price × quantity` plus the incidental
 /// costs representable as a `Decimal`

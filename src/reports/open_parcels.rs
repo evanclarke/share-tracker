@@ -823,7 +823,7 @@ mod tests {
 
     /// TD 2000/10 (`docs/ato/share-splits-and-consolidations.md`): the split parcel
     /// keeps its acquisition date and total cost base; the remaining quantity
-    /// is reported in post-split units while original_quantity stays as
+    /// is reported in post-split units while `original_quantity` stays as
     /// transacted.
     #[tokio::test]
     async fn db_share_split_rebases_remaining_quantity_and_preserves_cost_base() {

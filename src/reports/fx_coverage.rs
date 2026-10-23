@@ -100,7 +100,7 @@ struct Convertible {
     spot: bool,
 }
 
-/// `(label, SQL)` — each yields id, listing_id, ticker, date, currency, and
+/// `(label, SQL)` — each yields id, `listing_id`, ticker, date, currency, and
 /// the record's fallback columns (NULL where the record has none). The label
 /// is the alert's `record`, which the web UI's FX Coverage screen also keys
 /// its link to the record on (config.js's `FX_COVERAGE_RECORD_ROUTES`).

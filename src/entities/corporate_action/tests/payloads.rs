@@ -818,7 +818,7 @@ async fn db_insert_and_retrieve_worthless_shares_preserves_event() {
     }
 }
 
-/// A WorthlessShares action never appears in the split-event or
+/// A `WorthlessShares` action never appears in the split-event or
 /// return-of-capital streams — recording one changes no existing parcel
 /// (the recognise operation closes the holding).
 #[tokio::test]

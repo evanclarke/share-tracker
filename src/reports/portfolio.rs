@@ -97,7 +97,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 /// and optional market value, as at `as_of_date` — omitted, **today's live
 /// position**. The same listing held in two accounts reports as two holdings.
 ///
-/// "Open" quantity for a parcel = trade.quantity − sum of parcel_allocations where purchase_trade_id = trade.id
+/// "Open" quantity for a parcel = trade.quantity − sum of `parcel_allocations` where `purchase_trade_id` = trade.id
 /// (each allocation re-based to the parcel's as-acquired units — a post-split
 /// sale allocates post-split units). The reported quantity is in *current*
 /// units (after every recorded share split/consolidation) so it lines up with

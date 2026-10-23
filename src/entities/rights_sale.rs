@@ -170,7 +170,7 @@ pub enum SellRightsError {
     /// No corporate action with that id.
     #[error("no corporate action with that id")]
     ActionNotFound,
-    /// The action is not a RightsIssue.
+    /// The action is not a `RightsIssue`.
     #[error("that corporate action is not a rights issue")]
     NotARightsIssue,
     /// Positive proceeds against a **non-renounceable** offer. Under such an
@@ -1755,7 +1755,7 @@ mod tests {
     /// Fx-default family (code review 2026-08-25): a USD retail premium
     /// recorded with `fx_rate` omitted, dated in a month with no imported RBA
     /// rate, used to store parity silently — realised gains booked USD
-    /// proceeds 1:1 as AUD, and (before it joined the fx_coverage scan)
+    /// proceeds 1:1 as AUD, and (before it joined the `fx_coverage` scan)
     /// nothing anywhere flagged it. Now refused like the ESS vest, naming the
     /// currency, the month, and the remedies, with nothing persisted.
     #[tokio::test]

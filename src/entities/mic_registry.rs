@@ -69,7 +69,7 @@ pub enum ImportError {
     /// Could not retrieve the published registry (network / HTTP error).
     #[error("could not fetch the MIC registry feed: {0}")]
     Fetch(String),
-    /// The feed was not the expected ISO10383_MIC shape (missing column, bad row).
+    /// The feed was not the expected `ISO10383_MIC` shape (missing column, bad row).
     #[error("the MIC registry feed is malformed: {0}")]
     Parse(String),
     #[error("MIC registry import write failed: {0}")]
@@ -170,7 +170,7 @@ where
     Ok(())
 }
 
-/// Parse the ISO10383_MIC CSV into registry entries.
+/// Parse the `ISO10383_MIC` CSV into registry entries.
 ///
 /// The file is fully double-quoted (fields such as institution names contain
 /// commas), so it must be parsed with a real CSV reader, not by splitting on `,`.
@@ -287,7 +287,7 @@ async fn fetch(fetcher: &dyn FeedFetcher, url: &str) -> Result<String, ImportErr
 }
 
 /// Manually trigger the import. With a non-empty request body, imports that body
-/// (a downloaded ISO10383_MIC CSV — useful for retries when ISO is unreachable);
+/// (a downloaded `ISO10383_MIC` CSV — useful for retries when ISO is unreachable);
 /// with an empty body, fetches from ISO. Both share `import_from_content`.
 #[utoipa::path(
     post,
@@ -337,7 +337,7 @@ mod tests {
         ApiClient::over(router().with_state(pool.clone()))
     }
 
-    /// A trimmed slice of the real ISO10383_MIC layout: a BOM, the full quoted
+    /// A trimmed slice of the real `ISO10383_MIC` layout: a BOM, the full quoted
     /// header row, an ACTIVE operating MIC, an ACTIVE segment MIC with an empty
     /// CITY, and an EXPIRED entry with an expiry date. A field carries an embedded
     /// comma ("INTERCONTINENTAL EXCHANGE, INC.") to exercise quoted parsing.

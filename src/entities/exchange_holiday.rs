@@ -650,7 +650,7 @@ mod tests {
 
     /// The calendar joined the **audit trail** in 0039 (SCENARIOS Q-05/Q-08,
     /// decided 2026-08-21): it is hand-editable, there is no import to
-    /// re-derive it from — the seed is a one-off in 0001_schema.sql — and a
+    /// re-derive it from — the seed is a one-off in `0001_schema.sql` — and a
     /// holiday changes a reported figure, since valuation reads the calendar
     /// live. So a correction records the superseded row, readable through
     /// `GET /reports/row_history` keyed on the surrogate `id` the rebuild

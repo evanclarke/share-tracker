@@ -56,7 +56,7 @@ pub struct WashSaleAlert {
     pub buy_holding_account_id: i64,
     pub buy_date: NaiveDate,
     pub buy_quantity: Decimal,
-    /// buy_date − sale_date in days; negative = acquired before the sale
+    /// `buy_date` − `sale_date` in days; negative = acquired before the sale
     /// (TR 2008/1 para 4(b)), zero or positive = at/after it (para 4(a)).
     pub days_apart: i64,
 }

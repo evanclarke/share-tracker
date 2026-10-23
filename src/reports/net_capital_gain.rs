@@ -96,10 +96,10 @@ pub struct NetCapitalGainYear {
     /// Non-discountable gain remaining after capital losses are applied.
     pub net_other_gain: Decimal,
     /// The 50% CGT discount amount removed from the remaining discount-eligible gain
-    /// (= net_discount_eligible_gain / 2, to the cent).
+    /// (= `net_discount_eligible_gain` / 2, to the cent).
     pub cgt_discount: Decimal,
-    /// Assessable net capital gain = net_other_gain + (net_discount_eligible_gain
-    /// − cgt_discount), i.e. what the worksheet leaves after the discount line
+    /// Assessable net capital gain = `net_other_gain` + (`net_discount_eligible_gain`
+    /// − `cgt_discount`), i.e. what the worksheet leaves after the discount line
     /// printed above it — not a second halving (see [`net_years`]).
     pub net_capital_gain: Decimal,
     /// Capital losses left unused after offsetting all gains (from both this

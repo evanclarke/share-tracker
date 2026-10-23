@@ -1918,7 +1918,7 @@ mod tests {
     /// schema, so this pins all of it against data that predates it: prices
     /// survive with ids assigned oldest-first, their manual provenance
     /// intact, the natural key still unique; existing audit entries survive;
-    /// the trail is still append-only; and closing_prices is now audited.
+    /// the trail is still append-only; and `closing_prices` is now audited.
     #[tokio::test]
     async fn migration_0021_adds_the_surrogate_key_and_audits_closing_prices() {
         let pool = pool_migrated_below(21).await;

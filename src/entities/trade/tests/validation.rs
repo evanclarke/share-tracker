@@ -6,7 +6,7 @@ use super::*;
 
 /// Degenerate core figures are rejected with 422 per shape — a zero or
 /// negative quantity, a negative price, negative brokerage or GST, a
-/// non-positive fx_rate, or a settlement before the trade date — and
+/// non-positive `fx_rate`, or a settlement before the trade date — and
 /// nothing is persisted. (2026-07-12 review: the plain CRUD path accepted
 /// them all, silently corrupting every downstream report.)
 #[tokio::test]

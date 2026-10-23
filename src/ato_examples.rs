@@ -32,7 +32,7 @@
 //!   1 June 1985 shares) turn on pre-CGT originals, which are not modelled.
 //! - `docs/ato/takeovers-and-scrip-for-scrip.md` Example 28 (Stephanie) —
 //!   exchanges into *two* replacement share classes (ordinary + preference)
-//!   with the cost base apportioned by market value, which the ScripForScrip
+//!   with the cost base apportioned by market value, which the `ScripForScrip`
 //!   action does not model (it has a single replacement leg). Example 26
 //!   (Desiree, a takeover *without* rollover) and Example 27 (Gunther, the
 //!   partial rollover with a cash component) are both reproduced below; the
@@ -2821,7 +2821,7 @@ async fn ess_30_day_rule_example_wyatt_taxing_point_moves_to_the_sale() {
 /// into 18H; with no losses the discount halves it straight back, so 18A is
 /// the $203 the statement components sum to. Bob's $105 tax-deferred amount
 /// (the fund is not an AMIT) is a CGT event E4 cost-base reduction, entered
-/// as a ReturnOfCapital action: cost base $1,200 → $1,095. (The reduced-cost-
+/// as a `ReturnOfCapital` action: cost base $1,200 → $1,095. (The reduced-cost-
 /// base side, $1,050 → $945, is not modelled — reduced cost base equals cost
 /// base under the elements-1–2 Known limitation.)
 #[tokio::test]

@@ -95,7 +95,7 @@ pub enum ParticipationError {
     /// No corporate action with that id.
     #[error("no corporate action with that id")]
     ActionNotFound,
-    /// The action is not a BuyBack.
+    /// The action is not a `BuyBack`.
     #[error("that corporate action is not a buy-back")]
     NotABuyBack,
     /// `units` is not strictly positive.

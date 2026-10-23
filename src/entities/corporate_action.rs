@@ -2,7 +2,7 @@
 //!
 //! The action types modelled so far:
 //!
-//! **ReturnOfCapital** — a non-assessable payment from a company (a
+//! **`ReturnOfCapital`** — a non-assessable payment from a company (a
 //! shareholder-approved return of share capital, CGT event G1; see
 //! `docs/ato/cgt-non-assessable-payments.md`). The per-unit payment reduces the
 //! cost base of every parcel of the listing held on the payment date (units
@@ -14,7 +14,7 @@
 //! tax-deferred regime (CGT event E10, `amit_adjustment`), which applies to
 //! trust units, not company shares.
 //!
-//! **ShareSplit** — a share split or consolidation (TD 2000/10; see
+//! **`ShareSplit`** — a share split or consolidation (TD 2000/10; see
 //! `docs/ato/share-splits-and-consolidations.md`): on the conversion date every
 //! `split_old_units` units become `split_new_units` units (a 2-for-1 split is
 //! new=2/old=1; a 1-for-10 consolidation is new=1/old=10). No CGT event
@@ -25,19 +25,19 @@
 //! [`split_adjusted_quantity`] / [`as_acquired_quantity`].
 //! A trade dated on the conversion date is already in post-split units.
 //!
-//! **BonusIssue** — a non-assessable bonus share issue (the general
+//! **`BonusIssue`** — a non-assessable bonus share issue (the general
 //! post-1 July 1998 case; see `docs/ato/bonus-shares.md`): on the issue date
 //! every `bonus_held_units` units held receive `bonus_units` additional
 //! units. The ATO apportions the parcel's cost base over original + bonus
 //! shares and the bonus shares take the original acquisition date — exactly
 //! the quantity re-base `(held + bonus) / held` with total cost base and
-//! acquisition date preserved, so a BonusIssue folds into the split-event
+//! acquisition date preserved, so a `BonusIssue` folds into the split-event
 //! stream as its equivalent split (new = held + bonus, old = held) and every
 //! report and write-time check inherits the treatment. A trade dated on the
 //! issue date is ex-bonus. (Bonus shares chosen *in lieu of a dividend* are
 //! assessed as a dividend — entered as a DRP trade, not as this action.)
 //!
-//! **RightsIssue** — rights to acquire new shares, issued free to existing
+//! **`RightsIssue`** — rights to acquire new shares, issued free to existing
 //! holders (the dominant retail case; see `docs/ato/rights-issues.md`): on the
 //! record `date` every `rights_held_units` units held entitle the holder to
 //! acquire `rights_units` new units at `exercise_price` per unit in
@@ -52,7 +52,7 @@
 //! trades cannot be edited or deleted (delete the exercise trades first).
 //! Selling or letting the rights themselves lapse is not modelled.
 //!
-//! **BuyBack** — an off-market share buy-back (see `docs/ato/share-buy-backs.md`):
+//! **`BuyBack`** — an off-market share buy-back (see `docs/ato/share-buy-backs.md`):
 //! the company offers to buy back shares directly from holders. The action
 //! records the offer terms: on/after the buy-back `date`, each unit bought
 //! back is paid `buyback_price` in `currency`, of which `buyback_dividend` is
@@ -68,7 +68,7 @@
 //! allocations, plus the dividend-component income row when there is one.
 //! An action referenced by participation trades is frozen against edits.
 //!
-//! **ScripForScrip** — a takeover or merger completed as a scrip exchange
+//! **`ScripForScrip`** — a takeover or merger completed as a scrip exchange
 //! with scrip-for-scrip rollover (Subdiv 124-M; see
 //! `docs/ato/takeovers-and-scrip-for-scrip.md`): on the exchange `date` every
 //! `scrip_old_units` units of the original (target) listing become
@@ -108,7 +108,7 @@
 //! original acquisition). An action referenced by demerge trades is frozen
 //! against edits.
 //!
-//! **WorthlessShares** — a capital loss on a failed company without an
+//! **`WorthlessShares`** — a capital loss on a failed company without an
 //! ordinary sale (CGT events G3 and C2; see `docs/ato/worthless-shares.md`):
 //! the action records, against the failed listing, which event the user is
 //! invoking (`worthless_event`: `G3Declaration` — a liquidator's/administrator's

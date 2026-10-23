@@ -9,8 +9,8 @@
 //! words — so the same misspelt parameter was a `400` on one route and a `422`
 //! on the next. Here the status is decided once and the body is one sentence
 //! shape, `cannot read the <part>: <serde's own reason>`, the reason carrying
-//! the failing field's path (`sufix: unknown field `sufix`, expected
-//! `suffix``) so a toast with room for one line says what to fix:
+//! the failing field's path (``sufix: unknown field `sufix`, expected
+//! `suffix` ``) so a toast with room for one line says what to fix:
 //!
 //! - **query string** — always `400`. The query is part of the URL, and a URL
 //!   the route cannot read is a malformed request whatever was wrong with it:
