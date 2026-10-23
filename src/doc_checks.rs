@@ -3082,7 +3082,7 @@ fn known_limitations_document_the_brokerage_currency_invariant() {
 
 /// Docs pin for the return-of-capital currency invariant (SCENARIOS E-07 /
 /// E-39, fixed 2026-08-16): both write-time refusals have their own tests
-/// (`corporate_action::tests::api_payment_in_another_currency_than_its_parcels_returns_422`
+/// (`corporate_action::tests::currency::api_payment_in_another_currency_than_its_parcels_returns_422`
 /// and the parcel-side twin in `trade::tests`), but the *documented* half —
 /// which parcels the check covers, that the two entry paths refuse the pair
 /// from either side, and the one residual route into the mismatch (a rollover
