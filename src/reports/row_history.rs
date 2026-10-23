@@ -25,6 +25,7 @@
 //! Read-only — the trail itself is written by the triggers alone and is
 //! append-only (enforced in the schema), so there is nothing here to write.
 
+use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 #[cfg(test)]
@@ -33,6 +34,7 @@ use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// The audited tables, exactly as migration 0013 enumerates them in the
@@ -102,7 +104,7 @@ struct AuditedTable {
 #[error("{0:?} is not an audited table")]
 struct NotAudited(String);
 
-impl std::str::FromStr for AuditedTable {
+impl FromStr for AuditedTable {
     type Err = NotAudited;
 
     /// Resolve a requested table name against [`AUDITED_TABLES`], refusing
@@ -286,7 +288,7 @@ pub async fn db_row_history(
     // separates a re-used id from a plainly deleted one, so it has to come
     // from the same snapshot as the trail — a delete landing between the two
     // would label the boundary against a row that had just gone.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let occupied = match audited {
         Some(t) => {
             sqlx::query_scalar::<_, bool>(sqlx::AssertSqlSafe(format!(
@@ -448,9 +450,12 @@ mod tests {
     use super::*;
     use crate::entities::{listing, sell, trade};
     use crate::infra::id::ListingId;
+    use crate::test_support::ApiResponse;
     use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
     use rust_decimal::Decimal;
+    use std::collections::HashSet;
+    use std::iter;
 
     async fn history_count(pool: &SqlitePool, table: &str, row_id: i64) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM row_history WHERE table_name = ? AND row_id = ?")
@@ -914,10 +919,7 @@ mod tests {
             );
         }
         assert_eq!(
-            created
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
+            created.iter().collect::<HashSet<_>>().len(),
             3,
             "each row took its own freshly assigned id"
         );
@@ -1055,7 +1057,7 @@ mod tests {
         sell::db_delete_sell(pool, TradeId(2)).await.unwrap();
     }
 
-    fn page(resp: &crate::test_support::ApiResponse) -> Value {
+    fn page(resp: &ApiResponse) -> Value {
         assert_eq!(resp.status, StatusCode::OK);
         resp.json()
     }
@@ -1297,7 +1299,7 @@ mod tests {
             .filter(|e| e["table_name"] == "trades")
             .map(|e| e["row_id"].as_i64().unwrap())
             .collect();
-        for id in created.iter().chain(std::iter::once(&sell_id)) {
+        for id in created.iter().chain(iter::once(&sell_id)) {
             assert!(
                 found.contains(id),
                 "the demerge-created trade {id} is reachable from the browse page: {found:?}"

@@ -2,9 +2,29 @@ use super::*;
 use crate::entities::closing_price::PriceSource;
 use crate::entities::closing_price::{self, NonTradingReason};
 use crate::entities::corporate_action;
+use crate::entities::ess_vest;
+use crate::entities::exchange;
+use crate::entities::exchange::Exchange;
 use crate::entities::holding_account;
+use crate::entities::holding_account::HoldingAccount;
+use crate::entities::inheritance;
+use crate::entities::inheritance::CostBaseRule;
 use crate::entities::inheritance::Inheritance;
+use crate::entities::interest_income;
+use crate::entities::interest_income::InterestIncome;
+use crate::entities::investment_expense;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::entities::listing;
+use crate::entities::listing::SecurityType;
+use crate::entities::listing_rename;
+use crate::entities::listing_rename::RenameBody;
+use crate::entities::rights_sale;
+use crate::entities::rights_sale::SellRightsBody;
+use crate::entities::scrip_exchange;
+use crate::entities::sell::AllocationInput;
+use crate::entities::transfer;
+use crate::entities::transfer::TransferBody;
+use crate::entities::worthless;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -502,9 +522,7 @@ async fn an_unpriced_listing_stops_being_nagged_about_from_its_date() {
         .ticker("ATVI")
         .unpriced_from(ymd(2026, 7, 9))
         .build();
-    crate::entities::listing::db_upsert(&pool, &marked)
-        .await
-        .unwrap();
+    listing::db_upsert(&pool, &marked).await.unwrap();
 
     let after = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(
@@ -550,9 +568,7 @@ async fn a_listing_is_not_nagged_about_before_its_series_begins() {
         .ticker("LAC")
         .unpriced_before(ymd(2026, 7, 9))
         .build();
-    crate::entities::listing::db_upsert(&pool, &marked)
-        .await
-        .unwrap();
+    listing::db_upsert(&pool, &marked).await.unwrap();
 
     let after = health(&pool, ymd(2026, 7, 13)).await;
     assert!(
@@ -717,9 +733,9 @@ async fn a_fully_sold_listing_is_not_reported_after_its_sale() {
 #[tokio::test]
 async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
     let pool = test_pool().await;
-    crate::entities::exchange::db_upsert(
+    exchange::db_upsert(
         &pool,
-        &crate::entities::exchange::Exchange {
+        &Exchange {
             mic: "CXAX".to_owned(),
             name: "Second AUD market".to_owned(),
             country: "Australia".to_owned(),
@@ -736,10 +752,10 @@ async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
         .date(ymd(2026, 6, 5))
         .insert(&pool)
         .await;
-    crate::entities::listing_rename::db_rename(
+    listing_rename::db_rename(
         &pool,
         ListingId(1),
-        &crate::entities::listing_rename::RenameBody {
+        &RenameBody {
             effective_date: ymd(2026, 6, 10),
             ticker: "NEW".to_owned(),
             exchange_mic: Some("CXAX".to_owned()),
@@ -1751,9 +1767,9 @@ async fn one_reference_across_two_listings_is_a_multi_line_note_not_a_duplicate(
 async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("BHP").insert(&pool).await;
-    crate::entities::holding_account::db_upsert(
+    holding_account::db_upsert(
         &pool,
-        &crate::entities::holding_account::HoldingAccount {
+        &HoldingAccount {
             id: HoldingAccountId(2),
             name: "Second".to_owned(),
         },
@@ -1949,9 +1965,9 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
     let pool = test_pool().await;
     amit_listing(&pool, 1, "VDHG").await;
     amit_listing(&pool, 2, "HNDQ").await;
-    crate::entities::holding_account::db_upsert(
+    holding_account::db_upsert(
         &pool,
-        &crate::entities::holding_account::HoldingAccount {
+        &HoldingAccount {
             id: HoldingAccountId(2),
             name: "Second".to_owned(),
         },
@@ -2109,9 +2125,9 @@ async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate()
     let pool = test_pool().await;
     test_support::listing(1).ticker("AAA").insert(&pool).await;
     test_support::listing(2).ticker("BBB").insert(&pool).await;
-    crate::entities::holding_account::db_upsert(
+    holding_account::db_upsert(
         &pool,
-        &crate::entities::holding_account::HoldingAccount {
+        &HoldingAccount {
             id: HoldingAccountId(2),
             name: "Second".to_owned(),
         },
@@ -2190,9 +2206,9 @@ async fn insert_interest(
     amount: Decimal,
     source: Option<&str>,
 ) {
-    crate::entities::interest_income::db_upsert(
+    interest_income::db_upsert(
         pool,
-        &crate::entities::interest_income::InterestIncome {
+        &InterestIncome {
             id,
             date_paid: date,
             amount,
@@ -2229,9 +2245,7 @@ fn an_expense(
 }
 
 async fn insert_expense(pool: &SqlitePool, expense: &InvestmentExpense) {
-    crate::entities::investment_expense::db_upsert(pool, expense)
-        .await
-        .unwrap();
+    investment_expense::db_upsert(pool, expense).await.unwrap();
 }
 
 /// A term-deposit credit keyed twice doubles the year's gross interest and
@@ -2268,9 +2282,9 @@ async fn duplicated_interest_rows_are_reported_with_their_ids() {
 #[tokio::test]
 async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
     let pool = test_pool().await;
-    crate::entities::holding_account::db_upsert(
+    holding_account::db_upsert(
         &pool,
-        &crate::entities::holding_account::HoldingAccount {
+        &HoldingAccount {
             id: HoldingAccountId(2),
             name: "Second".to_owned(),
         },
@@ -2292,9 +2306,9 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
     )
     .await;
     // Same date, amount and source, different holding account.
-    crate::entities::interest_income::db_upsert(
+    interest_income::db_upsert(
         &pool,
-        &crate::entities::interest_income::InterestIncome {
+        &InterestIncome {
             id: 5,
             date_paid: ymd(2026, 3, 10),
             amount: dec("250"),
@@ -2310,9 +2324,9 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
     .unwrap();
     // Same everything but the TFN amount withheld — one row was keyed from
     // a statement that showed the withholding, so they are different rows.
-    crate::entities::interest_income::db_upsert(
+    interest_income::db_upsert(
         &pool,
-        &crate::entities::interest_income::InterestIncome {
+        &InterestIncome {
             id: 6,
             date_paid: ymd(2026, 3, 10),
             amount: dec("250"),
@@ -2507,9 +2521,9 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("AAA").insert(&pool).await;
     test_support::listing(2).ticker("BBB").insert(&pool).await;
-    crate::entities::holding_account::db_upsert(
+    holding_account::db_upsert(
         &pool,
-        &crate::entities::holding_account::HoldingAccount {
+        &HoldingAccount {
             id: HoldingAccountId(2),
             name: "Second".to_owned(),
         },
@@ -2576,7 +2590,7 @@ async fn a_duplicated_ess_pair_is_reported_beside_a_second_grant_and_after_vesti
     insert_ess(&pool, 2, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
     // The second tranche vesting the same day.
     insert_ess(&pool, 3, ListingId(1), ymd(2026, 3, 10), "40", "10").await;
-    crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
+    ess_vest::db_vest(&pool, 1).await.unwrap();
 
     let h = health(&pool, ymd(2026, 7, 13)).await;
     assert_eq!(h.duplicate_ess_statements.len(), 1);
@@ -2605,10 +2619,7 @@ async fn ess_vest(
         })
         .insert(pool)
         .await;
-    crate::entities::ess_vest::db_vest(pool, statement_id)
-        .await
-        .unwrap()
-        .id
+    ess_vest::db_vest(pool, statement_id).await.unwrap().id
 }
 
 /// Sells `units` of a vest parcel on `sale_date`, allocating them to it.
@@ -2821,15 +2832,15 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
     .unwrap();
     let taxing_point = ymd(2024, 3, 1);
     let vest = ess_vest(&pool, 1, ListingId(1), taxing_point).await;
-    let group = crate::entities::transfer::db_transfer(
+    let group = transfer::db_transfer(
         &pool,
         1,
-        &crate::entities::transfer::TransferBody {
+        &TransferBody {
             listing_id: ListingId(1),
             date: ymd(2024, 3, 11),
             from_account_id: HoldingAccountId(1),
             to_account_id: HoldingAccountId(2),
-            allocations: vec![crate::entities::sell::AllocationInput {
+            allocations: vec![AllocationInput {
                 purchase_trade_id: TradeId(vest.0),
                 quantity_allocated: dec("400"),
             }],
@@ -2902,9 +2913,7 @@ async fn a_scrip_exchange_closing_sell_is_flagged_as_a_takeover_or_restructure()
     )
     .await
     .unwrap();
-    crate::entities::scrip_exchange::db_exchange(&pool, 1)
-        .await
-        .unwrap();
+    scrip_exchange::db_exchange(&pool, 1).await.unwrap();
 
     let h = health(&pool, ymd(2024, 4, 1)).await;
     assert_eq!(h.ess_30_day_rule.len(), 1);
@@ -2926,7 +2935,7 @@ async fn insert_inheritance(
     quantity: &str,
     cost_base: &str,
 ) {
-    crate::entities::inheritance::db_upsert(
+    inheritance::db_upsert(
         pool,
         &Inheritance {
             id,
@@ -2934,7 +2943,7 @@ async fn insert_inheritance(
             holding_account_id: HoldingAccountId(account),
             quantity: dec(quantity),
             date_of_death: ymd(2024, 3, 1),
-            cost_base_rule: crate::entities::inheritance::CostBaseRule::DeceasedCostBase,
+            cost_base_rule: CostBaseRule::DeceasedCostBase,
             cost_base: dec(cost_base),
             lpr_expenditure: Decimal::ZERO,
             lpr_expenditure_date: None,
@@ -2976,9 +2985,9 @@ async fn inheritances_from_one_death_that_differ_are_not_reported() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("INHA").insert(&pool).await;
     test_support::listing(2).ticker("INHB").insert(&pool).await;
-    crate::entities::holding_account::db_upsert(
+    holding_account::db_upsert(
         &pool,
-        &crate::entities::holding_account::HoldingAccount {
+        &HoldingAccount {
             id: HoldingAccountId(2),
             name: "Broker".to_owned(),
         },
@@ -3051,7 +3060,7 @@ async fn matching_and_exchange_less_listings_are_not_reported() {
     // crypto holding is recorded in the fiat it is priced in.
     test_support::listing(3)
         .ticker("BTC")
-        .security_type(crate::entities::listing::SecurityType::Crypto)
+        .security_type(SecurityType::Crypto)
         .currency("AUD")
         .with(|l| l.exchange_mic = None)
         .insert(&pool)
@@ -3275,9 +3284,7 @@ async fn a_worthless_shares_recognise_is_never_flagged() {
     )
     .await
     .unwrap();
-    let recognised = crate::entities::worthless::db_recognise(&pool, 10)
-        .await
-        .unwrap();
+    let recognised = worthless::db_recognise(&pool, 10).await.unwrap();
     assert_eq!(recognised.sell.average_price, Decimal::ZERO);
 
     let h = health(&pool, ymd(2025, 6, 1)).await;
@@ -3416,32 +3423,27 @@ async fn only_a_paid_for_right_disposed_of_at_nil_is_flagged() {
     )
     .await
     .unwrap();
-    let lapse = |date: NaiveDate, units: &str, cost: Option<Decimal>| {
-        crate::entities::rights_sale::SellRightsBody {
-            date,
+    let lapse = |date: NaiveDate, units: &str, cost: Option<Decimal>| SellRightsBody {
+        date,
+        units: units.parse().unwrap(),
+        proceeds_per_right: Some(Decimal::ZERO),
+        rights_cost: cost,
+        fx_rate: None,
+        holding_account_id: HoldingAccountId(1),
+        allocations: vec![rights_sale::AllocationInput {
+            purchase_trade_id: TradeId(1),
             units: units.parse().unwrap(),
-            proceeds_per_right: Some(Decimal::ZERO),
-            rights_cost: cost,
-            fx_rate: None,
-            holding_account_id: HoldingAccountId(1),
-            allocations: vec![crate::entities::rights_sale::AllocationInput {
-                purchase_trade_id: TradeId(1),
-                units: units.parse().unwrap(),
-            }],
-        }
+        }],
     };
     // A free right left to lapse…
-    crate::entities::rights_sale::db_sell_rights(&pool, 10, &lapse(ymd(2025, 3, 1), "400", None))
+    rights_sale::db_sell_rights(&pool, 10, &lapse(ymd(2025, 3, 1), "400", None))
         .await
         .unwrap();
     // …and one that cost $80 on-market, lapsing worthless.
-    let paid = crate::entities::rights_sale::db_sell_rights(
-        &pool,
-        10,
-        &lapse(ymd(2025, 3, 2), "400", Some(dec("80"))),
-    )
-    .await
-    .unwrap();
+    let paid =
+        rights_sale::db_sell_rights(&pool, 10, &lapse(ymd(2025, 3, 2), "400", Some(dec("80"))))
+            .await
+            .unwrap();
 
     let h = health(&pool, ymd(2025, 6, 1)).await;
     assert_eq!(h.nil_proceeds_disposals.len(), 1);

@@ -36,6 +36,7 @@
 //! reads made here are the two identity lookups (a listing's ticker, an
 //! account's name) that no figure depends on.
 
+use crate::entities::listing;
 use crate::infra::email::{self, Document, Notifier, Section, Table};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -126,7 +127,7 @@ async fn db_names(
     ),
     sqlx::Error,
 > {
-    let listings = crate::entities::listing::db_tickers(pool).await?;
+    let listings = listing::db_tickers(pool).await?;
     let accounts = sqlx::query("SELECT id, name FROM holding_accounts")
         .fetch_all(pool)
         .await?
@@ -409,6 +410,8 @@ pub async fn run_weekly_summary(
 mod tests {
     use super::*;
     use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::parcel_allocation;
+    use crate::entities::parcel_allocation::ParcelAllocation;
     use crate::infra::email::test_support::Outbox;
     use crate::test_support::{self, dec, test_pool, ymd};
 
@@ -576,9 +579,9 @@ mod tests {
         // quantity (`HeldTimeline`), so the sale has to consume the parcel —
         // otherwise the listing is still held and its missing prices block the
         // window's valuation.
-        crate::entities::parcel_allocation::db_upsert(
+        parcel_allocation::db_upsert(
             &pool,
-            &crate::entities::parcel_allocation::ParcelAllocation {
+            &ParcelAllocation {
                 id: 1,
                 sale_trade_id: TradeId(701),
                 purchase_trade_id: TradeId(200),

@@ -43,15 +43,24 @@ use crate::domain::deduction_destination::{DeductionDestination, DeductionRoutin
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::closing_price::HeldTimeline;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::UnitsAt;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
+use crate::entities::income;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
+use crate::entities::listing;
 use crate::entities::trade::Trade;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::date;
+use crate::infra::db;
+use crate::infra::decimal;
 use crate::infra::decimal::{OptMoney, apportion, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
+use crate::infra::fx::FxOverride;
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
+use crate::infra::http::CrudEntity;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::RightsSaleId;
@@ -65,6 +74,7 @@ use axum::extract::State;
 use chrono::{NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -685,7 +695,7 @@ async fn load_disposal_inputs(
     // runtime with a missing column rather than at compile time.
     let all_trades: Vec<Trade> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT {} FROM trades",
-        <Trade as crate::infra::http::CrudEntity>::COLUMNS
+        <Trade as CrudEntity>::COLUMNS
     )))
     .fetch_all(&mut *conn)
     .await?;
@@ -716,11 +726,9 @@ async fn load_disposal_inputs(
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
-    let amit_events =
-        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
+    let amit_events = cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
+    let roc_events = corporate_action::db_return_of_capital_events(&mut *conn).await?;
+    let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
 
     // A partial-rollover scrip closing Sell's cash terms, from the same join
     // `realised_gains` reads them off, through the same helper: the worksheet
@@ -807,11 +815,8 @@ fn disposal_parcel_rows(
                         .split_events
                         .get(&buy_row.listing_id)
                         .map_or(&[][..], |v| v);
-                    let units_acquired = crate::entities::corporate_action::as_acquired_quantity(
-                        crate::entities::corporate_action::UnitsAt::new(
-                            p.units,
-                            disposal.sale_date,
-                        ),
+                    let units_acquired = corporate_action::as_acquired_quantity(
+                        UnitsAt::new(p.units, disposal.sale_date),
                         splits,
                         buy_row.date,
                     );
@@ -949,7 +954,7 @@ fn disposal_parcel_rows(
                             .resolve_rate(
                                 rights_currency,
                                 disposal.sale_date,
-                                crate::infra::fx::FxOverride::Fallback(*fx_rate),
+                                FxOverride::Fallback(*fx_rate),
                             )
                             .ok()
                     }),
@@ -1436,7 +1441,7 @@ impl IncomeContext {
         tax_year: TaxYear,
         fx: FxRates,
     ) -> Result<Self, sqlx::Error> {
-        let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+        let tickers = listing::db_tickers(&mut *conn).await?;
         let renames = RenameHistory::load(&mut *conn).await?;
         Ok(Self {
             tax_year,
@@ -1489,7 +1494,7 @@ async fn push_income_rows(
     // below — and a pre-AMIT year's print like any other trust's: the same
     // rows behind the tax summary's income total
     // (`income::db_assessable_cash_income`, SCENARIOS F-23).
-    for income in &crate::entities::income::db_assessable_cash_income(&mut *conn).await? {
+    for income in &income::db_assessable_cash_income(&mut *conn).await? {
         let Income {
             id: income_id,
             listing_id,
@@ -1671,7 +1676,7 @@ async fn push_amma_rows(
 /// tax-year-end month.
 fn amma_statement_row(
     ctx: &IncomeContext,
-    row: &sqlx::sqlite::SqliteRow,
+    row: &SqliteRow,
     listing_id: ListingId,
     d: NaiveDate,
 ) -> Result<AmmaStatementRow, sqlx::Error> {
@@ -1696,8 +1701,8 @@ fn amma_statement_row(
         cgt_indexation_gains_aud: aud("cgt_indexation_gains")?,
         cgt_other_gains_aud: aud("cgt_other_gains")?,
         capital_losses_applied_aud: aud("capital_losses_applied")?,
-        tax_deferred_amount: crate::infra::decimal::row_dec(row, "tax_deferred_amount")?,
-        tax_free_amount: crate::infra::decimal::row_dec(row, "tax_free_amount")?,
+        tax_deferred_amount: decimal::row_dec(row, "tax_deferred_amount")?,
+        tax_free_amount: decimal::row_dec(row, "tax_free_amount")?,
         tfn_withholding_tax_aud: aud("tfn_withholding_tax")?,
     })
 }
@@ -1856,7 +1861,7 @@ async fn push_deduction_rows(
             // printed on the archived document. Rounding here too is what
             // keeps the section a drilldown: these rows sum to the summary
             // line exactly (SCENARIOS W-d/W-f).
-            amount_aud: crate::infra::decimal::to_cents(tax_summary::aud_field(
+            amount_aud: decimal::to_cents(tax_summary::aud_field(
                 fx,
                 row,
                 "amount",
@@ -1911,7 +1916,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             .map(|a| (a.income_id, a))
             .collect();
 
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let amma_coverage_result = amma_coverage(&mut tx, year).await?;
     // The realised-gains pipeline and the FX rate table each run/load once
     // for the whole document: the disposals schedule, the CGT summary and
@@ -2067,7 +2072,7 @@ async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error>
     // One read transaction over every input, per the house rule for
     // multi-query reports: an interleaved write can't land a fact between the
     // CGT walk and the date reads and leave the list internally inconsistent.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let dates: Vec<NaiveDate> = sqlx::query_scalar(
         "SELECT date FROM trades \
          UNION SELECT date_paid FROM interest_income \
@@ -2083,7 +2088,7 @@ async fn db_tax_report_years(pool: &SqlitePool) -> Result<Vec<i32>, sqlx::Error>
     let cgt_years = net_capital_gain::db_cgt_years(&mut tx).await?;
     tx.commit().await?;
 
-    let current = tax_year_for(crate::infra::date::today());
+    let current = tax_year_for(date::today());
     let mut years: Vec<i32> = dates
         .into_iter()
         .chain(income_rows.iter().map(Income::assessment_date))
@@ -2112,7 +2117,25 @@ async fn years_handler(State(pool): State<SqlitePool>) -> Result<Json<Vec<i32>>,
 mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
+    use crate::entities::amit_adjustment_generation;
+    use crate::entities::amit_adjustment_generation::GenerateBody;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::ess_vest;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::income;
+    use crate::entities::listing_rename;
+    use crate::entities::listing_rename::RenameBody;
+    use crate::entities::sell;
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::sell::SellBody;
     use crate::entities::{interest_income, investment_expense, rba_fx_rate};
+    use crate::infra::date;
+    use crate::infra::decimal;
+    use crate::reports;
+    use crate::test_support::ApiClient;
     use crate::test_support::{self, dec, ymd};
     use axum::http::StatusCode;
 
@@ -2178,7 +2201,7 @@ mod tests {
         assert_eq!(summary.capital_loss_brought_forward, dec("4000"));
         assert_eq!(summary.capital_loss_carried_forward, dec("4000"));
         // Over HTTP, the surface the archived document is printed from.
-        let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
+        let body: serde_json::Value = ApiClient::full(&pool)
             .get_json("/reports/tax_report?tax_year=2026")
             .await;
         assert_eq!(
@@ -2213,9 +2236,7 @@ mod tests {
             .await;
         test_support::allocate(&pool, 1, 2, 1, dec("40")).await;
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         let expected = realised
             .iter()
             .find(|r| r.disposal == DisposalId::Sell(TradeId(2)))
@@ -2269,10 +2290,10 @@ mod tests {
             .insert(&pool)
             .await;
         // Renamed mid-year: LAAC -> LAR (the listing's current ticker).
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             &pool,
             ListingId(1),
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date: ymd(2024, 3, 1),
                 ticker: "LAR".to_owned(),
                 exchange_mic: None,
@@ -2328,9 +2349,7 @@ mod tests {
             .await;
         test_support::allocate(&pool, 1, 2, 1, dec("40")).await;
 
-        let years = crate::reports::net_capital_gain::db_net_capital_gain(&pool)
-            .await
-            .unwrap();
+        let years = net_capital_gain::db_net_capital_gain(&pool).await.unwrap();
         let expected = years.iter().find(|y| y.tax_year == 2024).unwrap();
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
@@ -2500,9 +2519,7 @@ mod tests {
             .await;
         test_support::allocate(&pool, 3, 8, 7, dec("100")).await;
 
-        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let summary_rows = tax_summary::db_tax_summary(&pool).await.unwrap();
         let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
 
         let report = db_tax_report(&pool, 2024).await.unwrap();
@@ -2580,7 +2597,7 @@ mod tests {
             .expect("the AMMA foreign-income row");
         assert_eq!(amma_row.amount_aud, dec("1000"));
         assert_eq!(amma_row.foreign_tax_paid_aud, dec("650"));
-        let (claimable, reduced) = crate::reports::tax_summary::apportion_capital_gains_foreign_tax(
+        let (claimable, reduced) = tax_summary::apportion_capital_gains_foreign_tax(
             dec("300"),
             dec("300"),
             Decimal::ZERO,
@@ -2669,9 +2686,7 @@ mod tests {
             .unwrap();
         }
 
-        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let summary_rows = tax_summary::db_tax_summary(&pool).await.unwrap();
         let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
         let report = db_tax_report(&pool, 2024).await.unwrap();
 
@@ -2842,9 +2857,7 @@ mod tests {
         assert_eq!(totals.total.foreign_tax_paid_aud, dec("30"));
 
         // …and the line each subtotal is the drilldown for says the same.
-        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let summary_rows = tax_summary::db_tax_summary(&pool).await.unwrap();
         let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
         assert_eq!(
             totals.non_amma.amount_aud,
@@ -2915,14 +2928,10 @@ mod tests {
             dec("30.02"),
             "no AMMA rows this year, so the total is the non-AMMA subtotal"
         );
-        let summary_rows = crate::reports::tax_summary::db_tax_summary(&pool)
-            .await
-            .unwrap();
+        let summary_rows = tax_summary::db_tax_summary(&pool).await.unwrap();
         let summary = summary_rows.iter().find(|s| s.tax_year == 2024).unwrap();
         assert_eq!(
-            crate::infra::decimal::to_cents(
-                summary.foreign_source_income + summary.foreign_interest_income
-            ),
+            decimal::to_cents(summary.foreign_source_income + summary.foreign_interest_income),
             dec("30.01"),
             "the exact lines round to a cent less — the accepted price of a \
              column that adds up"
@@ -3178,13 +3187,13 @@ mod tests {
             .await;
         // 2-for-1: the 100 units become 200, and everything after is quoted in
         // that basis.
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 1,
                 listing_id: ListingId(1),
                 date: ymd(2023, 6, 1),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -3247,13 +3256,9 @@ mod tests {
         let other = db_tax_report(&pool, 2025).await.unwrap();
         assert!(other.completeness.amit_adjustment_alerts.is_empty());
 
-        crate::entities::amit_adjustment_generation::db_generate(
-            &pool,
-            1,
-            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
-        )
-        .await
-        .unwrap();
+        amit_adjustment_generation::db_generate(&pool, 1, &GenerateBody::default())
+            .await
+            .unwrap();
         let cleared = db_tax_report(&pool, 2024).await.unwrap();
         assert!(cleared.completeness.amit_adjustment_alerts.is_empty());
         assert!(cleared.completeness.complete);
@@ -3267,9 +3272,9 @@ mod tests {
     async fn amma_missing_asks_each_holding_account_for_its_own_statement() {
         let pool = test_support::test_pool().await;
         listing_amit(&pool, 1, "AMT").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },
@@ -3778,15 +3783,13 @@ mod tests {
             .mic("XNYS")
             .insert(&pool)
             .await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", dec("0.50"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", dec("0.50"))
             .await
             .unwrap();
         let mut foreign = test_support::income(1, 3, march).build();
         foreign.currency = "USD".into();
         foreign.foreign_source_income = dec("100");
-        crate::entities::income::db_upsert(&pool, &foreign)
-            .await
-            .unwrap();
+        income::db_upsert(&pool, &foreign).await.unwrap();
 
         let expense = |id: i64, kind, amount: &str, listing_id: Option<ListingId>| {
             investment_expense::InvestmentExpense {
@@ -3851,7 +3854,7 @@ mod tests {
         );
         assert_eq!(
             rows[0].destination,
-            crate::domain::deduction_destination::DeductionDestination::TrustDistributions
+            DeductionDestination::TrustDistributions
         );
 
         // Each destination's printed rows sum to that destination's line in
@@ -3882,7 +3885,7 @@ mod tests {
         assert_eq!(line("deductions_total"), "200");
 
         // Over HTTP, the surface the archived document is printed from.
-        let body: serde_json::Value = crate::test_support::ApiClient::full(&pool)
+        let body: serde_json::Value = ApiClient::full(&pool)
             .get_json("/reports/tax_report?tax_year=2026")
             .await;
         assert_eq!(body["income"]["deductions"][0]["ato_label"], "13Y");
@@ -3925,10 +3928,10 @@ mod tests {
         investment_expense::db_upsert(&pool, &expense(1, ymd(2024, 1, 5), Some(ListingId(1))))
             .await
             .unwrap();
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             &pool,
             ListingId(1),
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date: ymd(2024, 3, 1),
                 ticker: "LAR".to_owned(),
                 exchange_mic: None,
@@ -3993,14 +3996,14 @@ mod tests {
             })
             .insert(&pool)
             .await;
-        let first = crate::entities::ess_vest::db_vest(&pool, 1).await.unwrap();
-        crate::entities::ess_vest::db_vest(&pool, 2).await.unwrap();
+        let first = ess_vest::db_vest(&pool, 1).await.unwrap();
+        ess_vest::db_vest(&pool, 2).await.unwrap();
 
         // The September parcel sold in May 2025 at $15: $1,500 − $1,000.
-        crate::entities::sell::db_upsert_sell(
+        sell::db_upsert_sell(
             &pool,
             TradeId(50),
-            &crate::entities::sell::SellBody {
+            &SellBody {
                 brokerage_includes_gst: false,
                 statement_total: None,
                 holding_account_id: HoldingAccountId(1),
@@ -4016,7 +4019,7 @@ mod tests {
                 fx_rate: Decimal::ONE,
                 spot_fx_rate: None,
                 contract_note_ref: None,
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: first.id,
                     quantity_allocated: dec("100"),
                 }],
@@ -4099,8 +4102,8 @@ mod tests {
     #[tokio::test]
     async fn the_year_list_never_offers_a_year_beyond_the_one_in_progress() {
         let pool = test_support::test_pool().await;
-        let current = tax_year_for(crate::infra::date::today());
-        let beyond = crate::infra::date::today() + chrono::Duration::days(2 * 365);
+        let current = tax_year_for(date::today());
+        let beyond = date::today() + chrono::Duration::days(2 * 365);
         interest_income::db_upsert(
             &pool,
             &interest_income::InterestIncome {
@@ -4859,13 +4862,9 @@ mod tests {
             .with(|a| a.tax_year_end_date = ymd(2023, 6, 30))
             .insert(&pool)
             .await;
-        crate::entities::amit_adjustment_generation::db_generate(
-            &pool,
-            11,
-            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
-        )
-        .await
-        .unwrap();
+        amit_adjustment_generation::db_generate(&pool, 11, &GenerateBody::default())
+            .await
+            .unwrap();
         test_support::sell(12, 2)
             .date(ymd(2024, 4, 3))
             .qty(dec("137"))
@@ -5135,13 +5134,9 @@ mod tests {
             .with(|a| a.tax_year_end_date = ymd(2023, 6, 30))
             .insert(&pool)
             .await;
-        crate::entities::amit_adjustment_generation::db_generate(
-            &pool,
-            1,
-            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
-        )
-        .await
-        .unwrap();
+        amit_adjustment_generation::db_generate(&pool, 1, &GenerateBody::default())
+            .await
+            .unwrap();
         // … and 25c/unit returned as capital on the ordinary trust.
         corporate_action::db_upsert(
             &pool,
@@ -5389,13 +5384,9 @@ mod tests {
             .cost_base_adjustment(dec("0.60"))
             .insert(&pool)
             .await; // year ended 2024-06-30 (the builder's default)
-        crate::entities::amit_adjustment_generation::db_generate(
-            &pool,
-            1,
-            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
-        )
-        .await
-        .unwrap();
+        amit_adjustment_generation::db_generate(&pool, 1, &GenerateBody::default())
+            .await
+            .unwrap();
         // Dispose of the whole parcel in FY2025 so the worksheet prints it.
         test_support::sell(11, 1)
             .date(ymd(2024, 8, 1))
@@ -5487,13 +5478,9 @@ mod tests {
             .insert(&pool)
             .await;
         for statement_id in [1, 2] {
-            crate::entities::amit_adjustment_generation::db_generate(
-                &pool,
-                statement_id,
-                &crate::entities::amit_adjustment_generation::GenerateBody::default(),
-            )
-            .await
-            .unwrap();
+            amit_adjustment_generation::db_generate(&pool, statement_id, &GenerateBody::default())
+                .await
+                .unwrap();
         }
         // Dispose of the whole parcel in FY2025 (after both year ends).
         test_support::sell(11, 1)
@@ -5670,7 +5657,7 @@ mod tests {
                 indexation_eligible: false,
                 indexed_cost_base: None,
             }],
-            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
+            taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
         };
 
         let err = disposal_parcel_rows(&disposal, &inputs).unwrap_err();

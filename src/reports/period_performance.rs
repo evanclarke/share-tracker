@@ -39,6 +39,7 @@
 
 use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{self, FxError, FxRates};
 use crate::infra::http::ApiError;
@@ -246,7 +247,7 @@ pub async fn compute(
     // committing between the `from` and `to` reads (a backdated Buy, a
     // scheduled price/FX import) makes the endpoints describe different
     // states, and `purchases`/`total_return` misbook the difference.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
 
     let resolved_from = valuations_or_empty(&mut tx, from, now).await?;
     let resolved_to = valuations_or_empty(&mut tx, to, now).await?;
@@ -517,6 +518,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::listing;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -632,9 +634,7 @@ mod tests {
             .crypto()
             .unpriced_from(ymd(2026, 6, 2))
             .build();
-        crate::entities::listing::db_upsert(&pool, &marked)
-            .await
-            .unwrap();
+        listing::db_upsert(&pool, &marked).await.unwrap();
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert!(r.price_carried_forward);
@@ -687,9 +687,7 @@ mod tests {
             .crypto()
             .unpriced_before(ymd(2026, 6, 15))
             .build();
-        crate::entities::listing::db_upsert(&pool, &marked)
-            .await
-            .unwrap();
+        listing::db_upsert(&pool, &marked).await.unwrap();
 
         let r = compute(&pool, from, to, now_after(to)).await.unwrap();
         assert!(r.holding_excluded);

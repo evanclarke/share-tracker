@@ -42,9 +42,14 @@
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::AcquiredUnits;
 use crate::entities::income::{Income, IncomeType};
+use crate::entities::listing;
 use crate::entities::trade::TradeType;
 use crate::infra::currency::Aud;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -56,6 +61,7 @@ use axum::{Extension, extract::State};
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, HashMap};
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -174,8 +180,8 @@ struct TradeFlow {
     group: Option<(GroupKind, i64)>,
 }
 
-impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for TradeFlow {
-    fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+impl sqlx::FromRow<'_, SqliteRow> for TradeFlow {
+    fn from_row(row: &SqliteRow) -> Result<Self, sqlx::Error> {
         // An internal-movement Sell and its replacement Buys share a group:
         // the carried cost flows between them instead of external cash.
         let transfer_id: Option<i64> = row.try_get("transfer_id")?;
@@ -398,8 +404,8 @@ async fn accumulate_on(
     // double the holding.
     let qty_sold = open_parcels::db_units_sold(&mut *conn, Some(as_of)).await?;
 
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+    let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
+    let tickers = listing::db_tickers(&mut *conn).await?;
     // every imported ATO FX rate — per-row conversions below are map lookups,
     // not one DB round-trip each
     let fx = FxRates::load(&mut *conn).await?;
@@ -436,7 +442,7 @@ async fn accumulate_on(
 
         // Units of this parcel still open at as_of (in as-of units).
         let splits = split_events.get(&p.listing_id).map_or(&[][..], |v| v);
-        let sold = crate::entities::corporate_action::sold_in_acquired_units(
+        let sold = corporate_action::sold_in_acquired_units(
             qty_sold
                 .get(&p.id)
                 .map_or(&[][..], |v| v)
@@ -446,14 +452,10 @@ async fn accumulate_on(
             p.date,
         );
         let remaining = p.quantity - sold;
-        if remaining > crate::entities::corporate_action::AcquiredUnits::ZERO {
-            acc.quantity += crate::entities::corporate_action::split_adjusted_quantity(
-                remaining,
-                splits,
-                p.date,
-                Some(as_of),
-            )
-            .quantity();
+        if remaining > AcquiredUnits::ZERO {
+            acc.quantity +=
+                corporate_action::split_adjusted_quantity(remaining, splits, p.date, Some(as_of))
+                    .quantity();
         }
     }
 
@@ -566,7 +568,7 @@ pub async fn db_performance(
     as_of: NaiveDate,
 ) -> Result<Vec<HoldingPerformance>, sqlx::Error> {
     // One read transaction: every input comes from the same snapshot.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let rows = db_performance_on(&mut tx, prices, as_of).await?;
     tx.commit().await?;
     Ok(rows)
@@ -655,7 +657,7 @@ async fn performance_handler(
     // resolver (`infra::date::as_of_or_today`), never `as_of_or_open`'s
     // open-ended "every recorded fact" sentinel; stated here rather than
     // re-derived inline so the API default lives with the other reports'.
-    let as_of = crate::infra::date::as_of_or_today(req.as_of_date);
+    let as_of = date::as_of_or_today(req.as_of_date);
 
     // Live-fetch a current price for each open held listing without an explicit
     // override (when requested); an explicit price always wins.

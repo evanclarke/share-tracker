@@ -24,6 +24,7 @@
 
 use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
@@ -146,7 +147,7 @@ pub async fn held_markets(
     pool: &SqlitePool,
     as_of: Option<NaiveDate>,
 ) -> Result<Vec<Market>, ValuationError> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let markets = held_markets_on(&mut tx, as_of).await?;
     tx.commit().await?;
     Ok(markets)
@@ -179,7 +180,7 @@ pub async fn stored_valuations(
     date: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<StoredValuations, ValuationError> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let valuations = stored_valuations_on(&mut tx, date, now).await?;
     tx.commit().await?;
     Ok(valuations)

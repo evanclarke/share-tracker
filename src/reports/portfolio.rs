@@ -1,6 +1,8 @@
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::currency::Aud;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
@@ -112,7 +114,7 @@ pub async fn db_holdings(
     // One read transaction: every input comes from the same snapshot, so an
     // interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let holdings = db_holdings_on(&mut tx, as_of).await?;
     tx.commit().await?;
     Ok(holdings)
@@ -193,7 +195,7 @@ async fn overview(
     // sentinel — and it is what the shared open-parcels loader would resolve
     // `None` to anyway (SCENARIOS E-14). Resolving it here states the API
     // default at the boundary rather than leaving it implicit in the loader.
-    let as_of = crate::infra::date::as_of_or_today(req.as_of_date);
+    let as_of = date::as_of_or_today(req.as_of_date);
     let mut holdings = db_holdings(&pool, Some(as_of))
         .await
         .map_err(ApiError::from)?;
@@ -254,7 +256,12 @@ pub(crate) async fn price_holdings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::demerger;
+    use crate::entities::listing::SecurityType;
+    use crate::entities::rba_fx_rate;
+    use crate::entities::scrip_exchange;
     use crate::entities::{amit_adjustment, amma, corporate_action, trade};
+    use crate::infra::date;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -969,7 +976,7 @@ mod tests {
             Decimal::from(10),
         )
         .await; // 2024-01-02
-        let today = crate::infra::date::today();
+        let today = date::today();
         let yesterday = today.pred_opt().expect("today has a yesterday");
         test_support::sell(2, 1)
             .date(today)
@@ -1029,9 +1036,7 @@ mod tests {
             Decimal::from(10),
         )
         .await;
-        let sale_date = crate::infra::date::today()
-            .pred_opt()
-            .expect("today has a yesterday");
+        let sale_date = date::today().pred_opt().expect("today has a yesterday");
         test_support::sell(2, 1)
             .date(sale_date)
             .qty(Decimal::from(40))
@@ -1096,7 +1101,7 @@ mod tests {
             Decimal::from(10),
         )
         .await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         test_support::sell(2, 1)
             .date(today)
             .qty(Decimal::from(40))
@@ -1243,22 +1248,22 @@ mod tests {
     async fn api_overview_live_early_month_usd_is_valued_provisionally() {
         use crate::entities::closing_price::test_support::QuoteStub;
         let pool = test_pool().await;
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .ticker("ICE")
             .name("ICE")
             .mic("XNYS")
-            .security_type(crate::entities::listing::SecurityType::Share)
+            .security_type(SecurityType::Share)
             .currency("USD")
             .insert(&pool)
             .await;
-        crate::test_support::buy(1, 1)
+        test_support::buy(1, 1)
             .qty(Decimal::from(10))
             .price(Decimal::from(100))
             .currency("USD")
             .insert(&pool)
             .await;
         // Only May's rate is imported; the quote is dated June.
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "2".parse().unwrap())
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-05", "2".parse().unwrap())
             .await
             .unwrap();
         let as_of = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 6, 5, 6, 30, 0).unwrap();
@@ -1290,7 +1295,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", "2".parse().unwrap())
+        rba_fx_rate::db_import_rate(&pool, "USD", "2026-03", "2".parse().unwrap())
             .await
             .unwrap();
         let resp = ApiClient::over(router().with_state(pool).layer(axum::Extension(fetcher)))
@@ -1437,9 +1442,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
         let holdings = db_holdings(&pool, None).await.unwrap();
         assert_eq!(holdings.len(), 1);
@@ -1489,9 +1492,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
 
         let mut holdings = db_holdings(&pool, None).await.unwrap();
         holdings.sort_by_key(|h| h.listing_id);

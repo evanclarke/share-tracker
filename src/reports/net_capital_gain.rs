@@ -41,11 +41,15 @@
 //! a capital loss forward (label 18V is reported until the loss is used, not
 //! only in years with a CGT event — see [`net_years`]).
 
+use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::cgt_settings;
 use crate::entities::corporate_action::{self, AcquiredUnits, RocEvent};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
@@ -54,6 +58,7 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
 use crate::infra::respond::{Csv, Payload};
+use crate::reports;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
 use crate::reports::tax_summary::aud_field;
@@ -61,8 +66,10 @@ use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
@@ -463,8 +470,7 @@ async fn non_disposal_gains(
     )))
     .fetch_all(&mut *conn)
     .await?;
-    let amit_events =
-        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
+    let amit_events = cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
 
     for parcel in amit_parcels {
         let Some(events) = amit_events.get(&parcel.id) else {
@@ -626,9 +632,7 @@ async fn non_disposal_gains(
                             *date,
                             FxOverride::None,
                         )?,
-                        discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                            acquired, *date,
-                        ),
+                        discount_eligible: cgt_discount::discount_eligible(acquired, *date),
                     });
                 }
                 let amount = event.reduction_for_units(trade_qty, units, disposed_on, disposal);
@@ -690,10 +694,7 @@ async fn non_disposal_gains(
                     // loss, so an excess whose AUD value does not survive the
                     // two translations is no gain.
                     amount: (reduction - cost_base).max(Decimal::ZERO),
-                    discount_eligible: crate::domain::cgt_discount::discount_eligible(
-                        acquired,
-                        discount_from,
-                    ),
+                    discount_eligible: cgt_discount::discount_eligible(acquired, discount_from),
                 });
             }
         }
@@ -730,12 +731,12 @@ fn splits_of(
 /// many reduction rows repeat its trade columns (and recording first-seen order
 /// so the walk over the map stays deterministic).
 fn parcel_entry<'a>(
-    row: &sqlx::sqlite::SqliteRow,
+    row: &SqliteRow,
     parcels: &'a mut HashMap<TradeId, ParcelRow>,
     order: &mut Vec<TradeId>,
 ) -> Result<&'a ParcelRow, sqlx::Error> {
     let id: TradeId = row.try_get("id")?;
-    if let std::collections::hash_map::Entry::Vacant(slot) = parcels.entry(id) {
+    if let Entry::Vacant(slot) = parcels.entry(id) {
         slot.insert(ParcelRow::from_row(row)?);
         order.push(id);
     }
@@ -749,7 +750,7 @@ pub async fn db_net_capital_gain(
     // AMMA/E10/G1 walks, the FX table, and the opening loss — so the whole
     // report sees a single consistent snapshot (an interleaved write can't
     // e.g. land an AMMA row between the realised read and the E10 walk).
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let years = db_net_capital_gain_on(&mut tx).await?;
     tx.commit().await?;
     Ok(years)
@@ -764,7 +765,7 @@ pub(crate) async fn db_net_capital_gain_on(
     let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
     let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
+    let opening = cgt_settings::db_opening_capital_loss(&mut *conn).await?;
 
     // Group the already-fetched disposals by tax year so each year row can
     // carry the disposals (and, within them, the parcels) that its gross
@@ -877,7 +878,7 @@ async fn gross_buckets(
 /// two report paths (the multi-year report and the annual tax report's CGT
 /// summary). The FY bucketing is [`tax_year_for`]'s, never re-derived.
 fn current_tax_year() -> i32 {
-    tax_year_for(crate::infra::date::today())
+    tax_year_for(date::today())
 }
 
 /// Steps 3 and 4: walk the years in order, applying losses ATO-optimally and
@@ -1015,7 +1016,7 @@ fn net_years(
                 cgt_event_e10_gain: to_cents(b.e10),
                 cgt_event_g1_gain: to_cents(b.g1),
                 cgt_event_c2_gain: to_cents(b.c2),
-                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
+                taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
                 // Attached by the caller (`db_net_capital_gain` groups the
                 // already-fetched realised rows by tax year); left empty here
                 // and on every what-if scenario row.
@@ -1091,7 +1092,7 @@ pub(crate) async fn db_cgt_years(
     let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
     let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
+    let opening = cgt_settings::db_opening_capital_loss(&mut *conn).await?;
     Ok(net_years(buckets, opening, current_tax_year())
         .into_iter()
         .map(|y| y.tax_year)
@@ -1125,7 +1126,7 @@ pub(crate) async fn db_cgt_summary_year(
         .iter()
         .map(|(y, b)| (*y, b.amma_discount_grossed_up))
         .collect();
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *conn).await?;
+    let opening = cgt_settings::db_opening_capital_loss(&mut *conn).await?;
     let years = net_years(buckets, opening, current_tax_year());
     Ok(years.into_iter().find(|y| y.tax_year == tax_year).map(|y| {
         // At the cent like every other figure on this worksheet, and for the
@@ -1339,9 +1340,7 @@ async fn what_if_handler(
     // realised rows, the AMMA/E10/G1 walks, and the opening loss — so the
     // dry-run works from a single consistent snapshot, exactly like the
     // report proper. Everything after the commit is pure computation.
-    let mut tx = crate::infra::db::read_tx(&pool)
-        .await
-        .map_err(ApiError::from)?;
+    let mut tx = db::read_tx(&pool).await.map_err(ApiError::from)?;
     // Candidates as at the hypothetical disposal's own date, not today: a
     // parcel acquired after it can't be sold on it (the Sell path refuses
     // exactly that allocation), and one sold since was still there to sell.
@@ -1362,7 +1361,7 @@ async fn what_if_handler(
     let buckets = gross_buckets(&mut tx, &realised, &fx)
         .await
         .map_err(ApiError::from)?;
-    let opening = crate::entities::cgt_settings::db_opening_capital_loss(&mut *tx)
+    let opening = cgt_settings::db_opening_capital_loss(&mut *tx)
         .await
         .map_err(ApiError::from)?;
     tx.commit().await.map_err(ApiError::from)?;
@@ -1491,10 +1490,20 @@ async fn what_if_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::demerger;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::scrip_exchange;
+    use crate::entities::sell::AllocationInput;
     use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
+    use crate::infra::date;
+    use crate::infra::decimal;
+    use crate::reports;
+    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool};
     use axum::http::StatusCode;
+    use axum::http::header;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -1709,11 +1718,11 @@ mod tests {
 
         let r = db_net_capital_gain(&pool).await.unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
+        assert_eq!(r[0].taxpayer_basis, reports::TAXPAYER_BASIS);
         // The assumption ships in the CSV export too (CSV_HEADER names it); a
         // comma in the text would split it across CSV fields.
         assert!(CSV_HEADER.contains(&"taxpayer_basis"));
-        assert!(!crate::reports::TAXPAYER_BASIS.contains(','));
+        assert!(!reports::TAXPAYER_BASIS.contains(','));
     }
 
     #[tokio::test]
@@ -2713,13 +2722,11 @@ mod tests {
 
         // And the cost base the walk is describing agrees: the covered units
         // are floored at nil, the sold ones untouched.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let open = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open[0].remaining_cost_base, Decimal::ZERO);
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised[0].cost_base, Decimal::from(400));
     }
 
@@ -2864,9 +2871,7 @@ mod tests {
         .await;
         allocate(&pool, 1, 3, 1, Decimal::from(100)).await;
 
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised.len(), 1);
         assert_eq!(realised[0].cost_base, Decimal::from(150));
         assert_eq!(realised[0].capital_gain_loss, Decimal::from(50));
@@ -2942,7 +2947,7 @@ mod tests {
 
         // And the cost base the open-parcels view reports is floored at nil,
         // not the $400 a naive `quantity × per-unit` multiplication leaves.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -3330,9 +3335,7 @@ mod tests {
         assert_eq!(r[0].net_capital_gain, Decimal::from(550));
 
         // The sale itself is untouched: no cost-base reduction reached it.
-        let realised = crate::reports::realised_gains::db_realised_gains(&pool)
-            .await
-            .unwrap();
+        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
         assert_eq!(realised[0].cost_base, Decimal::from(1000));
         assert_eq!(realised[0].capital_gain_loss, Decimal::from(500));
     }
@@ -3445,7 +3448,7 @@ mod tests {
         assert_eq!(r[0].cgt_event_c2_gain, Decimal::from(10));
 
         // The 50 units still held took the reduction instead: 500 − 25.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let open = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open[0].return_of_capital_reduction, Decimal::from(25));
@@ -3465,9 +3468,9 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },
@@ -3494,7 +3497,7 @@ mod tests {
                 date: NaiveDate::from_ymd_opt(2023, 10, 3).unwrap(),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(100),
                 }],
@@ -3519,7 +3522,7 @@ mod tests {
         // parcel, so the payment is an ordinary G1 cost-base reduction there —
         // established first, because it is what makes a C2 gain beside it a
         // *double* count rather than a substitution.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let open = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(open.len(), 1);
@@ -3544,9 +3547,9 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },
@@ -3582,7 +3585,7 @@ mod tests {
                 date: NaiveDate::from_ymd_opt(2023, 10, 10).unwrap(),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(40),
                 }],
@@ -3612,7 +3615,7 @@ mod tests {
 
         // The 70 units still owned take the reduction: 30 in the original
         // parcel and 40 in the replacement, 50c each either way.
-        let mut open = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let mut open = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         open.sort_by_key(|p| p.remaining_quantity);
@@ -4149,7 +4152,7 @@ mod tests {
 
         // The cost base itself was always right: both reductions reported in
         // full, the parcel floored at nil.
-        let parcels = crate::reports::open_parcels::db_open_parcels(&pool, None)
+        let parcels = reports::open_parcels::db_open_parcels(&pool, None)
             .await
             .unwrap();
         assert_eq!(parcels.len(), 1);
@@ -4380,13 +4383,11 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
-            resp.headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
+            resp.headers.get(header::CONTENT_TYPE).unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers
-                .get(axum::http::header::CONTENT_DISPOSITION)
-                .unwrap(),
+            resp.headers.get(header::CONTENT_DISPOSITION).unwrap(),
             "attachment; filename=\"net-capital-gain.csv\""
         );
         let csv = resp.text().to_owned();
@@ -4437,7 +4438,7 @@ mod tests {
         assert_eq!(at("other_gains"), "0.00");
         // Not money, and untouched: the year and the taxpayer assumption.
         assert_eq!(at("tax_year"), "2024");
-        assert_eq!(at("taxpayer_basis"), crate::reports::TAXPAYER_BASIS);
+        assert_eq!(at("taxpayer_basis"), reports::TAXPAYER_BASIS);
         // Every money cell is at the cent — none escaped the projection.
         for (i, cell) in row.iter().enumerate() {
             if header[i] == "tax_year" || header[i] == "taxpayer_basis" {
@@ -4610,7 +4611,7 @@ mod tests {
             assert_eq!(y.capital_loss_carried_forward, rest - to_discount);
             assert_eq!(
                 y.cgt_discount,
-                crate::infra::decimal::to_cents(y.net_discount_eligible_gain / Decimal::TWO)
+                decimal::to_cents(y.net_discount_eligible_gain / Decimal::TWO)
             );
             assert_eq!(
                 y.net_capital_gain,
@@ -5019,9 +5020,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let ex = crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        let ex = scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
         // The exchange alone: no tax year reports any gain or loss.
         let years = db_net_capital_gain(&pool).await.unwrap();
@@ -5091,9 +5090,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let dm = crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        let dm = demerger::db_demerge(&pool, 10).await.unwrap();
 
         // The demerge alone: no tax year reports any gain or loss.
         let years = db_net_capital_gain(&pool).await.unwrap();
@@ -5677,7 +5674,7 @@ mod tests {
             Decimal::from(10),
         )
         .await;
-        let later = crate::infra::date::today() + chrono::Duration::days(400);
+        let later = date::today() + chrono::Duration::days(400);
 
         let (status, body) = post_what_if(
             pool,

@@ -27,6 +27,8 @@
 //! unhedged and carry no related-payment obligation — stated in `docs/API.md`'s
 //! Known limitations and in the report's own section there.
 
+use crate::entities::listing;
+use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxRates;
 use crate::infra::http::ApiError;
@@ -144,10 +146,10 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 pub async fn db_franking_at_risk(
     pool: &SqlitePool,
 ) -> Result<Vec<FrankingAtRiskAlert>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
-    let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
+    let tickers = listing::db_tickers(&mut *tx).await?;
     let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 
@@ -204,10 +206,10 @@ pub async fn db_franking_what_if(
     pool: &SqlitePool,
     req: &WhatIfRequest,
 ) -> Result<Vec<FrankingWhatIfAlert>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let (dividends, attached_by_year) = franking::db_franked_dividends(&mut tx, &fx).await?;
-    let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
+    let tickers = listing::db_tickers(&mut *tx).await?;
     let walks = franking::HoldingWalks::load(&mut tx).await?;
     tx.commit().await?;
 

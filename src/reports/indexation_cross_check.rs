@@ -138,6 +138,8 @@
 
 use crate::domain::indexation::CpiQuarters;
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::listing;
+use crate::infra::db;
 use crate::infra::decimal::{mul_div, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
@@ -272,7 +274,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 pub async fn db_indexation_cross_check(
     pool: &SqlitePool,
 ) -> Result<IndexationCrossCheck, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let ncg_years = super::net_capital_gain::db_net_capital_gain_on(&mut tx).await?;
     // The parcels' own trade dates: `ParcelDetail` carries the CGT
     // acquisition date (possibly deemed), and indexation turns on the date
@@ -280,7 +282,7 @@ pub async fn db_indexation_cross_check(
     let parcel_rows = sqlx::query("SELECT id, date FROM trades WHERE trade_type IN ('Buy', 'DRP')")
         .fetch_all(&mut *tx)
         .await?;
-    let tickers = crate::entities::listing::db_tickers(&mut *tx).await?;
+    let tickers = listing::db_tickers(&mut *tx).await?;
     let cpi = CpiQuarters::load(&mut tx).await?;
     tx.commit().await?;
 
@@ -626,6 +628,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<IndexationCrossCh
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::cgt_settings;
+    use crate::entities::cgt_settings::CgtSettings;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -941,6 +945,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use proptest::collection;
         use proptest::prelude::*;
 
         /// Every whole-unit split of the candidates, for a brute-force check.
@@ -1008,7 +1013,7 @@ mod tests {
             /// or everything.
             #[test]
             fn several_parcels_stay_within_a_unit_of_the_minimum(
-                cands in proptest::collection::vec(candidate(), 2..=3),
+                cands in collection::vec(candidate(), 2..=3),
                 losses in 0u32..=8000,
             ) {
                 let pool = LossPool {
@@ -1043,9 +1048,9 @@ mod tests {
     #[tokio::test]
     async fn the_year_row_reports_the_loss_aware_split() {
         let pool = test_pool().await;
-        crate::entities::cgt_settings::db_upsert(
+        cgt_settings::db_upsert(
             &pool,
-            &crate::entities::cgt_settings::CgtSettings {
+            &CgtSettings {
                 id: 1,
                 opening_capital_loss: dec("3500"),
             },

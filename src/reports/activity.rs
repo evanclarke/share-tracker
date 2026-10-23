@@ -27,16 +27,21 @@
 
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::amma::AmmaStatement;
+use crate::entities::closing_price::LiveQuotes;
 use crate::entities::closing_price::SharedFetcher;
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::DrpEnrolment;
+use crate::entities::ess_statement;
 use crate::entities::ess_statement::EssStatement;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::InvestmentExpense;
+use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
 use crate::infra::currency::Aud;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxOverride, FxRates};
@@ -52,6 +57,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
+use std::iter;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One dated row of the ledger. `quantity` is the row's signed unit effect in
@@ -192,7 +198,7 @@ struct Sources {
     transfers: Vec<Transfer>,
     incomes: Vec<Income>,
     actions: Vec<CorporateAction>,
-    ammas: Vec<crate::entities::amma::AmmaStatement>,
+    ammas: Vec<AmmaStatement>,
     esses: Vec<EssStatement>,
     enrolments: Vec<DrpEnrolment>,
     expenses: Vec<InvestmentExpense>,
@@ -247,14 +253,14 @@ impl Sources {
                 .bind(listing_id)
                 .fetch_all(&mut *conn)
                 .await?;
-        let ammas: Vec<crate::entities::amma::AmmaStatement> =
+        let ammas: Vec<AmmaStatement> =
             sqlx::query_as("SELECT * FROM amma_statements WHERE listing_id = ?")
                 .bind(listing_id)
                 .fetch_all(&mut *conn)
                 .await?;
         let esses: Vec<EssStatement> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT {} FROM ess_statements WHERE listing_id = ?",
-            crate::entities::ess_statement::COLUMNS
+            ess_statement::COLUMNS
         )))
         .bind(listing_id)
         .fetch_all(&mut *conn)
@@ -308,7 +314,7 @@ impl Sources {
                 .await?
                 .into_iter()
                 .collect();
-        let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+        let tickers = listing::db_tickers(&mut *conn).await?;
         let rename_history = RenameHistory::load(&mut *conn).await?;
         let holdings: Vec<HoldingOverview> = portfolio::db_holdings_on(&mut *conn, None)
             .await?
@@ -613,7 +619,7 @@ impl Sources {
                     rebase: None,
                     amount_aud: None,
                 });
-                std::iter::once(started).chain(ended)
+                iter::once(started).chain(ended)
             })
             .collect()
     }
@@ -726,7 +732,7 @@ pub async fn db_activity(
     pool: &SqlitePool,
     listing_id: ListingId,
 ) -> Result<Option<(Vec<ActivityEvent>, Vec<HoldingOverview>)>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let Some(sources) = Sources::load(&mut tx, listing_id).await? else {
         return Ok(None);
     };
@@ -932,7 +938,7 @@ async fn activity_handler(
     portfolio::price_holdings(
         &pool,
         fetcher.as_deref(),
-        crate::entities::closing_price::LiveQuotes::Fetch,
+        LiveQuotes::Fetch,
         &prices,
         &mut holdings,
     )
@@ -948,6 +954,18 @@ async fn activity_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::drp_enrolment;
+    use crate::entities::drp_enrolment::ResidualHandling;
+    use crate::entities::exchange;
+    use crate::entities::exchange::Exchange;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::investment_expense;
+    use crate::entities::investment_expense::ExpenseType;
+    use crate::entities::listing_rename;
+    use crate::entities::listing_rename::RenameBody;
+    use crate::entities::rba_fx_rate;
+    use crate::entities::sell::AllocationInput;
     use crate::entities::{corporate_action, transfer};
     use crate::test_support::{self, ApiClient, ApiResponse, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
@@ -1072,9 +1090,9 @@ mod tests {
     async fn db_transfer_collapses_to_one_row() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Personal".to_owned(),
             },
@@ -1090,7 +1108,7 @@ mod tests {
                 date: ymd(2024, 5, 1),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("40"),
                 }],
@@ -1202,10 +1220,10 @@ mod tests {
     async fn db_trust_distribution_converts_at_the_entitlement_month() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VAF").await;
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2025-06", dec("2"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-06", dec("2"))
             .await
             .unwrap();
-        crate::entities::rba_fx_rate::db_import_rate(&pool, "USD", "2025-07", dec("4"))
+        rba_fx_rate::db_import_rate(&pool, "USD", "2025-07", dec("4"))
             .await
             .unwrap();
         test_support::income(1, 1, ymd(2025, 7, 15))
@@ -1294,7 +1312,7 @@ mod tests {
         test_support::ess_statement(1, 1, ymd(2024, 9, 1))
             .insert(&pool)
             .await;
-        crate::entities::drp_enrolment::db_upsert(
+        drp_enrolment::db_upsert(
             &pool,
             &DrpEnrolment {
                 id: 1,
@@ -1302,17 +1320,17 @@ mod tests {
                 holding_account_id: HoldingAccountId(1),
                 enrolment_date: ymd(2024, 1, 10),
                 unenrolment_date: Some(ymd(2024, 10, 1)),
-                residual_handling: crate::entities::drp_enrolment::ResidualHandling::CarryForward,
+                residual_handling: ResidualHandling::CarryForward,
             },
         )
         .await
         .unwrap();
-        crate::entities::investment_expense::db_upsert(
+        investment_expense::db_upsert(
             &pool,
             &InvestmentExpense {
                 id: 1,
                 date_incurred: ymd(2024, 4, 1),
-                expense_type: crate::entities::investment_expense::ExpenseType::ManagementFee,
+                expense_type: ExpenseType::ManagementFee,
                 amount: dec("99"),
                 gross_amount: None,
                 deductible_percentage: None,
@@ -1535,9 +1553,9 @@ mod tests {
         // A second AUD market to move to: a rename onto an exchange quoting
         // another currency is refused (SCENARIOS R-01), and the trades here
         // are AUD.
-        crate::entities::exchange::db_upsert(
+        exchange::db_upsert(
             &pool,
-            &crate::entities::exchange::Exchange {
+            &Exchange {
                 mic: "CXAX".to_owned(),
                 name: "Second AUD market".to_owned(),
                 country: "Australia".to_owned(),
@@ -1554,10 +1572,10 @@ mod tests {
             .date(ymd(2024, 1, 2))
             .insert(&pool)
             .await;
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             &pool,
             ListingId(1),
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date: ymd(2024, 6, 1),
                 ticker: "LAR".to_owned(),
                 exchange_mic: Some("CXAX".to_owned()),
@@ -1613,10 +1631,10 @@ mod tests {
         effective_date: NaiveDate,
         ticker: &str,
     ) {
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             pool,
             listing_id,
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date,
                 ticker: ticker.to_owned(),
                 exchange_mic: None,

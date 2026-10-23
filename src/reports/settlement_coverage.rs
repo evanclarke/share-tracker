@@ -1,5 +1,6 @@
 use crate::entities::closing_price::{self, NonTradingReason};
 use crate::entities::exchange_holiday::{coverage_span_for, window_outside_coverage};
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
@@ -97,7 +98,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 pub async fn db_coverage_alerts(
     pool: &SqlitePool,
 ) -> Result<Vec<SettlementCoverageAlert>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let candidates: Vec<CoverageCandidate> = sqlx::query_as(
         "SELECT t.id AS trade_id, t.listing_id, l.ticker, l.exchange_mic AS mic, \
                 t.trade_type, t.date, t.settlement_date, h.earliest, h.latest \

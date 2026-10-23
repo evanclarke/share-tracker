@@ -2,6 +2,8 @@ use crate::domain::cgt_discount;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::currency::Aud;
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
@@ -89,7 +91,7 @@ pub async fn db_unrealised_gains(
     // One read transaction: every input below comes from the same snapshot,
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let gains = db_unrealised_gains_on(&mut tx, as_of_date).await?;
     tx.commit().await?;
     Ok(gains)
@@ -180,7 +182,7 @@ async fn unrealised_gains_handler(
     // resolver (`infra::date::as_of_or_today`), never `as_of_or_open`'s
     // open-ended "every recorded fact" sentinel; resolved through the shared
     // helper rather than re-deriving "today" inline.
-    let as_of_date = crate::infra::date::as_of_or_today(req.as_of_date);
+    let as_of_date = date::as_of_or_today(req.as_of_date);
 
     let mut gains = db_unrealised_gains(&pool, as_of_date)
         .await
@@ -223,6 +225,7 @@ async fn unrealised_gains_handler(
 mod tests {
     use super::*;
     use crate::entities::corporate_action;
+    use crate::entities::scrip_exchange;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -782,9 +785,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
         // 2025-02-01: over 12 months after the original buy, under 12 months
         // after the exchange — eligible via the combined period.

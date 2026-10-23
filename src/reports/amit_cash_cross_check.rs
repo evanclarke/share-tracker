@@ -1,5 +1,6 @@
 use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::income::Income;
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -59,7 +60,7 @@ pub async fn db_amit_cash_alerts(pool: &SqlitePool) -> Result<Vec<AmitCashAlert>
     // Both inputs (and the FX rates converting the cash) on one read
     // transaction: a single consistent snapshot, so an interleaved write
     // can't pair a cash row with a half-entered statement set.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let cash_rows = sqlx::query(
         "SELECT i.*, l.ticker, l.amit_from \
          FROM income i \
@@ -166,6 +167,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitCashAlert
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -210,9 +213,9 @@ mod tests {
 
     /// A second holding account to pay a distribution into.
     async fn second_account(pool: &SqlitePool) {
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".to_owned(),
             },

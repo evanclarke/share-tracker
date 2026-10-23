@@ -3,11 +3,13 @@
 //! listings.
 
 use crate::entities::closing_price::{self, HeldTimeline, PriceOrigin};
+use crate::entities::listing;
 use crate::infra::decimal::Money;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::cmp;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// How many consecutive shared trading days of *identical* closes make two
@@ -555,9 +557,9 @@ pub(super) fn longest_identical_run(a: &[StoredClose], b: &[StoredClose]) -> Opt
     let mut best: Option<IdenticalRun> = None;
     while i < a.len() && j < b.len() {
         match a[i].price_date.cmp(&b[j].price_date) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
+            cmp::Ordering::Less => i += 1,
+            cmp::Ordering::Greater => j += 1,
+            cmp::Ordering::Equal => {
                 if a[i].price == b[j].price {
                     let run = current.get_or_insert(IdenticalRun {
                         length: 0,
@@ -613,7 +615,7 @@ pub(super) async fn db_duplicate_price_series(
     for row in rows {
         series.entry(row.listing_id).or_default().push(row);
     }
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+    let tickers = listing::db_tickers(&mut *conn).await?;
     // The FK guarantees the listing exists; a row written between the two
     // queries is the only way to miss one, and an empty ticker still names the
     // ids to open.

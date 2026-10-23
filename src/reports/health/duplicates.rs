@@ -7,6 +7,7 @@ use crate::entities::income::Income;
 use crate::entities::inheritance::{self, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
+use crate::entities::listing;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
@@ -367,7 +368,7 @@ async fn find_duplicates<R: DuplicateCheck>(
     if rows.is_empty() {
         return Ok(Vec::new());
     }
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+    let tickers = listing::db_tickers(&mut *conn).await?;
 
     // Grouped by scanning: the rows are already narrowed to near-collisions,
     // so the quadratic worst case is a handful of comparisons.

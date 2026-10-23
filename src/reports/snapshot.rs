@@ -1214,6 +1214,11 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::closing_price::ClearOutcome;
+    use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::listing_rename;
+    use crate::entities::listing_rename::RenameBody;
+    use crate::entities::rba_fx_rate;
     use crate::entities::{corporate_action, listing};
     use crate::test_support::{self, ApiClient, ApiResponse, test_pool, ymd};
     use axum::http::StatusCode;
@@ -2488,13 +2493,10 @@ mod tests {
         let before = db_series(&pool, None).await.unwrap()[0].market_value;
         assert_eq!(before, "6248.00".parse().unwrap());
 
-        let cleared = crate::entities::closing_price::db_clear_unpriced_before(&pool, ListingId(1))
+        let cleared = closing_price::db_clear_unpriced_before(&pool, ListingId(1))
             .await
             .unwrap();
-        assert!(matches!(
-            cleared,
-            crate::entities::closing_price::ClearOutcome::Cleared { deleted: 1, .. }
-        ));
+        assert!(matches!(cleared, ClearOutcome::Cleared { deleted: 1, .. }));
         assert_eq!(
             stale_flags(&pool, ymd(2026, 6, 3)).await,
             vec![true; 3],
@@ -2552,7 +2554,7 @@ mod tests {
     }
 
     async fn import_rate(pool: &SqlitePool, currency: &str, month: &str, rate: &str) {
-        crate::entities::rba_fx_rate::db_import_rate(pool, currency, month, rate.parse().unwrap())
+        rba_fx_rate::db_import_rate(pool, currency, month, rate.parse().unwrap())
             .await
             .unwrap();
     }
@@ -3367,8 +3369,7 @@ mod tests {
         // (An unknown currency passes the body decoder and fails the
         // `currencies` foreign key in the database.)
         let client = ApiClient::full(&pool);
-        let mut body =
-            crate::test_support::writable_body(&client.get("/listings/1").await.json(), &[]);
+        let mut body = test_support::writable_body(&client.get("/listings/1").await.json(), &[]);
         body["currency"] = serde_json::json!("ZZZ");
         body["ticker"] = serde_json::json!("NEW");
         let resp = client.put("/listings/2", &body).await;
@@ -3407,10 +3408,10 @@ mod tests {
         insert_buy(&pool, 1, ListingId(1), ymd(2024, 1, 16), "100", "10", "USD").await;
         import_rate(&pool, "USD", "2024-01", "0.65").await;
         import_rate(&pool, "USD", "2026-06", "0.65").await;
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             &pool,
             ListingId(1),
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date: ymd(2026, 6, 3),
                 ticker: "LAR".to_owned(),
                 exchange_mic: None,
@@ -3539,13 +3540,12 @@ mod tests {
 
         // What the provider actually serves once the split has happened: the
         // whole series restated into the post-split basis.
-        let stub = crate::entities::closing_price::test_support::QuoteStub::default()
-            .with_symbol_closes(
-                "NVD.AX",
-                "AUD",
-                &[(ymd(2026, 6, 5), "12.0888"), (ymd(2026, 6, 11), "12.10")],
-            );
-        let client = ApiClient::full_with(&pool, std::sync::Arc::new(stub));
+        let stub = QuoteStub::default().with_symbol_closes(
+            "NVD.AX",
+            "AUD",
+            &[(ymd(2026, 6, 5), "12.0888"), (ymd(2026, 6, 11), "12.10")],
+        );
+        let client = ApiClient::full_with(&pool, Arc::new(stub));
         for date in ["2026-06-05", "2026-06-11"] {
             client
                 .post(

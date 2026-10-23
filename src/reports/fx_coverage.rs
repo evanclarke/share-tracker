@@ -36,6 +36,8 @@
 //! figure, so they are reported rather than blocked.
 
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
+use crate::infra::decimal;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxRates, RateMonth};
 use crate::infra::http::ApiError;
@@ -184,8 +186,7 @@ async fn load_convertibles(
             let fallback: Option<String> = row.try_get("fallback")?;
             let spot: Option<String> = row.try_get("spot")?;
             let parse = |raw: Option<String>| -> Result<Option<Decimal>, sqlx::Error> {
-                raw.map(|r| crate::infra::decimal::parse_dec("fx_rate", &r))
-                    .transpose()
+                raw.map(|r| decimal::parse_dec("fx_rate", &r)).transpose()
             };
             let (spot_rate, fallback_rate) = (parse(spot)?, parse(fallback)?);
             out.push(Convertible {
@@ -209,7 +210,7 @@ async fn load_convertibles(
 /// snapshot, so a rate imported part-way through cannot make one query think a
 /// month is covered while another thinks it is not.
 pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let fx = FxRates::load(&mut *tx).await?;
     let mut alerts = Vec::new();
 
@@ -379,6 +380,11 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<FxCoverageAle
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::rights_sale;
+    use crate::entities::rights_sale::AllocationInput;
+    use crate::entities::rights_sale::SellRightsBody;
     use crate::entities::{corporate_action, rba_fx_rate};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
@@ -668,11 +674,11 @@ mod tests {
             .await;
         corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: ymd(2024, 7, 1),
-                kind: crate::entities::corporate_action::ActionKind::RightsIssue {
+                kind: ActionKind::RightsIssue {
                     rights_units: Decimal::ONE,
                     rights_held_units: Decimal::ONE,
                     exercise_price: dec("1.80"),
@@ -683,17 +689,17 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::rights_sale::db_sell_rights(
+        rights_sale::db_sell_rights(
             &pool,
             10,
-            &crate::entities::rights_sale::SellRightsBody {
+            &SellRightsBody {
                 date: ymd(2024, 7, 20),
                 units: dec("50"),
                 proceeds_per_right: Some(dec("0.20")),
                 rights_cost: None,
                 fx_rate: Some(dec("0.99")),
                 holding_account_id: HoldingAccountId(1),
-                allocations: vec![crate::entities::rights_sale::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(1),
                     units: dec("50"),
                 }],

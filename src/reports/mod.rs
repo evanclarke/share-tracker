@@ -6,6 +6,7 @@
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use sqlx::SqlitePool;
+use utoipa_axum::router::OpenApiRouter;
 
 /// Taxpayer assumption stated on every tax-report row: the rates are hard-wired
 /// for an Australian-resident *individual* — the 50% CGT discount and the 50%
@@ -79,7 +80,7 @@ pub(crate) async fn account_label(
 }
 
 /// Merge every report's routes into a single router.
-pub fn router() -> utoipa_axum::router::OpenApiRouter<SqlitePool> {
+pub fn router() -> OpenApiRouter<SqlitePool> {
     portfolio::router()
         .merge(activity::router())
         .merge(open_parcels::router())
@@ -109,6 +110,7 @@ pub fn router() -> utoipa_axum::router::OpenApiRouter<SqlitePool> {
 
 #[cfg(test)]
 mod tests {
+    use crate::web;
 
     /// Every route `reports::router` serves as a `(path, verb)` pair, sorted —
     /// read off the operations utoipa generated from the report handlers'
@@ -242,7 +244,7 @@ mod tests {
     /// cannot see.
     #[test]
     fn report_routes_have_a_ui_caller() {
-        let ui = crate::web::served_js_bundle();
+        let ui = web::served_js_bundle();
         for path in report_route_paths() {
             if !path.starts_with("/reports/") {
                 continue;

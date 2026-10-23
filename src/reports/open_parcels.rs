@@ -1,4 +1,6 @@
 use crate::domain::open_parcels;
+use crate::entities::listing;
+use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
@@ -83,7 +85,7 @@ pub async fn db_open_parcels(
     // One read transaction: every input below comes from the same snapshot,
     // so an interleaved write can't yield e.g. an allocation whose parcel is
     // missing from the same read.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let parcels = db_open_parcels_on(&mut tx, as_of).await?;
     tx.commit().await?;
     Ok(parcels)
@@ -112,7 +114,7 @@ pub async fn db_open_parcels_on(
     // Ticker per listing, as a separate lookup rather than a join option on
     // the shared loader (only this report wants it). Every trade's listing_id
     // is a foreign key, so the map always has the row.
-    let tickers = crate::entities::listing::db_tickers(&mut *conn).await?;
+    let tickers = listing::db_tickers(&mut *conn).await?;
 
     let mut parcels = Vec::with_capacity(open.len());
     for p in &open {
@@ -185,8 +187,16 @@ async fn open_parcels_handler(
 mod tests {
     use super::*;
     use crate::entities::corporate_action;
+    use crate::entities::demerger;
+    use crate::entities::listing_rename;
+    use crate::entities::listing_rename::RenameBody;
+    use crate::entities::rba_fx_rate;
+    use crate::entities::scrip_exchange;
+    use crate::infra::date;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
+    use std::time::Duration;
+    use std::time::Instant;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -345,10 +355,10 @@ mod tests {
         // The security is renamed: same listing id, new ticker — recorded via
         // the rename action (a bare PUT is refused once the listing has a
         // trade; see entities::listing::UpsertError::IdentityChangeRequiresRename).
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             &pool,
             ListingId(1),
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
                 ticker: "NEW".to_owned(),
                 exchange_mic: None,
@@ -557,14 +567,9 @@ mod tests {
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
         insert_listing_in(&pool, 1, "VTS", "USD").await;
         // A$1 = 0.50 USD for the buy month → AUD = USD / 0.50.
-        crate::entities::rba_fx_rate::db_import_rate(
-            &pool,
-            "USD",
-            "2024-01",
-            "0.50".parse().unwrap(),
-        )
-        .await
-        .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
         insert_buy_ccy(
             &pool,
             1,
@@ -602,14 +607,9 @@ mod tests {
         let pool = test_pool().await;
         let buy_date = NaiveDate::from_ymd_opt(2024, 1, 10).unwrap();
         insert_listing_in(&pool, 1, "VTS", "USD").await;
-        crate::entities::rba_fx_rate::db_import_rate(
-            &pool,
-            "USD",
-            "2024-01",
-            "0.50".parse().unwrap(),
-        )
-        .await
-        .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
         // A$30 brokerage + A$3 GST = A$33, entered as USD 15 + USD 1.50.
         test_support::buy(1, 1)
             .date(buy_date)
@@ -638,14 +638,9 @@ mod tests {
         // A monthly rate exists (0.50), but the parcel carries a deliberate
         // transaction-date spot rate (0.40) that must win (QC 18020):
         // USD 1000 / 0.40 = AUD 2500, not / 0.50 = 2000.
-        crate::entities::rba_fx_rate::db_import_rate(
-            &pool,
-            "USD",
-            "2024-01",
-            "0.50".parse().unwrap(),
-        )
-        .await
-        .unwrap();
+        rba_fx_rate::db_import_rate(&pool, "USD", "2024-01", "0.50".parse().unwrap())
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(buy_date)
             .qty(Decimal::from(100))
@@ -1162,7 +1157,7 @@ mod tests {
             Decimal::from(10),
         )
         .await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         let yesterday = today.pred_opt().expect("today has a yesterday");
         test_support::sell(2, 1)
             .date(today)
@@ -1220,9 +1215,7 @@ mod tests {
             Decimal::from(10),
         )
         .await;
-        let sale_date = crate::infra::date::today()
-            .pred_opt()
-            .expect("today has a yesterday");
+        let sale_date = date::today().pred_opt().expect("today has a yesterday");
         test_support::sell(2, 1)
             .date(sale_date)
             .qty(Decimal::from(40))
@@ -1324,14 +1317,9 @@ mod tests {
         insert_listing_in(&pool, 2, "NEW", "USD").await;
         // A$1 = 0.50 USD in the buy month, 0.80 in the exchange month.
         for (month, rate) in [("2024-01", "0.50"), ("2024-07", "0.80")] {
-            crate::entities::rba_fx_rate::db_import_rate(
-                &pool,
-                "USD",
-                month,
-                rate.parse().unwrap(),
-            )
-            .await
-            .unwrap();
+            rba_fx_rate::db_import_rate(&pool, "USD", month, rate.parse().unwrap())
+                .await
+                .unwrap();
         }
         // US$10 × 100 + US$9.95 + US$0.995 = US$1,010.945 = A$2,021.89.
         insert_buy_ccy(
@@ -1362,9 +1350,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
         let parcels = db_open_parcels(&pool, None).await.unwrap();
         // The original parcel is fully consumed; only the replacement is open.
@@ -1421,9 +1407,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
 
         let mut parcels = db_open_parcels(&pool, None).await.unwrap();
         // The original parcel is fully consumed; both replacement legs are
@@ -1558,9 +1542,9 @@ mod tests {
                 // A deadline as well as the flag: if the writer panics the
                 // flag is never set, and this must end so the join below can
                 // surface that panic rather than hang the suite.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let deadline = Instant::now() + Duration::from_secs(30);
                 let mut reads = 0u32;
-                while !done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
                     let parcels = db_open_parcels(&pool, None)
                         .await
                         .expect("the report reads");

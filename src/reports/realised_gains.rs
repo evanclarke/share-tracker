@@ -1,8 +1,11 @@
 use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::indexation;
+use crate::entities::corporate_action;
+use crate::entities::corporate_action::UnitsAt;
 use crate::entities::corporate_action::{RocEvent, SplitEvent};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::decimal::{Money, OptMoney, apportion, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
@@ -11,6 +14,7 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::RightsSaleId;
 use crate::infra::id::TradeId;
+use crate::reports;
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -389,12 +393,10 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     .fetch_all(&mut *conn)
     .await?;
 
-    let cba_reduction =
-        crate::domain::cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
-    let roc_events =
-        crate::entities::corporate_action::db_return_of_capital_events(&mut *conn).await?;
+    let cba_reduction = cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
+    let roc_events = corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)
-    let split_events = crate::entities::corporate_action::db_share_split_events(&mut *conn).await?;
+    let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
     let cpi = indexation::CpiQuarters::load(&mut *conn).await?;
 
@@ -413,7 +415,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
 }
 
 pub async fn db_realised_gains(pool: &SqlitePool) -> Result<Vec<RealisedGainLoss>, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let data = load_report_data(&mut tx).await?;
     tx.commit().await?;
     compute_realised_gains(&data)
@@ -539,8 +541,8 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             .split_events
             .get(&buy.listing_id)
             .map_or(&[][..], |v| v);
-        let qty_alloc_acquired = crate::entities::corporate_action::as_acquired_quantity(
-            crate::entities::corporate_action::UnitsAt::new(qty_alloc, sale.date),
+        let qty_alloc_acquired = corporate_action::as_acquired_quantity(
+            UnitsAt::new(qty_alloc, sale.date),
             splits,
             buy.date,
         );
@@ -666,7 +668,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 non_discountable_gain: non_discount_gain,
                 capital_loss: loss,
                 parcels,
-                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
+                taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
             })
         })
         .collect();
@@ -772,7 +774,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             non_discountable_gain: non_discount_gain,
             capital_loss: loss,
             parcels,
-            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
+            taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
         });
     }
 
@@ -802,7 +804,21 @@ async fn realised_gains_handler(
 mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
+    use crate::entities::demerger;
+    use crate::entities::demerger::Demerge;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::listing_rename;
+    use crate::entities::listing_rename::RenameBody;
+    use crate::entities::scrip_exchange;
+    use crate::entities::scrip_exchange::Exchange;
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::transfer;
+    use crate::entities::transfer::TransferBody;
     use crate::entities::{corporate_action, listing, rba_fx_rate, trade};
+    use crate::infra::decimal;
+    use crate::reports;
+    use crate::reports::open_parcels;
     use crate::test_support::{self, ApiClient, allocate, test_pool};
     use axum::http::StatusCode;
 
@@ -971,7 +987,7 @@ mod tests {
             sells: [(TradeId(2), mem_sell(2, d(2025, 6, 2), 100, 15, "USD"))].into(),
             buys: [(TradeId(1), mem_buy(1, d(2024, 1, 15), 100, 10, "USD"))].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
-            fx: crate::infra::fx::FxRates::from_rates([
+            fx: FxRates::from_rates([
                 ("USD", "2024-01", "0.50".parse().unwrap()),
                 ("USD", "2025-06", "0.60".parse().unwrap()),
             ]),
@@ -1022,7 +1038,7 @@ mod tests {
             sells: [(TradeId(2), sell)].into(),
             buys: [(TradeId(1), buy)].into(),
             allocations: vec![mem_alloc(2, 1, 100)],
-            fx: crate::infra::fx::FxRates::from_rates([
+            fx: FxRates::from_rates([
                 ("USD", "2024-01", "0.50".parse().unwrap()),
                 ("USD", "2025-06", "0.60".parse().unwrap()),
             ]),
@@ -1185,10 +1201,7 @@ mod tests {
         assert_eq!(r.cost_base, dec("39139.975"));
         assert_eq!(r.capital_gain_loss, dec("30645.075"));
         // The cent the two screens disagreed on.
-        assert_eq!(
-            crate::infra::decimal::to_cents(r.capital_gain_loss),
-            dec("30645.08")
-        );
+        assert_eq!(decimal::to_cents(r.capital_gain_loss), dec("30645.08"));
 
         // The per-parcel rows still add up to each of the sale's totals.
         assert_eq!(parcel_sum(r, |p| p.proceeds), r.proceeds);
@@ -1226,7 +1239,7 @@ mod tests {
             sells: [(TradeId(5), sell)].into(),
             buys,
             allocations,
-            fx: crate::infra::fx::FxRates::from_rates([
+            fx: FxRates::from_rates([
                 ("USD", "2015-03", dec("0.50")),
                 ("USD", "2026-05", dec("0.50")),
             ]),
@@ -1525,10 +1538,10 @@ mod tests {
         // ticker — recorded via the rename action (a bare PUT is refused
         // once the listing has a trade; see
         // entities::listing::UpsertError::IdentityChangeRequiresRename).
-        crate::entities::listing_rename::db_rename(
+        listing_rename::db_rename(
             &pool,
             ListingId(1),
-            &crate::entities::listing_rename::RenameBody {
+            &RenameBody {
                 effective_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
                 ticker: "NEW".to_owned(),
                 exchange_mic: None,
@@ -1971,9 +1984,9 @@ mod tests {
     async fn db_a_transfer_does_not_change_an_earlier_sells_realised_gain() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VDHG").await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Broker".to_owned(),
             },
@@ -2014,15 +2027,15 @@ mod tests {
 
         // Transferring the 600 held units to another account, dated before
         // the year end, changes nothing about the March disposal.
-        crate::entities::transfer::db_transfer(
+        transfer::db_transfer(
             &pool,
             1,
-            &crate::entities::transfer::TransferBody {
+            &TransferBody {
                 listing_id: ListingId(1),
                 date: d(2025, 5, 1),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(1),
                     quantity_allocated: dec("600"),
                 }],
@@ -2165,7 +2178,7 @@ mod tests {
             .get_json("/portfolio/realised_gains")
             .await;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
+        assert_eq!(result[0].taxpayer_basis, reports::TAXPAYER_BASIS);
     }
 
     // Return of capital (CGT event G1)
@@ -2807,7 +2820,7 @@ mod tests {
         from: i64,
         to: i64,
         date: NaiveDate,
-    ) -> crate::entities::scrip_exchange::Exchange {
+    ) -> Exchange {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -2826,9 +2839,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(pool, action_id)
-            .await
-            .unwrap()
+        scrip_exchange::db_exchange(pool, action_id).await.unwrap()
     }
 
     /// The scrip-for-scrip rollover disregards the gain on the exchanged
@@ -2905,9 +2916,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
         let result = db_realised_gains(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
@@ -3115,7 +3124,7 @@ mod tests {
         from: i64,
         to: i64,
         date: NaiveDate,
-    ) -> crate::entities::demerger::Demerge {
+    ) -> Demerge {
         corporate_action::db_upsert(
             pool,
             &corporate_action::CorporateAction {
@@ -3136,9 +3145,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(pool, action_id)
-            .await
-            .unwrap()
+        demerger::db_demerge(pool, action_id).await.unwrap()
     }
 
     /// The demerger rollover disregards any gain or loss under the demerger:
@@ -3359,7 +3366,7 @@ mod tests {
                 mem_rights_alloc(7, 2, 1),
                 mem_rights_alloc(7, 3, 1),
             ],
-            fx: crate::infra::fx::FxRates::from_rates([("USD", "2024-08", dec("0.60"))]),
+            fx: FxRates::from_rates([("USD", "2024-08", dec("0.60"))]),
             ..ReportData::default()
         };
 
@@ -3758,9 +3765,7 @@ mod tests {
         assert_eq!(realised[0].capital_gain_loss, Decimal::from(200));
 
         // The 60 units covered take the stated 50c each — 600 − 30.
-        let open = crate::reports::open_parcels::db_open_parcels(&pool, None)
-            .await
-            .unwrap();
+        let open = open_parcels::db_open_parcels(&pool, None).await.unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].amit_cost_base_reduction, Decimal::from(30));
         assert_eq!(open[0].remaining_cost_base, Decimal::from(570));
@@ -3896,9 +3901,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
 
         let rows: Vec<RealisedGainLoss> = ApiClient::over(router().with_state(pool.clone()))
             .get_json("/portfolio/realised_gains")
@@ -3980,6 +3983,7 @@ mod tests {
     mod properties {
         use super::*;
         use crate::entities::sell::{self, AllocationInput, SellBody};
+        use crate::reports::open_parcels;
         use crate::test_support::ymd;
         use chrono::{Datelike, Weekday};
         use proptest::prelude::*;
@@ -4109,7 +4113,7 @@ mod tests {
                     }
 
                     let realised = db_realised_gains(&pool).await.unwrap();
-                    let open = crate::reports::open_parcels::db_open_parcels(&pool, Some(ymd(2026, 1, 1))).await.unwrap();
+                    let open = open_parcels::db_open_parcels(&pool, Some(ymd(2026, 1, 1))).await.unwrap();
                     let tolerance = Decimal::new(1, 18);
                     for row in &realised {
                         let id = row.disposal.sell().unwrap();

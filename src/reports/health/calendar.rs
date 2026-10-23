@@ -10,6 +10,7 @@ use chrono::{DateTime, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::iter;
 
 /// How far **before** an ex-date an income row may be dated and still be that
 /// distribution's, for [`MissingDividendEntry`]'s matching.
@@ -326,7 +327,7 @@ impl CalendarIncomeRow {
             .into_iter()
             .flatten()
             .map(|anchor| (anchor, -DIVIDEND_MATCH_BEFORE_DAYS))
-            .chain(std::iter::once((self.date_paid, 0)))
+            .chain(iter::once((self.date_paid, 0)))
             .filter_map(|(anchor, earliest)| {
                 let days = (anchor - ex_date).num_days();
                 (earliest..=DIVIDEND_MATCH_AFTER_DAYS)

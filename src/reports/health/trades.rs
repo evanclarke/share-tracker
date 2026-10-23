@@ -16,6 +16,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::iter;
 
 /// The ESS 30-day rule's window: a disposal **within 30 days after** the
 /// deferred taxing point moves the taxing point to the disposal date
@@ -400,7 +401,7 @@ pub(super) async fn db_ess_30_day_rule(
     // Their allocations, with the disposing Sell. A transfer-out Sell is not a
     // disposal at all and is excluded here (see `EssThirtyDaySale`); a
     // scrip-exchange/demerger closing Sell is kept and labelled.
-    let placeholders = std::iter::repeat_n("?", ess_parcels.len())
+    let placeholders = iter::repeat_n("?", ess_parcels.len())
         .collect::<Vec<_>>()
         .join(", ");
     let mut query = sqlx::query_as::<_, EssThirtyDaySaleRow>(sqlx::AssertSqlSafe(format!(

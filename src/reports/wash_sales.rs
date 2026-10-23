@@ -18,6 +18,7 @@
 //! a derived gain or year-end, and the fee units are never re-acquired — no
 //! TR 2008/1 fact pattern, symmetric with the Buy-side provenance exclusions.
 
+use crate::infra::db;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
@@ -97,7 +98,7 @@ pub async fn db_wash_sales(
     // the Buy candidates all come from the same snapshot — a Sell or transfer
     // committed between the reads must not pair a loss with Buys (or an
     // exclusion list) from a different state.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     // A rights sale is no candidate: the wash-sale pairing is a Sell's loss
     // against Buys of the same shares, and a lapse disposes of no shares.
     let mut losses: Vec<(TradeId, realised_gains::RealisedGainLoss)> =
@@ -192,6 +193,9 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::holding_account;
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::transfer;
+    use crate::entities::transfer::TransferBody;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;
@@ -449,15 +453,15 @@ mod tests {
             .price(Decimal::from(12))
             .insert(&pool)
             .await;
-        crate::entities::transfer::db_transfer(
+        transfer::db_transfer(
             &pool,
             1,
-            &crate::entities::transfer::TransferBody {
+            &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 16),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(3),
                     quantity_allocated: Decimal::from(50),
                 }],
@@ -504,19 +508,19 @@ mod tests {
             .price(Decimal::from(15))
             .insert(&pool)
             .await;
-        let group = crate::entities::transfer::db_transfer(
+        let group = transfer::db_transfer(
             &pool,
             1,
-            &crate::entities::transfer::TransferBody {
+            &TransferBody {
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 12),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(3),
                     quantity_allocated: Decimal::from(50),
                 }],
-                fee_allocations: vec![crate::entities::sell::AllocationInput {
+                fee_allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(3),
                     quantity_allocated: Decimal::from(10),
                 }],

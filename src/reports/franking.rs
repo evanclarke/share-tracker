@@ -18,6 +18,7 @@
 
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::corporate_action::{self, SplitEvent};
+use crate::entities::income;
 use crate::entities::trade::TradeType;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{mul_div, parse_dec};
@@ -337,7 +338,7 @@ pub async fn db_franked_dividends(
     // year's do, and must be holding-period tested and count toward that
     // year's small-shareholder total — the same rows the tax summary assesses
     // (`income::db_assessable_cash_income`, SCENARIOS F-23).
-    for income in &crate::entities::income::db_assessable_cash_income(&mut *conn).await? {
+    for income in &income::db_assessable_cash_income(&mut *conn).await? {
         // Assessed per `Income::assessment_date` — present entitlement for a
         // trust row, payment otherwise — the same attribution the tax summary
         // applies to every component.
@@ -388,7 +389,16 @@ pub async fn db_franked_dividends(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::demerger;
+    use crate::entities::holding_account;
+    use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::sell::AllocationInput;
+    use crate::entities::transfer;
+    use crate::entities::transfer::TransferBody;
     use crate::entities::{listing, trade};
+    use crate::infra::db;
     use crate::test_support::{self, test_pool};
     use sqlx::SqlitePool;
 
@@ -454,7 +464,7 @@ mod tests {
             .insert(&pool)
             .await;
 
-        let mut tx = crate::infra::db::read_tx(&pool).await.unwrap();
+        let mut tx = db::read_tx(&pool).await.unwrap();
         let fx = FxRates::load(&mut *tx).await.unwrap();
         let (dividends, attached_by_year) = db_franked_dividends(&mut tx, &fx).await.unwrap();
         tx.commit().await.unwrap();
@@ -485,7 +495,7 @@ mod tests {
             .build();
         test_support::insert_amma_bypassing_checks(&pool, &a).await;
 
-        let mut tx = crate::infra::db::read_tx(&pool).await.unwrap();
+        let mut tx = db::read_tx(&pool).await.unwrap();
         let fx = FxRates::load(&mut *tx).await.unwrap();
         let (_, attached_by_year) = db_franked_dividends(&mut tx, &fx).await.unwrap();
         tx.commit().await.unwrap();
@@ -617,13 +627,13 @@ mod tests {
             100,
         )
         .await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 1,
                 listing_id: ListingId(1),
                 date: d("2025-01-10"),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -657,13 +667,13 @@ mod tests {
             100,
         )
         .await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 2,
                 listing_id: ListingId(2),
                 date: d("2025-03-10"),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -945,13 +955,13 @@ mod tests {
             1000,
         )
         .await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 10,
                 listing_id: ListingId(1),
                 date: d("2025-04-01"),
-                kind: crate::entities::corporate_action::ActionKind::Demerger {
+                kind: ActionKind::Demerger {
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
@@ -965,9 +975,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
 
         // The head shares were never disposed of: nothing is disqualified.
         let t = walks(&pool).await.test(ListingId(1), d("2025-03-14"));
@@ -1055,9 +1063,9 @@ mod tests {
             1000,
         )
         .await;
-        crate::entities::holding_account::db_upsert(
+        holding_account::db_upsert(
             &pool,
-            &crate::entities::holding_account::HoldingAccount {
+            &HoldingAccount {
                 id: HoldingAccountId(2),
                 name: "Second".into(),
             },
@@ -1066,15 +1074,15 @@ mod tests {
         .unwrap();
         // Ex-dividend 14 Mar; the whole holding moves accounts on 1 Apr, 30
         // days into the window.
-        crate::entities::transfer::db_transfer(
+        transfer::db_transfer(
             &pool,
             1,
-            &crate::entities::transfer::TransferBody {
+            &TransferBody {
                 listing_id: ListingId(1),
                 date: d("2025-04-01"),
                 from_account_id: HoldingAccountId(1),
                 to_account_id: HoldingAccountId(2),
-                allocations: vec![crate::entities::sell::AllocationInput {
+                allocations: vec![AllocationInput {
                     purchase_trade_id: TradeId(1),
                     quantity_allocated: Decimal::from(1000),
                 }],

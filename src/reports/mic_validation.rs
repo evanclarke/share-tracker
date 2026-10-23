@@ -72,6 +72,7 @@ mod tests {
     use super::*;
     use crate::entities::exchange;
     use crate::entities::mic_registry::{self, MicStatus};
+    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
     use axum::http::StatusCode;
 
@@ -146,7 +147,7 @@ mod tests {
     async fn crypto_listings_are_not_validated() {
         let pool = test_pool().await;
         let before = db_validate(&pool).await.unwrap().len();
-        crate::test_support::listing(1)
+        test_support::listing(1)
             .crypto()
             .ticker("BTC")
             .name("Bitcoin")

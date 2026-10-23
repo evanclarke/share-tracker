@@ -1,21 +1,25 @@
 use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::tax_year::tax_year_for;
+use crate::entities::income;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::tax_year_settings;
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::decimal::{mul_div, parse_dec, row_opt_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
 use crate::infra::respond::{Csv, Payload};
+use crate::reports;
 use crate::reports::export::{self, Cents};
 use crate::reports::franking;
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -466,7 +470,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         deductions_dividend_and_interest: Decimal::ZERO,
         deductions_total: Decimal::ZERO,
         net_assessable_investment_income: Decimal::ZERO,
-        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
+        taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
     }
 }
 
@@ -538,7 +542,7 @@ pub(crate) fn apportion_capital_gains_foreign_tax(
 /// report's totals do.
 pub(crate) fn aud_field(
     fx: &FxRates,
-    row: &sqlx::sqlite::SqliteRow,
+    row: &SqliteRow,
     field: &str,
     currency: &CurrencyCode,
     date: NaiveDate,
@@ -554,7 +558,7 @@ pub(crate) fn aud_field(
 /// and a record with neither still fails loudly.
 pub(crate) fn aud_field_with(
     fx: &FxRates,
-    row: &sqlx::sqlite::SqliteRow,
+    row: &SqliteRow,
     field: &str,
     currency: &CurrencyCode,
     date: NaiveDate,
@@ -568,7 +572,7 @@ pub(crate) fn aud_field_with(
 /// fallback, or none. The same rate [`entities::ess_vest`] binds onto the vest
 /// Buy, so one statement's income and CGT sides can never convert at different
 /// rates (SCENARIOS J-12).
-pub(crate) fn ess_fx_override(row: &sqlx::sqlite::SqliteRow) -> Result<FxOverride, sqlx::Error> {
+pub(crate) fn ess_fx_override(row: &SqliteRow) -> Result<FxOverride, sqlx::Error> {
     Ok(match row_opt_dec(row, "fx_rate")? {
         Some(rate) => FxOverride::Fallback(rate),
         None => FxOverride::None,
@@ -592,7 +596,7 @@ pub(crate) fn aud_value(
 /// present, otherwise the label converted like any other field.
 pub(crate) fn aud_label(
     fx: &FxRates,
-    row: &sqlx::sqlite::SqliteRow,
+    row: &SqliteRow,
     field: &str,
     currency: &CurrencyCode,
     date: NaiveDate,
@@ -607,7 +611,7 @@ pub(crate) fn aud_label(
 pub async fn db_tax_summary(pool: &SqlitePool) -> Result<Vec<TaxYearSummary>, sqlx::Error> {
     // One read transaction for the income-side inputs (and the FX rates that
     // convert them), so they come from a single consistent snapshot.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let result = db_tax_summary_on(&mut tx).await?;
     tx.commit().await?;
     Ok(result)
@@ -642,7 +646,7 @@ pub(crate) async fn db_tax_summary_on(
     // An AMIT year's cash rows are excluded — its AMMA attribution is the
     // only assessable record (`income::db_assessable_cash_income`, SCENARIOS
     // F-23).
-    let income_rows = crate::entities::income::db_assessable_cash_income(&mut *tx).await?;
+    let income_rows = income::db_assessable_cash_income(&mut *tx).await?;
 
     let interest_rows = sqlx::query(
         "SELECT date_paid, amount, tfn_withholding_tax, foreign_source, foreign_tax_paid, \
@@ -832,7 +836,7 @@ fn accumulate_income(
 /// source (`entities::interest_income`).
 fn accumulate_interest(
     map: &mut Summaries,
-    interest_rows: &[sqlx::sqlite::SqliteRow],
+    interest_rows: &[SqliteRow],
     fx: &FxRates,
 ) -> Result<(), sqlx::Error> {
     for row in interest_rows {
@@ -860,7 +864,7 @@ fn accumulate_interest(
 /// to the year its `tax_year_end_date` closes.
 fn accumulate_amma(
     map: &mut Summaries,
-    amma_rows: &[sqlx::sqlite::SqliteRow],
+    amma_rows: &[SqliteRow],
     fx: &FxRates,
 ) -> Result<(), sqlx::Error> {
     for row in amma_rows {
@@ -936,7 +940,7 @@ fn accumulate_amma(
 /// the second's only input and never escapes.
 fn accumulate_ess(
     map: &mut Summaries,
-    ess_rows: &[sqlx::sqlite::SqliteRow],
+    ess_rows: &[SqliteRow],
     ess_ineligible_years: &HashSet<i32>,
     fx: &FxRates,
 ) -> Result<(), sqlx::Error> {
@@ -999,7 +1003,7 @@ fn accumulate_ess(
 /// deduction is visible.
 fn accumulate_expenses(
     map: &mut Summaries,
-    expense_rows: &[sqlx::sqlite::SqliteRow],
+    expense_rows: &[SqliteRow],
     routing: &DeductionRouting,
     fx: &FxRates,
 ) -> Result<(), sqlx::Error> {
@@ -1288,6 +1292,8 @@ async fn tax_summary_export_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reports;
+    use crate::reports::tax_report;
     use crate::test_support::ApiClient;
     use crate::{
         entities::{
@@ -1297,6 +1303,7 @@ mod tests {
         test_support::{self, test_pool, ymd},
     };
     use axum::http::StatusCode;
+    use axum::http::header;
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {
@@ -1427,7 +1434,7 @@ mod tests {
 
         let result = db_tax_summary(&pool).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].taxpayer_basis, crate::reports::TAXPAYER_BASIS);
+        assert_eq!(result[0].taxpayer_basis, reports::TAXPAYER_BASIS);
         // The assumption ships in the CSV export too (CSV_HEADER names it).
         assert!(CSV_HEADER.contains(&"taxpayer_basis"));
     }
@@ -1757,9 +1764,7 @@ mod tests {
 
         // The annual tax report's tax-summary section is the same row
         // serialised through the same label map, so its 13C line agrees.
-        let report = crate::reports::tax_report::db_tax_report(&pool, 2024)
-            .await
-            .unwrap();
+        let report = tax_report::db_tax_report(&pool, 2024).await.unwrap();
         let line = report
             .tax_summary
             .iter()
@@ -2988,13 +2993,11 @@ mod tests {
         let resp = client(&pool).get("/portfolio/tax_summary/export").await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(
-            resp.headers.get(axum::http::header::CONTENT_TYPE).unwrap(),
+            resp.headers.get(header::CONTENT_TYPE).unwrap(),
             "text/csv; charset=utf-8"
         );
         assert_eq!(
-            resp.headers
-                .get(axum::http::header::CONTENT_DISPOSITION)
-                .unwrap(),
+            resp.headers.get(header::CONTENT_DISPOSITION).unwrap(),
             "attachment; filename=\"tax-summary.csv\""
         );
         let csv = resp.text().to_owned();
@@ -3042,7 +3045,7 @@ mod tests {
         assert_eq!(at("deductions_total"), "0.00");
         // Not money, and untouched: the year and the taxpayer assumption.
         assert_eq!(at("tax_year"), "2024");
-        assert_eq!(at("taxpayer_basis"), crate::reports::TAXPAYER_BASIS);
+        assert_eq!(at("taxpayer_basis"), reports::TAXPAYER_BASIS);
         // Every money cell is at the cent — none escaped the projection.
         for (i, cell) in row.iter().enumerate() {
             if header[i] == "tax_year" || header[i] == "taxpayer_basis" {

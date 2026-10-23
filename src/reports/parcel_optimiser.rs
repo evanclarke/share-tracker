@@ -38,12 +38,15 @@ use crate::domain::contemplated_disposal;
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
+use crate::infra::date;
+use crate::infra::db;
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
+use crate::reports;
 use axum::{Extension, extract::State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -163,7 +166,7 @@ pub async fn db_candidate_parcels(
     holding_account_id: Option<HoldingAccountId>,
     sale_date: NaiveDate,
 ) -> Result<Candidates, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let candidates =
         db_candidate_parcels_on(&mut tx, listing_id, holding_account_id, sale_date).await?;
     tx.commit().await?;
@@ -620,7 +623,7 @@ async fn optimiser_handler(
     // The contemplated sale's own date, defaulting to today through the shared
     // resolver rather than a fourth inline `Local::now()` (the date-scoped twin
     // of `infra::date::as_of_or_open`).
-    let sale_date = crate::infra::date::as_of_or_today(req.sale_date);
+    let sale_date = date::as_of_or_today(req.sale_date);
 
     // Candidates as at the contemplated sale's own date, not today: a parcel
     // acquired after it can't be sold on it, and one sold since was still
@@ -704,16 +707,25 @@ async fn optimiser_handler(
         price_as_of,
         strategies,
         allocations,
-        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
+        taxpayer_basis: reports::TAXPAYER_BASIS.to_owned(),
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action;
+    use crate::entities::corporate_action::ActionKind;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::sell;
+    use crate::infra::date;
+    use crate::reports;
+    use crate::reports::net_capital_gain::WhatIfResponse;
     use crate::reports::realised_gains::DisposalId;
+    use crate::reports::realised_gains::RealisedGainLoss;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
+    use std::collections::BTreeSet;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)
@@ -1082,7 +1094,7 @@ mod tests {
             .await;
         allocate(&pool, 1, 4, 3, Decimal::from(40)).await;
 
-        let today = crate::infra::date::today();
+        let today = date::today();
         let parcels = db_candidate_parcels(&pool, ListingId(1), Some(HoldingAccountId(1)), today)
             .await
             .unwrap();
@@ -1283,7 +1295,7 @@ mod tests {
         allocate(&pool, 1, 5, 2, Decimal::from(100)).await;
 
         // Today it is gone…
-        let live = db_candidate_parcels(&pool, ListingId(1), None, crate::infra::date::today())
+        let live = db_candidate_parcels(&pool, ListingId(1), None, date::today())
             .await
             .unwrap();
         assert!(live.parcels().iter().all(|p| p.trade_id != 2));
@@ -1325,13 +1337,13 @@ mod tests {
             dec("5"),
         )
         .await;
-        crate::entities::corporate_action::db_upsert(
+        corporate_action::db_upsert(
             &pool,
-            &crate::entities::corporate_action::CorporateAction {
+            &CorporateAction {
                 id: 1,
                 listing_id: ListingId(1),
                 date: ymd(2025, 1, 2),
-                kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                kind: ActionKind::ShareSplit {
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -1344,7 +1356,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(before.parcels()[0].remaining_quantity, Decimal::from(100));
-        let after = db_candidate_parcels(&pool, ListingId(1), None, crate::infra::date::today())
+        let after = db_candidate_parcels(&pool, ListingId(1), None, date::today())
             .await
             .unwrap();
         assert_eq!(after.parcels()[0].remaining_quantity, Decimal::from(200));
@@ -1362,7 +1374,7 @@ mod tests {
     async fn api_future_dated_request_still_sees_every_open_parcel() {
         let pool = test_pool().await;
         as_at_fixture(&pool).await;
-        let today = crate::infra::date::today();
+        let today = date::today();
         let later = today + chrono::Duration::days(400);
         let run = async |date: NaiveDate| {
             let (status, body) = get_optimiser(
@@ -1381,13 +1393,13 @@ mod tests {
         let future = run(later).await;
         // All four parcels, both times — the whole 400 units held today.
         for r in [&now, &future] {
-            let ids: std::collections::BTreeSet<i64> = r
+            let ids: BTreeSet<i64> = r
                 .allocations
                 .iter()
                 .filter(|a| a.strategy == Strategy::Fifo)
                 .map(|a| a.allocation.purchase_trade_id.0)
                 .collect();
-            assert_eq!(ids, (1..=4).collect::<std::collections::BTreeSet<i64>>());
+            assert_eq!(ids, (1..=4).collect::<BTreeSet<i64>>());
         }
         let totals = |r: &OptimiserResponse| {
             r.strategies
@@ -1492,7 +1504,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let r: OptimiserResponse = serde_json::from_slice(&body).unwrap();
-        assert_eq!(r.taxpayer_basis, crate::reports::TAXPAYER_BASIS);
+        assert_eq!(r.taxpayer_basis, reports::TAXPAYER_BASIS);
     }
 
     #[tokio::test]
@@ -1576,7 +1588,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let resp: OptimiserResponse = serde_json::from_slice(&body).unwrap();
 
-        let sells = ApiClient::over(crate::entities::sell::router().with_state(pool.clone()));
+        let sells = ApiClient::over(sell::router().with_state(pool.clone()));
         for strategy in ALL_STRATEGIES {
             let allocations: Vec<_> = resp
                 .allocations
@@ -1808,8 +1820,7 @@ mod tests {
             .await;
         }
 
-        let realised: Vec<crate::reports::realised_gains::RealisedGainLoss> =
-            client.get_json("/portfolio/realised_gains").await;
+        let realised: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised_gains").await;
         let recorded = realised
             .iter()
             .find(|row| row.disposal == DisposalId::Sell(TradeId::from(SELL_ID)))
@@ -2045,13 +2056,13 @@ mod tests {
                 dec("10"),
             )
             .await;
-            crate::entities::corporate_action::db_upsert(
+            corporate_action::db_upsert(
                 pool,
-                &crate::entities::corporate_action::CorporateAction {
+                &CorporateAction {
                     id: 1,
                     listing_id: ListingId(1),
                     date: ymd(2025, 3, 3),
-                    kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
+                    kind: ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.15"),
                         currency: "AUD".into(),
                         record_date: None,
@@ -2086,13 +2097,13 @@ mod tests {
                 dec("10"),
             )
             .await;
-            crate::entities::corporate_action::db_upsert(
+            corporate_action::db_upsert(
                 pool,
-                &crate::entities::corporate_action::CorporateAction {
+                &CorporateAction {
                     id: 1,
                     listing_id: ListingId(1),
                     date: ymd(2025, 1, 2),
-                    kind: crate::entities::corporate_action::ActionKind::ShareSplit {
+                    kind: ActionKind::ShareSplit {
                         split_new_units: dec("3"),
                         split_old_units: Decimal::ONE,
                     },
@@ -2135,13 +2146,13 @@ mod tests {
                 dec("60"),
             )
             .await;
-            crate::entities::corporate_action::db_upsert(
+            corporate_action::db_upsert(
                 pool,
-                &crate::entities::corporate_action::CorporateAction {
+                &CorporateAction {
                     id: 1,
                     listing_id: ListingId(1),
                     date: ymd(2025, 3, 3),
-                    kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
+                    kind: ActionKind::ReturnOfCapital {
                         amount_per_unit: dec("0.25"),
                         currency: "AUD".into(),
                         record_date: None,
@@ -2277,7 +2288,7 @@ mod tests {
         amma_with_generated_adjustments(&client, &pool, 1, ymd(2026, 6, 30), dec("100"), "1.30")
             .await;
 
-        let what_if: crate::reports::net_capital_gain::WhatIfResponse = client
+        let what_if: WhatIfResponse = client
             .post_json(
                 "/portfolio/net_capital_gain/what_if",
                 &serde_json::json!({
@@ -2328,14 +2339,19 @@ mod tests {
 
     mod properties {
         use super::*;
+        use crate::entities::corporate_action;
+        use crate::entities::corporate_action::ActionKind;
+        use crate::entities::corporate_action::CorporateAction;
         use proptest::prelude::{any, prop, prop_assert, prop_assert_eq, prop_assume, proptest};
+        use proptest::strategy;
         use proptest::strategy::Strategy as _;
+        use std::collections::HashSet;
 
         /// Up to six open parcels: an acquisition date within three years
         /// of the 2026-06-15 sale, so either side of the 12-month discount
         /// clock, and a quantity and per-unit cost either side of the $10
         /// sale price.
-        fn parcels() -> impl proptest::strategy::Strategy<Value = Vec<CandidateParcel>> {
+        fn parcels() -> impl strategy::Strategy<Value = Vec<CandidateParcel>> {
             prop::collection::vec((0i64..1100, 1i64..=1_000, 1i64..=2_000), 1..=6).prop_map(
                 |rows| {
                     rows.into_iter()
@@ -2433,11 +2449,11 @@ mod tests {
                         open.push(Decimal::from(*qty));
                     }
                     if let Some(cents) = roc_cents {
-                        crate::entities::corporate_action::db_upsert(&pool, &crate::entities::corporate_action::CorporateAction {
+                        corporate_action::db_upsert(&pool, &CorporateAction {
                             id: 1,
                             listing_id: ListingId(1),
                             date: ymd(2024, 3, 13),
-                            kind: crate::entities::corporate_action::ActionKind::ReturnOfCapital {
+                            kind: ActionKind::ReturnOfCapital {
                                 amount_per_unit: Decimal::new(cents, 2),
                                 currency: "AUD".into(),
                                 record_date: None,
@@ -2560,7 +2576,7 @@ mod tests {
                 for strategy in ALL_STRATEGIES {
                     let picks = allocate_parcels(&parcels, units, price, ymd(2026, 6, 15), strategy);
                     prop_assert_eq!(picks.iter().map(|(_, u)| *u).sum::<Decimal>(), units.min(open));
-                    let mut seen = std::collections::HashSet::new();
+                    let mut seen = HashSet::new();
                     for (id, take) in &picks {
                         prop_assert!(seen.insert(*id), "{:?} drew parcel {:?} twice", strategy, id);
                         let p = parcels.iter().find(|p| p.trade_id == *id).unwrap();

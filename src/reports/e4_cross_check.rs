@@ -1,5 +1,6 @@
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::income::Income;
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use crate::infra::id::ListingId;
@@ -8,6 +9,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
+use std::collections::HashSet;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// A trust income row whose statement reported a tax-deferred amount with no
@@ -46,7 +48,7 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
     // Both inputs on one read transaction: a single consistent snapshot, so
     // an interleaved write can't pair an income row with a half-entered
     // action set.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let income_rows = sqlx::query(
         "SELECT i.*, l.ticker \
          FROM income i \
@@ -65,7 +67,7 @@ pub async fn db_e4_alerts(pool: &SqlitePool) -> Result<Vec<E4CrossCheckAlert>, s
     tx.commit().await?;
 
     // (listing, FY) pairs that have a return-of-capital action.
-    let mut covered = std::collections::HashSet::new();
+    let mut covered = HashSet::new();
     for row in &roc_rows {
         let listing_id: ListingId = row.try_get("listing_id")?;
         let date: NaiveDate = row.try_get("date")?;

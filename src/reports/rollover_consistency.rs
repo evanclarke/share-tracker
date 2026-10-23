@@ -62,6 +62,7 @@ use crate::domain::rollover::CostBaseInputs;
 use crate::domain::whole_holding;
 use crate::entities::corporate_action::{UnitsAt, as_acquired_quantity};
 use crate::infra::currency::CurrencyCode;
+use crate::infra::db;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
@@ -169,7 +170,7 @@ pub async fn db_rollover_alerts(pool: &SqlitePool) -> Result<Vec<RolloverAlert>,
     // One read transaction: a consistent snapshot, so a write landing mid-read
     // cannot pair an operation with a half-updated source parcel — which is
     // exactly what this report would then flag.
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let groups = db_groups(&mut tx).await?;
     let mut alerts = Vec::new();
     for group in &groups {
@@ -450,6 +451,7 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<RolloverAlert
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::demerger;
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
@@ -611,9 +613,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
         assert_eq!(db_rollover_alerts(&pool).await.unwrap(), vec![]);
 
         // Move the source parcel's brokerage and the split of $1,000 no longer
@@ -783,9 +783,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
         test_support::buy(500, 1)
             .date(ymd(2024, 6, 12))
             .insert(&pool)

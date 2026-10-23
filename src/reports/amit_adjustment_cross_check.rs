@@ -35,6 +35,7 @@ use crate::domain::open_parcels;
 use crate::domain::rollover;
 use crate::domain::tax_year::{fy_start, tax_year_for};
 use crate::entities::corporate_action::{self, AcquiredUnits, SplitEvent};
+use crate::infra::db;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
@@ -46,7 +47,10 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::iter;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One AMMA statement whose per-parcel adjustment set does not reconcile,
@@ -130,7 +134,7 @@ pub async fn db_amit_adjustment_alerts(
     // Every input on one read transaction: a single consistent snapshot, so
     // an interleaved write can't pair a statement with a half-entered
     // adjustment set (which is exactly what this report would then flag).
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let statement_rows = sqlx::query(
         "SELECT a.id, a.listing_id, l.ticker, a.tax_year_end_date, a.units_held, \
                 a.cost_base_adjustment, a.holding_account_id \
@@ -155,8 +159,7 @@ pub async fn db_amit_adjustment_alerts(
     for row in &adjustment_rows {
         let trade_id: TradeId = row.try_get("trade_id")?;
         if row.try_get("rollover_replacement")?
-            && let std::collections::hash_map::Entry::Vacant(slot) =
-                rollover_sources.entry(trade_id)
+            && let Entry::Vacant(slot) = rollover_sources.entry(trade_id)
         {
             slot.insert(rollover::source_ancestors(&mut tx, trade_id).await?);
         }
@@ -298,9 +301,9 @@ fn disposed_between(
     // By parcel, not by row: a parcel adjusted twice (pre-0022 data, flagged
     // separately below) must not have its disposals counted twice into the
     // allowance, which would mask the very over-coverage it is.
-    let parcels: std::collections::BTreeSet<TradeId> = adjustments
+    let parcels: BTreeSet<TradeId> = adjustments
         .iter()
-        .flat_map(|a| std::iter::once(a.trade_id).chain(a.rollover_sources.iter().copied()))
+        .flat_map(|a| iter::once(a.trade_id).chain(a.rollover_sources.iter().copied()))
         .collect();
     parcels
         .iter()
@@ -531,8 +534,12 @@ async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::amit_adjustment_generation;
+    use crate::entities::amit_adjustment_generation::GenerateBody;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::demerger;
     use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::scrip_exchange;
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
@@ -1187,13 +1194,9 @@ mod tests {
         second_account(&pool).await;
         transfer_all(&pool, TradeId(1), ymd(2024, 8, 15), dec("1000")).await;
 
-        crate::entities::amit_adjustment_generation::db_generate(
-            &pool,
-            1,
-            &crate::entities::amit_adjustment_generation::GenerateBody::default(),
-        )
-        .await
-        .unwrap();
+        amit_adjustment_generation::db_generate(&pool, 1, &GenerateBody::default())
+            .await
+            .unwrap();
 
         assert!(db_amit_adjustment_alerts(&pool).await.unwrap().is_empty());
     }
@@ -1269,9 +1272,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::scrip_exchange::db_exchange(&pool, 10)
-            .await
-            .unwrap();
+        scrip_exchange::db_exchange(&pool, 10).await.unwrap();
         amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "0").await;
 
         let alerts = db_amit_adjustment_alerts(&pool).await.unwrap();
@@ -1317,7 +1318,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let replacement = crate::entities::scrip_exchange::db_exchange(&pool, 10)
+        let replacement = scrip_exchange::db_exchange(&pool, 10)
             .await
             .unwrap()
             .replacements[0]
@@ -1369,9 +1370,7 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::entities::demerger::db_demerge(&pool, 10)
-            .await
-            .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
         amma(&pool, 1, ListingId(1), ymd(2024, 6, 30), "1000").await;
         let replacement: i64 = sqlx::query_scalar(
             "SELECT id FROM trades WHERE demerger_action_id = 10 AND trade_type = 'Buy' \

@@ -98,6 +98,7 @@
 //! here so every `reports::health::X` path is unchanged. This module is only
 //! the report itself: the freshness figures, the assembly, and the route.
 
+use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 use axum::extract::State;
@@ -266,7 +267,7 @@ pub async fn db_health(
     today: NaiveDate,
     now: DateTime<Utc>,
 ) -> Result<HealthReport, sqlx::Error> {
-    let mut tx = crate::infra::db::read_tx(pool).await?;
+    let mut tx = db::read_tx(pool).await?;
     let latest_price_date: Option<NaiveDate> =
         sqlx::query_scalar("SELECT MAX(price_date) FROM closing_prices WHERE status = 'ok'")
             .fetch_one(&mut *tx)
