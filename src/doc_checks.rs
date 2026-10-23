@@ -5,10 +5,10 @@
 //! anything about building, configuring or operating the server — and the cited
 //! ATO mirror — is present, so the documented scope cut can't silently vanish.
 
-use crate::entities::closing_price;
+use crate::api_spec;
+use crate::entities::{closing_price, route_tables};
 use crate::infra::http;
 use crate::reports::snapshot;
-use crate::{api_spec, entities};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, PathBuf};
 use std::{fs, path};
@@ -388,7 +388,7 @@ fn list_filtering_contract_documented() {
     );
     assert!(section.contains("cursor paging of the entity lists remains an open item"));
     // The filters table's paths and parameters are **derived** from
-    // `entities::filtered_list_routes()` (the classification table the
+    // `route_tables::filtered_list_routes()` (the classification table the
     // filtering tests drive), plus `/report_snapshots` — a resource surface,
     // not an entity list. The table must name exactly those lists, each with
     // every parameter it accepts; the hand-typed copy this replaces omitted
@@ -405,7 +405,7 @@ fn list_filtering_contract_documented() {
             )
         })
         .collect();
-    let filtered = entities::filtered_list_routes();
+    let filtered = route_tables::filtered_list_routes();
     for (path, params) in &filtered {
         let label = format!("`{path}`");
         let params_cell = filter_rows

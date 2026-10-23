@@ -1214,10 +1214,11 @@ pub(crate) fn documented_id_keyed_collection_creates() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::route_tables;
     use crate::infra::http;
     use crate::reports::row_history;
     use crate::test_support::ApiClient;
-    use crate::{entities, test_support, web};
+    use crate::{test_support, web};
     use axum::http::StatusCode;
     use serde_json::Value;
     use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -2004,7 +2005,7 @@ mod tests {
     /// machine-client contract.
     #[test]
     fn every_put_route_documents_its_outcome() {
-        use crate::entities::{PUT_ROUTES, PutOutcome};
+        use crate::entities::route_tables::{PUT_ROUTES, PutOutcome};
 
         // The entity route classification is the **one** source for which PUTs
         // report the create/replace pair and which are the two deliberate
@@ -2021,7 +2022,9 @@ mod tests {
                 Some(PutOutcome::AlwaysCreatedGroup) => &[201],
                 // A correction of an existing row: never creates, so always 204.
                 Some(PutOutcome::NeverCreates) => &[204],
-                None => panic!("PUT {path} is not classified in entities::PUT_ROUTES"),
+                None => {
+                    panic!("PUT {path} is not classified in entities::route_tables::PUT_ROUTES")
+                }
             }
         };
         let doc = doc();
@@ -2034,7 +2037,7 @@ mod tests {
             assert_eq!(
                 statuses.as_slice(),
                 expected_statuses(path),
-                "PUT {path} records statuses that disagree with its entities::PUT_ROUTES \
+                "PUT {path} records statuses that disagree with its entities::route_tables::PUT_ROUTES \
                  classification"
             );
             let responses = doc["paths"][path.as_str()]["put"]["responses"]
@@ -2062,7 +2065,7 @@ mod tests {
             puts,
             PUT_ROUTES.len(),
             "the documented PUT routes and the classified PUT routes must be the same set; a \
-             new `PUT` route must be classified in entities::PUT_ROUTES"
+             new `PUT` route must be classified in entities::route_tables::PUT_ROUTES"
         );
     }
 
@@ -2071,14 +2074,14 @@ mod tests {
     /// `PUT` reports whether it created or replaced.
     ///
     /// The two single-status exceptions are **read out of
-    /// `entities::PUT_ROUTES`** rather than transcribed: a third one, or a
+    /// `entities::route_tables::PUT_ROUTES`** rather than transcribed: a third one, or a
     /// reclassified existing one, changes what the description has to say and
     /// fails here until it does. The general rule stays a prose pin — it is
     /// pinned behaviourally by `entities::tests::every_put_route_reports_create_then_replace`
     /// and structurally by [`every_put_route_documents_its_outcome`].
     #[test]
     fn the_put_outcome_rule_is_stated_in_the_description() {
-        use crate::entities::{PUT_ROUTES, PutOutcome};
+        use crate::entities::route_tables::{PUT_ROUTES, PutOutcome};
         let doc = doc();
         let description = doc["info"]["description"]
             .as_str()
@@ -2291,7 +2294,7 @@ mod tests {
                 })
                 .unwrap_or_default()
         };
-        for (path, params) in entities::filtered_list_routes() {
+        for (path, params) in route_tables::filtered_list_routes() {
             let declared = query_names(path, "get");
             for param in params {
                 assert!(
@@ -2810,7 +2813,7 @@ mod tests {
     /// client reading only the generated document gets.
     ///
     /// Which lists and which parameters is **read out of
-    /// `entities::LIST_ROUTES`**, both ways, rather than transcribed: every list
+    /// `entities::route_tables::LIST_ROUTES`**, both ways, rather than transcribed: every list
     /// that takes a filter is named in the paragraph and every list that takes
     /// none is not, and every filter name in the table is spelled `?name=`
     /// there. So a new filtered list, a new filter, or a filter removed from a
@@ -2818,7 +2821,7 @@ mod tests {
     /// the sentences alone could never catch.
     #[test]
     fn the_list_filtering_contract_is_stated_in_the_description() {
-        use crate::entities::LIST_ROUTES;
+        use crate::entities::route_tables::LIST_ROUTES;
         let doc = doc();
         let description = doc["info"]["description"]
             .as_str()
@@ -2918,12 +2921,12 @@ mod tests {
     /// Every filtered list's summary names the parameters it accepts — the
     /// per-route half of the same contract, and the one a client browsing
     /// `paths` reads. The list and its parameters are **read from**
-    /// `entities::filtered_list_routes()` (the classification table the
+    /// `route_tables::filtered_list_routes()` (the classification table the
     /// filtering tests drive), not transcribed here, so a filter added to an
     /// entity fails until its summary documents it.
     #[test]
     fn every_filtered_list_summary_names_its_filters() {
-        let filtered = entities::filtered_list_routes();
+        let filtered = route_tables::filtered_list_routes();
         assert!(
             !filtered.is_empty(),
             "the entity filter classification table came back empty"
