@@ -11,7 +11,7 @@ async fn put_json(
 ) -> (StatusCode, axum::body::Bytes) {
     let resp = app.put(uri, &body).await;
     let status = resp.status;
-    let bytes = resp.body.clone();
+    let bytes = resp.body;
     (status, bytes)
 }
 

@@ -184,7 +184,7 @@ async fn load_convertibles(
             let fallback: Option<String> = row.try_get("fallback")?;
             let spot: Option<String> = row.try_get("spot")?;
             let parse = |raw: Option<String>| -> Result<Option<Decimal>, sqlx::Error> {
-                raw.map(|r| crate::infra::decimal::parse_dec("fx_rate", r))
+                raw.map(|r| crate::infra::decimal::parse_dec("fx_rate", &r))
                     .transpose()
             };
             let (spot_rate, fallback_rate) = (parse(spot)?, parse(fallback)?);

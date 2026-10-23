@@ -173,7 +173,7 @@ impl DistributionFetcher for YahooDistributionFetcher {
                 // matching words in a message — the same call
                 // `closing_price::yahoo` makes, so a retired ticker is
                 // diagnosed identically on both paths.
-                .map_err(|e| closing_price::classify_yahoo_failure(symbol, e))?;
+                .map_err(|e| closing_price::classify_yahoo_failure(symbol, &e))?;
 
             // The join table: the UTC date of each candle's own instant, to
             // the exchange-local trading day it is.

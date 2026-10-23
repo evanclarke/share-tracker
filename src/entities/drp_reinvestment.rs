@@ -559,8 +559,8 @@ async fn execute(
     .await?;
     let residual_bf = match prior {
         Some((carried, paid)) => {
-            let leftover = parse_dec("residual_carried_forward", carried)?
-                + parse_dec("residual_paid_out", paid)?;
+            let leftover = parse_dec("residual_carried_forward", &carried)?
+                + parse_dec("residual_paid_out", &paid)?;
             period
                 .residual_split(leftover, drp_enrolment::ChainPosition::Followed)
                 .carried_forward

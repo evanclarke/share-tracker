@@ -193,7 +193,7 @@ pub async fn db_upsert(
         .bind(allocation.sale_trade_id)
         .fetch_one(pool)
         .await?;
-    let sale_qty: Decimal = parse_dec("quantity", sale_qty)?;
+    let sale_qty: Decimal = parse_dec("quantity", &sale_qty)?;
 
     let already_sale_allocated = sum_allocated(
         pool,

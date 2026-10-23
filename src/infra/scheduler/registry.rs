@@ -377,9 +377,10 @@ pub fn registry(
         }
     });
 
-    // The two email jobs. Each takes its own clone of the notifier, so a
-    // deployment with no `[email]` table hands both a `None` and neither
-    // fails — see the parameter's own note above.
+    // The two email jobs. Each holds its own copy of the notifier (the first a
+    // clone, the second the original), so a deployment with no `[email]` table
+    // hands both a `None` and neither fails — see the parameter's own note
+    // above.
     register(&mut jobs, "weekly-summary", {
         let (pool, notifier) = (pool.clone(), notifier.clone());
         move |_| {
@@ -399,7 +400,7 @@ pub fn registry(
     });
 
     register(&mut jobs, "price-alert", {
-        let (pool, notifier) = (pool.clone(), notifier.clone());
+        let pool = pool.clone();
         move |_| {
             let (pool, notifier) = (pool.clone(), notifier.clone());
             async move {

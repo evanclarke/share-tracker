@@ -496,7 +496,7 @@ async fn write(
     // The statement total (when recorded) must reconcile with the trade's own
     // figures — a mismatch is a data-entry error against the contract note,
     // caught before anything is written.
-    check_statement_total(StatementTotalCheck {
+    check_statement_total(&StatementTotalCheck {
         statement_total: trade.statement_total,
         amounts: trade.amounts(),
     })
@@ -693,7 +693,7 @@ async fn write(
             .fetch_all(&mut *tx)
             .await?;
     for q in amit_quantities {
-        if trade.quantity < parse_dec("quantity", q)? {
+        if trade.quantity < parse_dec("quantity", &q)? {
             return Err(UpsertError::QuantityBelowAmitAdjustment);
         }
     }

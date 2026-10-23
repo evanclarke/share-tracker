@@ -85,7 +85,7 @@ fn yahoo_symbol_for(market: &Market, identity: &MarketIdentity) -> Result<String
     clippy::wildcard_enum_match_arm,
     reason = "`YfError` is non-exhaustive, and every other failure is `Other` by design"
 )]
-pub(crate) fn classify_yahoo_failure(symbol: &str, error: yfinance_rs::YfError) -> FetchError {
+pub(crate) fn classify_yahoo_failure(symbol: &str, error: &yfinance_rs::YfError) -> FetchError {
     let message = format!("yahoo fetch for {symbol} failed: {error}");
     match error {
         yfinance_rs::YfError::NotFound { .. }
@@ -125,7 +125,7 @@ impl PriceFetcher for YahooFetcher {
                 .auto_adjust(false)
                 .fetch()
                 .await
-                .map_err(|e| classify_yahoo_failure(&symbol, e))?;
+                .map_err(|e| classify_yahoo_failure(&symbol, &e))?;
             Ok(candles
                 .into_iter()
                 .map(|c| FetchedClose {

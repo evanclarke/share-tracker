@@ -224,8 +224,8 @@ impl Settings {
             allowed_hosts: file
                 .allowed_hosts
                 .unwrap_or_default()
-                .into_iter()
-                .map(validate_allowed_host)
+                .iter()
+                .map(|raw| validate_allowed_host(raw))
                 .collect::<Result<_, _>>()?,
             auth,
             email,
@@ -237,7 +237,7 @@ impl Settings {
 /// letters, digits, `-` and `.` — not a URL, not `name:port` (the guard
 /// compares names, whatever the port), and not an IP address (those are
 /// always allowed, so listing one is a sign the entry means something else).
-fn validate_allowed_host(raw: String) -> Result<String, String> {
+fn validate_allowed_host(raw: &str) -> Result<String, String> {
     let name = raw.trim().trim_end_matches('.').to_ascii_lowercase();
     let valid = !name.is_empty()
         && name

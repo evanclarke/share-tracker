@@ -429,6 +429,10 @@ impl IntoResponse for ApiError {
 /// returned. A panic message can carry anything (a file path, a row's
 /// contents), so it is exactly the kind of internal detail that convention
 /// exists to keep out of a response.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "`CatchPanicLayer::custom` hands the payload over as an owned `Box`"
+)]
 pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response {
     // The payload of `panic!("…")` / `unwrap()` on a `&str` or `String`; any
     // other payload type has no readable form, so it is named as such rather

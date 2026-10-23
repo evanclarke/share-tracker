@@ -323,6 +323,7 @@ async fn write_or_preview(
 
 /// Some of the statement's units, sitting in one parcel: a parcel its account
 /// held at the year end, or a transfer-in parcel they were moved into since.
+#[derive(Clone, Copy)]
 struct Holding {
     id: TradeId,
     /// The date the parcel's own unit basis is reckoned from — its trade date

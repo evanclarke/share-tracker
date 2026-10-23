@@ -283,7 +283,7 @@ impl<'de> Visitor<'de> for StrictOptionalDecimal {
 ///
 /// For row structs prefer [`Money`]/[`OptMoney`] with a derived `FromRow`; this stays for
 /// the callers that pull a scalar out of an ad-hoc query and have no row struct to derive on.
-pub fn parse_dec(column: &str, value: String) -> Result<Decimal, sqlx::Error> {
+pub fn parse_dec(column: &str, value: &str) -> Result<Decimal, sqlx::Error> {
     value.parse().map_err(|e: rust_decimal::Error| {
         sqlx::Error::Decode(format!("invalid decimal in column '{column}': {value:?} ({e})").into())
     })

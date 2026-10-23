@@ -3425,7 +3425,7 @@ mod tests {
     }
 
     impl RecordedSteps {
-        fn take(&mut self, step: &'static str, detail: String) -> std::io::Result<()> {
+        fn take(&mut self, step: &'static str, detail: &str) -> std::io::Result<()> {
             self.taken.push(format!("{step} {detail}"));
             if self.fail == Some(step) {
                 return Err(std::io::Error::other(format!("{step} failed")));
@@ -3436,13 +3436,13 @@ mod tests {
 
     impl InstallSteps for RecordedSteps {
         fn sync_file(&mut self, path: &Path) -> std::io::Result<()> {
-            self.take("sync_file", path.display().to_string())
+            self.take("sync_file", &path.display().to_string())
         }
         fn rename(&mut self, from: &Path, to: &Path) -> std::io::Result<()> {
-            self.take("rename", format!("{} -> {}", from.display(), to.display()))
+            self.take("rename", &format!("{} -> {}", from.display(), to.display()))
         }
         fn sync_dir(&mut self, dir: &Path) -> std::io::Result<()> {
-            self.take("sync_dir", dir.display().to_string())
+            self.take("sync_dir", &dir.display().to_string())
         }
     }
 

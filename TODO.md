@@ -164,8 +164,9 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
     `as`-cast clean-up below, test code included); `format_push_string` is done too (with the
     string-building clean-up below, test code included); `needless_for_each` is enabled too, an
     extra lint beyond this list (with the `for_each` clean-up below, test code included);
-    `str_to_string` is done too (with the `to_owned` clean-up below, test code included); the
-    remaining lints are still open
+    `str_to_string` is done too (with the `to_owned` clean-up below, test code included);
+    `needless_pass_by_value` and `redundant_clone` are done too (with the by-value-argument
+    clean-up below, test code included); the remaining lints are still open
 
 ## Google Rust style guide pass (2026-10-23) — mechanical clean-ups
 Each closed by the lint named in the section above once it is enabled and clean.
@@ -213,9 +214,19 @@ Each closed by the lint named in the section above once it is enabled and clean.
     `ToString::to_string` → `str::to_owned` applied by `cargo clippy --fix`; test code is held to
     it too, the fix being purely mechanical. Test: `clippy::str_to_string = "warn"` in
     `Cargo.toml`, enforced by CI's `cargo clippy --all-targets -- -D warnings` (mutation-checked)
-- [ ] Nine by-value arguments never consumed (e.g. `config.rs:232`, `decimal.rs:286` → `&str`;
+- [x] Nine by-value arguments never consumed (e.g. `config.rs:232`, `decimal.rs:286` → `&str`;
   `http.rs:425`; `scheduler/registry.rs:215`; `amit_adjustment.rs:566`; `trade/checks.rs:330`) and
   the redundant clone at `scheduler/registry.rs:402`
+  - Done 2026-10-23: `parse_dec` and `validate_allowed_host` take `&str`; `classify_yahoo_failure`,
+    `check_statement_total` and the two `*_from_body` mappings (`amit_adjustment`,
+    `drp_enrolment`) borrow; the amit generation's `Holding` is `Copy` (every field already was);
+    dropping the price-alert job's redundant `notifier.clone()` moves the original in, which is
+    also what clears `registry`'s by-value `notifier`. `panic_response` keeps its owned `Box` —
+    `CatchPanicLayer::custom` dictates it — under a reasoned `#[expect]`. Axum handlers needed no
+    exemption: the lint never flags an `async fn` (its arguments move into the future). Test code
+    is held to both (two test helpers borrow, five redundant `resp.body.clone()`s are moves). Test:
+    `clippy::needless_pass_by_value = "warn"` and `clippy::redundant_clone = "warn"` in
+    `Cargo.toml`, enforced by CI's `cargo clippy --all-targets -- -D warnings` (mutation-checked)
 
 ## Google Rust style guide pass (2026-10-23) — imports, module layout and docs
 - [ ] 656 inline fully-qualified paths where the guide wants types imported and used unqualified

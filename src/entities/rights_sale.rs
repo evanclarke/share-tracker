@@ -484,7 +484,7 @@ async fn prior_anchored_units(
     .await?;
     let mut anchored = Decimal::ZERO;
     for units in prior {
-        anchored += parse_dec("units", units)?;
+        anchored += parse_dec("units", &units)?;
     }
     Ok(anchored)
 }

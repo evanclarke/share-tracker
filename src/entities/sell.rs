@@ -805,7 +805,7 @@ pub(crate) async fn upsert_sell_in_tx(
         brokerage_currency: &body.brokerage_currency,
     })
     .map_err(SellError::Amounts)?;
-    trade::check_statement_total(trade::StatementTotalCheck {
+    trade::check_statement_total(&trade::StatementTotalCheck {
         statement_total: body.statement_total,
         amounts: trade::TradeAmounts {
             trade_type: TradeType::Sell,

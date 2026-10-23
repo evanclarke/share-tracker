@@ -363,14 +363,14 @@ async fn post_json(
 ) -> (StatusCode, axum::body::Bytes) {
     let resp = app.post(uri, &body).await;
     let status = resp.status;
-    let bytes = resp.body.clone();
+    let bytes = resp.body;
     (status, bytes)
 }
 
 async fn delete_req(app: &ApiClient, uri: &str) -> (StatusCode, axum::body::Bytes) {
     let resp = app.delete(uri).await;
     let status = resp.status;
-    let bytes = resp.body.clone();
+    let bytes = resp.body;
     (status, bytes)
 }
 

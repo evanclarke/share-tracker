@@ -589,7 +589,7 @@ async fn api_list_filters_by_listing_and_date_range_including_errors() {
         async move {
             let resp = app.get(uri).await;
             assert_eq!(resp.status, StatusCode::OK);
-            let bytes = resp.body.clone();
+            let bytes = resp.body;
             serde_json::from_slice::<Vec<ClosingPrice>>(&bytes).unwrap()
         }
     };
@@ -648,7 +648,7 @@ async fn api_list_filters_by_status() {
         async move {
             let resp = app.get(uri.clone()).await;
             assert_eq!(resp.status, StatusCode::OK, "{uri}");
-            let bytes = resp.body.clone();
+            let bytes = resp.body;
             serde_json::from_slice::<Vec<ClosingPrice>>(&bytes).unwrap()
         }
     };

@@ -227,7 +227,7 @@ async fn lookup_ato_rate(
             .bind(month)
             .fetch_optional(pool)
             .await?;
-    raw.map(|r| parse_dec("rate", r)).transpose()
+    raw.map(|r| parse_dec("rate", &r)).transpose()
 }
 
 /// Resolve the foreign-per-AUD rate to apply when converting `currency` for

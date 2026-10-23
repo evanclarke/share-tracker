@@ -319,7 +319,7 @@ pub(crate) async fn db_rights_used(
             .fetch_all(&mut *conn)
             .await?;
     for units in sold_units {
-        used += parse_dec("units", units)?;
+        used += parse_dec("units", &units)?;
     }
     Ok(used)
 }

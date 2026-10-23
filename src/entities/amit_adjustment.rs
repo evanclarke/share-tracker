@@ -493,7 +493,7 @@ async fn db_write_on(
         let mut gone = Vec::with_capacity(gone_rows.len());
         for (date, qty) in gone_rows {
             gone.push(corporate_action::UnitsAt::new(
-                parse_dec("quantity_allocated", qty)?,
+                parse_dec("quantity_allocated", &qty)?,
                 date,
             ));
         }
@@ -563,7 +563,7 @@ pub async fn db_upsert(
 /// The row a request body describes. `id` is the path's on an upsert and
 /// ignored on a create (the database assigns one), so both entry points build
 /// their `AmitAdjustment` through this one mapping and cannot drift.
-fn amit_adjustment_from_body(id: i64, body: AmitAdjustmentBody) -> AmitAdjustment {
+fn amit_adjustment_from_body(id: i64, body: &AmitAdjustmentBody) -> AmitAdjustment {
     AmitAdjustment {
         id,
         amma_statement_id: body.amma_statement_id,
@@ -582,7 +582,7 @@ async fn upsert(
     Path(id): Path<i64>,
     Json(body): Json<AmitAdjustmentBody>,
 ) -> Result<UpsertResponse<AmitAdjustment>, ApiError> {
-    let adj = amit_adjustment_from_body(id, body);
+    let adj = amit_adjustment_from_body(id, &body);
     let Upserted {
         outcome,
         created: row,
@@ -603,7 +603,7 @@ async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<AmitAdjustmentBody>,
 ) -> Result<Created<AmitAdjustment>, ApiError> {
-    let created = db_create(&pool, &amit_adjustment_from_body(0, body)).await?;
+    let created = db_create(&pool, &amit_adjustment_from_body(0, &body)).await?;
     Ok(Created(created))
 }
 

@@ -456,7 +456,7 @@ fn yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol() {
     for error in dead {
         assert!(
             matches!(
-                classify_yahoo_failure("FB", error),
+                classify_yahoo_failure("FB", &error),
                 FetchError::NoSuchSymbol(_)
             ),
             "a provider answer of no-such-series"
@@ -475,7 +475,7 @@ fn yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol() {
         yfinance_rs::YfError::Auth("no crumb".to_owned()),
     ];
     for error in transient {
-        let classified = classify_yahoo_failure("FB", error);
+        let classified = classify_yahoo_failure("FB", &error);
         assert!(
             matches!(classified, FetchError::Other(_)),
             "not evidence about the symbol: {}",

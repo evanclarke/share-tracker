@@ -422,8 +422,8 @@ pub(crate) async fn recompute_residuals(
 
     let last = trades.len().saturating_sub(1);
     for (index, (trade_id, carried, paid)) in trades.iter().enumerate() {
-        let carried = parse_dec("residual_carried_forward", carried.clone())?;
-        let paid = parse_dec("residual_paid_out", paid.clone())?;
+        let carried = parse_dec("residual_carried_forward", carried)?;
+        let paid = parse_dec("residual_paid_out", paid)?;
         let leftover = carried + paid;
         let position = match index == last {
             true => ChainPosition::Tail,
@@ -535,7 +535,7 @@ async fn upsert(
     let Upserted {
         outcome,
         created: row,
-    } = db_upsert(&pool, &drp_enrolment_from_body(id, body)).await?;
+    } = db_upsert(&pool, &drp_enrolment_from_body(id, &body)).await?;
     http::upsert_response::<DrpEnrolment>(outcome, row)
 }
 
@@ -552,14 +552,14 @@ async fn create(
     State(pool): State<SqlitePool>,
     Json(body): Json<DrpEnrolmentBody>,
 ) -> Result<Created<DrpEnrolment>, ApiError> {
-    let created = db_create(&pool, &drp_enrolment_from_body(0, body)).await?;
+    let created = db_create(&pool, &drp_enrolment_from_body(0, &body)).await?;
     Ok(Created(created))
 }
 
 /// The row a request body describes. `id` is the path's on an upsert and
 /// ignored on a create (the database assigns one), so both entry points build
 /// their `DrpEnrolment` through this one mapping and cannot drift.
-fn drp_enrolment_from_body(id: i64, body: DrpEnrolmentBody) -> DrpEnrolment {
+fn drp_enrolment_from_body(id: i64, body: &DrpEnrolmentBody) -> DrpEnrolment {
     DrpEnrolment {
         id,
         listing_id: body.listing_id,

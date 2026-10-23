@@ -154,3 +154,13 @@ needless_for_each = "warn"
 # `Display`) where `to_owned()` says what happens: the borrowed text is copied.
 # Test code is held to it too.
 str_to_string = "warn"
+# An owned argument the body only reads makes every caller give up (or clone)
+# what a borrow would do: take `&str`/`&T`. An `async fn` is never flagged (its
+# arguments all move into the returned future), so axum handlers taking their
+# `State`/`Json`/`Query`/`Path` extractors by value need no exemption; the one
+# signature a library dictates (`panic_response`) carries a reasoned `#[expect]`.
+# Test code is held to it too.
+needless_pass_by_value = "warn"
+# A `.clone()` of a value never used again copies what could simply be moved.
+# Test code is held to it too.
+redundant_clone = "warn"

@@ -261,7 +261,7 @@ pub async fn db_import_rate(
             .bind(month)
             .fetch_one(pool)
             .await?;
-    let stored_rate = crate::infra::decimal::parse_dec("rate", stored.1)?;
+    let stored_rate = crate::infra::decimal::parse_dec("rate", &stored.1)?;
     if stored_rate == rate {
         return Ok(ImportOutcomeRow::Skipped);
     }
@@ -497,7 +497,7 @@ mod tests {
     // DB-level tests
 
     /// A feed row's outcome as a plain word, for the assertions below.
-    fn outcome(row: ImportOutcomeRow) -> &'static str {
+    fn outcome(row: &ImportOutcomeRow) -> &'static str {
         match row {
             ImportOutcomeRow::Inserted => "inserted",
             ImportOutcomeRow::Skipped => "skipped",
@@ -510,7 +510,7 @@ mod tests {
         let pool = test_pool().await;
         assert_eq!(
             outcome(
-                db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+                &db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
                     .await
                     .unwrap()
             ),
@@ -531,7 +531,7 @@ mod tests {
         let pool = test_pool().await;
         assert_eq!(
             outcome(
-                db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
+                &db_import_rate(&pool, "USD", "2024-01", "1.5".parse().unwrap())
                     .await
                     .unwrap()
             ),
@@ -542,7 +542,7 @@ mod tests {
         // as a repeat (SCENARIOS M-13).
         assert_eq!(
             outcome(
-                db_import_rate(&pool, "USD", "2024-01", "1.6".parse().unwrap())
+                &db_import_rate(&pool, "USD", "2024-01", "1.6".parse().unwrap())
                     .await
                     .unwrap()
             ),

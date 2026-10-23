@@ -327,7 +327,7 @@ pub(crate) struct StatementTotalCheck {
 /// statements round). Comparison is numeric (`Decimal` equality ignores
 /// trailing zeros: 1234.50 matches 1234.5). `None` means the statement
 /// total wasn't recorded — nothing to check.
-pub(crate) fn check_statement_total(c: StatementTotalCheck) -> Result<(), StatementTotalError> {
+pub(crate) fn check_statement_total(c: &StatementTotalCheck) -> Result<(), StatementTotalError> {
     let Some(total) = c.statement_total else {
         return Ok(());
     };

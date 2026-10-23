@@ -712,7 +712,7 @@ async fn load_disposal_inputs(
     let rights_sales = rights_sales
         .into_iter()
         .map(|(id, currency, fx_rate)| {
-            Ok::<_, sqlx::Error>((id, (currency, parse_dec("fx_rate", fx_rate)?)))
+            Ok::<_, sqlx::Error>((id, (currency, parse_dec("fx_rate", &fx_rate)?)))
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
