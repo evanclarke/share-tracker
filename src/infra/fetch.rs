@@ -303,14 +303,14 @@ mod tests {
     impl Layer {
         fn new(message: &str) -> Self {
             Self {
-                message: message.to_string(),
+                message: message.to_owned(),
                 source: None,
             }
         }
 
         fn over(message: &str, source: Layer) -> Self {
             Self {
-                message: message.to_string(),
+                message: message.to_owned(),
                 source: Some(Box::new(source)),
             }
         }

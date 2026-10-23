@@ -392,8 +392,8 @@ fn list_filtering_contract_documented() {
             let mut cells = line.split('|');
             cells.next();
             (
-                cells.next().expect("a path cell").trim().to_string(),
-                cells.next().expect("a parameters cell").trim().to_string(),
+                cells.next().expect("a path cell").trim().to_owned(),
+                cells.next().expect("a parameters cell").trim().to_owned(),
             )
         })
         .collect();
@@ -423,7 +423,7 @@ fn list_filtering_contract_documented() {
         "`/report_snapshots/series`",
         "`/report_snapshots/holding_series`",
     ] {
-        expected.push(path.to_string());
+        expected.push(path.to_owned());
     }
     expected.sort();
     assert_eq!(
@@ -1073,7 +1073,7 @@ fn created_response_row_names_collection_creates_and_vest() {
         .split('`')
         .skip(1)
         .step_by(2)
-        .map(str::to_string)
+        .map(str::to_owned)
         .collect();
     named.sort();
     named.dedup();
@@ -1255,7 +1255,7 @@ fn error_bodies_list_names_only_returned_codes() {
     // side: no `ApiError` sample answers 409, so a `409` can neither be listed
     // nor be put back into the Response-codes table.
     assert!(
-        !api_text.contains(&"409".to_string()),
+        !api_text.contains(&"409".to_owned()),
         "an ApiError now answers 409 — the Error bodies list and the Response \
          codes table must both gain a 409 row: {api_text:?}"
     );
@@ -1273,7 +1273,7 @@ fn error_bodies_list_names_only_returned_codes() {
         .filter(|code| code.as_str() != "500")
         .cloned()
         .collect();
-    expected.push("415".to_string());
+    expected.push("415".to_owned());
     expected.sort();
     expected.dedup();
     let mut actual: Vec<String> = listed.iter().map(|code| code.to_string()).collect();
@@ -1345,7 +1345,7 @@ fn error_body_matrix_rows() -> Vec<(String, String)> {
             }
             let mut cells = line.split('|').skip(1);
             let _status = cells.next()?;
-            let body = cells.next()?.trim().trim_matches('*').to_string();
+            let body = cells.next()?.trim().trim_matches('*').to_owned();
             Some((code, body))
         })
         .collect()
@@ -1413,7 +1413,7 @@ fn error_body_matrix_pins_every_status_and_shape() {
         .map(|(code, has_body)| {
             (
                 code.to_string(),
-                if has_body { "text" } else { "empty" }.to_string(),
+                if has_body { "text" } else { "empty" }.to_owned(),
             )
         })
         .collect();
@@ -1421,9 +1421,9 @@ fn error_body_matrix_pins_every_status_and_shape() {
     // can: a path no route matches (`404`, empty), an unmatched method on a
     // read-only path (`405`, empty) and the `Json` extractor's missing or wrong
     // content type (`415`, text).
-    expected.push(("404".to_string(), "empty".to_string()));
-    expected.push(("405".to_string(), "empty".to_string()));
-    expected.push(("415".to_string(), "text".to_string()));
+    expected.push(("404".to_owned(), "empty".to_owned()));
+    expected.push(("405".to_owned(), "empty".to_owned()));
+    expected.push(("415".to_owned(), "text".to_owned()));
     expected.sort();
     expected.dedup();
 
@@ -5928,7 +5928,7 @@ fn markdown_links(src: &str) -> Vec<(usize, String, String)> {
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()
-                .to_string();
+                .to_owned();
             if !target.is_empty() {
                 found.push((n, text, target));
             }

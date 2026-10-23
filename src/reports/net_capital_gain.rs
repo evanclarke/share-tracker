@@ -1015,7 +1015,7 @@ fn net_years(
                 cgt_event_e10_gain: to_cents(b.e10),
                 cgt_event_g1_gain: to_cents(b.g1),
                 cgt_event_c2_gain: to_cents(b.c2),
-                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
                 // Attached by the caller (`db_net_capital_gain` groups the
                 // already-fetched realised rows by tax year); left empty here
                 // and on every what-if scenario row.
@@ -1327,13 +1327,11 @@ async fn what_if_handler(
     Json(req): Json<WhatIfRequest>,
 ) -> Result<Json<WhatIfResponse>, ApiError> {
     if req.units <= Decimal::ZERO {
-        return Err(ApiError::Unprocessable(
-            "units must be positive".to_string(),
-        ));
+        return Err(ApiError::Unprocessable("units must be positive".to_owned()));
     }
     if req.proceeds < Decimal::ZERO {
         return Err(ApiError::Unprocessable(
-            "proceeds must not be negative".to_string(),
+            "proceeds must not be negative".to_owned(),
         ));
     }
 
@@ -1373,7 +1371,7 @@ async fn what_if_handler(
     let picks: Vec<(TradeId, Decimal)> = match (&req.allocations, req.strategy) {
         (Some(_), Some(_)) | (None, None) => {
             return Err(ApiError::Unprocessable(
-                "supply either allocations or a strategy (exactly one)".to_string(),
+                "supply either allocations or a strategy (exactly one)".to_owned(),
             ));
         }
         (Some(allocs), None) => {
@@ -1467,7 +1465,7 @@ async fn what_if_handler(
         rows.into_iter()
             .find(|y| y.tax_year == tax_year)
             .map(|year| ScenarioYear {
-                scenario: scenario.to_string(),
+                scenario: scenario.to_owned(),
                 year,
             })
             .expect("the disposal year was ensured in the buckets")
@@ -3098,7 +3096,7 @@ mod tests {
                 date,
                 kind: corporate_action::ActionKind::ReturnOfCapital {
                     amount_per_unit: amount.parse().unwrap(),
-                    currency: currency.to_string().into(),
+                    currency: currency.to_owned().into(),
                     record_date,
                 },
             },
@@ -3471,7 +3469,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await
@@ -3550,7 +3548,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await
@@ -4391,7 +4389,7 @@ mod tests {
                 .unwrap(),
             "attachment; filename=\"net-capital-gain.csv\""
         );
-        let csv = resp.text().to_string();
+        let csv = resp.text().to_owned();
         let mut lines = csv.lines();
         // Header names every NetCapitalGainYear field, in declaration order.
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
@@ -4422,7 +4420,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next(); // the ATO label row
@@ -4505,7 +4503,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next(); // the ATO label row
@@ -4643,7 +4641,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next();
@@ -4722,7 +4720,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next();
@@ -4828,7 +4826,7 @@ mod tests {
             .get("/portfolio/net_capital_gain/export")
             .await;
         assert_eq!(resp.status, StatusCode::OK);
-        let csv = resp.text().to_string();
+        let csv = resp.text().to_owned();
         assert_eq!(
             csv,
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"
@@ -4860,7 +4858,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines().skip(2); // past both header rows
         let fields: Vec<&str> = lines.next().expect("a record row").split(',').collect();
         assert_eq!(fields.len(), CSV_HEADER.len());
@@ -5421,7 +5419,7 @@ mod tests {
             pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await

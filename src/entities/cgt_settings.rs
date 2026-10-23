@@ -263,7 +263,7 @@ mod tests {
             .put_raw("/cgt_settings/1", r#"{"opening_capital_loss":"-10"}"#)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("cannot be negative"), "detail: {detail}");
     }
 

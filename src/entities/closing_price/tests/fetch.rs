@@ -85,7 +85,7 @@ async fn api_backfill_symbol_override_reaches_the_fetcher() {
         "{}",
         String::from_utf8_lossy(&bytes)
     );
-    assert_eq!(fetcher.symbols(), vec!["LAAC-OLD".to_string()]);
+    assert_eq!(fetcher.symbols(), vec!["LAAC-OLD".to_owned()]);
     // The listing's own stored symbol is untouched by the one-off override.
     assert_eq!(
         listing::db_get(&pool, ListingId(1))
@@ -169,7 +169,7 @@ async fn db_each_row_records_its_own_segments_symbol_across_a_rename() {
     }
     assert_eq!(
         symbols,
-        vec![Some("LAAC".to_string()), Some("LAR".to_string())]
+        vec![Some("LAAC".to_owned()), Some("LAR".to_owned())]
     );
 }
 
@@ -585,7 +585,7 @@ async fn api_list_filters_by_listing_and_date_range_including_errors() {
     let app = full_router(pool, StubFetcher::default());
     let get = |uri: &str| {
         let app = app.clone();
-        let uri = uri.to_string();
+        let uri = uri.to_owned();
         async move {
             let resp = app.get(uri).await;
             assert_eq!(resp.status, StatusCode::OK);
@@ -644,7 +644,7 @@ async fn api_list_filters_by_status() {
     let app = full_router(pool.clone(), StubFetcher::default());
     let get = |uri: &str| {
         let app = app.clone();
-        let uri = uri.to_string();
+        let uri = uri.to_owned();
         async move {
             let resp = app.get(uri.clone()).await;
             assert_eq!(resp.status, StatusCode::OK, "{uri}");

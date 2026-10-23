@@ -373,7 +373,7 @@ pub async fn run_alert(
         // for it must not accumulate a failed run per close. The note is what
         // keeps the Jobs screen from reading as a complete run.
         return Ok(Some(
-            "no [email] configured, so no price alert was sent".to_string(),
+            "no [email] configured, so no price alert was sent".to_owned(),
         ));
     };
     let threshold = notifier.price_alert_pct;

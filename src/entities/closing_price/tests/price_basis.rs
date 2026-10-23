@@ -41,7 +41,7 @@ async fn db_a_price_fetched_after_a_split_is_stored_in_its_own_days_basis() {
 
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
-        ("1208.88".to_string(), "120.888".to_string()),
+        ("1208.88".to_owned(), "120.888".to_owned()),
         "the provider's post-split figure is restated into the price date's own basis"
     );
 }
@@ -65,7 +65,7 @@ async fn db_a_price_observed_before_the_split_is_untouched_when_it_is_recorded()
 
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
-        ("1208.88".to_string(), "1208.88".to_string()),
+        ("1208.88".to_owned(), "1208.88".to_owned()),
         "the fetch predates the split, so the figure was never restated"
     );
 }
@@ -102,7 +102,7 @@ async fn db_entry_order_of_the_split_and_the_fetch_does_not_change_the_price() {
 
     assert_eq!(
         stored(&a, ymd(2026, 6, 5)).await,
-        ("1208.88".to_string(), "120.888".to_string())
+        ("1208.88".to_owned(), "120.888".to_owned())
     );
     assert_eq!(
         stored(&b, ymd(2026, 6, 5)).await,
@@ -163,7 +163,7 @@ async fn db_a_consolidation_rebases_stored_prices_the_other_way() {
 
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
-        ("1208.88".to_string(), "12088.8".to_string()),
+        ("1208.88".to_owned(), "12088.8".to_owned()),
         "ten old units became one, so the pre-consolidation day's price is a tenth"
     );
 }
@@ -192,7 +192,7 @@ async fn api_a_manual_price_is_neither_normalised_on_entry_nor_rebased() {
 
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
-        ("1208.88".to_string(), "1208.88".to_string()),
+        ("1208.88".to_owned(), "1208.88".to_owned()),
         "the operator's figure is its own observation"
     );
 
@@ -263,7 +263,7 @@ async fn db_deleting_the_last_split_puts_the_prices_back_to_the_observation() {
         .unwrap();
     assert_eq!(
         stored(&pool, ymd(2026, 6, 5)).await,
-        ("120.888".to_string(), "120.888".to_string()),
+        ("120.888".to_owned(), "120.888".to_owned()),
         "with the split gone there is nothing to restate out of any more"
     );
 }
@@ -320,9 +320,9 @@ async fn insert_demerger(
                 demerger_close_date: stated_close.map(|(d, _)| d),
                 demerger_close_price: stated_close.map(|(_, p)| p.parse().unwrap()),
                 demerger_close_sourced_from: stated_close
-                    .map(|_| "nyse.com daily close".to_string()),
+                    .map(|_| "nyse.com daily close".to_owned()),
                 demerger_close_reason: stated_close
-                    .map(|_| "the provider adjusts the pre-demerger series".to_string()),
+                    .map(|_| "the provider adjusts the pre-demerger series".to_owned()),
             },
         },
     )
@@ -370,7 +370,7 @@ async fn db_a_stated_pre_demerger_close_restates_the_whole_pre_demerger_series()
 
     assert_eq!(
         stored(&pool, ymd(2023, 10, 2)).await,
-        ("24.9".to_string(), "10.13".to_string()),
+        ("24.9".to_owned(), "10.13".to_owned()),
         "the reference day comes back to exactly the close the operator stated"
     );
     assert_eq!(
@@ -691,7 +691,7 @@ async fn db_a_rebase_is_audited_and_stales_the_snapshots_it_moves() {
     .unwrap();
     assert_eq!(
         old,
-        vec!["120.888".to_string()],
+        vec!["120.888".to_owned()],
         "the superseded figure is retained"
     );
 

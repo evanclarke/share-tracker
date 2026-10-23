@@ -179,7 +179,7 @@ async fn report(
     let window_days = req.window_days.unwrap_or(DEFAULT_WINDOW_DAYS);
     if window_days < 1 {
         return Err(ApiError::Unprocessable(
-            "window_days must be at least 1".to_string(),
+            "window_days must be at least 1".to_owned(),
         ));
     }
     db_wash_sales(&pool, window_days)
@@ -307,7 +307,7 @@ mod tests {
             &pool,
             &holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second broker".to_string(),
+                name: "Second broker".to_owned(),
             },
         )
         .await
@@ -436,7 +436,7 @@ mod tests {
             &pool,
             &holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second broker".to_string(),
+                name: "Second broker".to_owned(),
             },
         )
         .await
@@ -490,7 +490,7 @@ mod tests {
             &pool,
             &holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second wallet".to_string(),
+                name: "Second wallet".to_owned(),
             },
         )
         .await
@@ -567,7 +567,7 @@ mod tests {
             let client = ApiClient::over(router().with_state(pool.clone()));
             async move {
                 let path = if query.is_empty() {
-                    "/reports/wash_sales".to_string()
+                    "/reports/wash_sales".to_owned()
                 } else {
                     format!("/reports/wash_sales?{query}")
                 };

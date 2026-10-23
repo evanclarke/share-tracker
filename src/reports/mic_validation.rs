@@ -46,7 +46,7 @@ pub async fn db_validate(pool: &SqlitePool) -> Result<Vec<ExchangeMicStatus>, sq
             Some("EXPIRED") => "expired",
             Some(_) => "ok",
         }
-        .to_string();
+        .to_owned();
         out.push(ExchangeMicStatus {
             mic: row.try_get("mic")?,
             exchange_name: row.try_get("exchange_name")?,
@@ -77,13 +77,13 @@ mod tests {
 
     fn mic(mic: &str, status: MicStatus, expiry: Option<&str>) -> mic_registry::MicEntry {
         mic_registry::MicEntry {
-            mic: mic.to_string(),
-            operating_mic: mic.to_string(),
+            mic: mic.to_owned(),
+            operating_mic: mic.to_owned(),
             name: format!("{mic} Exchange"),
-            country_code: "AU".to_string(),
+            country_code: "AU".to_owned(),
             city: None,
             status,
-            expiry_date: expiry.map(str::to_string),
+            expiry_date: expiry.map(str::to_owned),
         }
     }
 
@@ -112,13 +112,13 @@ mod tests {
         exchange::db_upsert(
             &pool,
             &exchange::Exchange {
-                mic: "XBOG".to_string(),
-                name: "Bogus".to_string(),
-                country: "Nowhere".to_string(),
+                mic: "XBOG".to_owned(),
+                name: "Bogus".to_owned(),
+                country: "Nowhere".to_owned(),
                 currency: "AUD".into(),
-                timezone: "UTC".to_string(),
+                timezone: "UTC".to_owned(),
                 settlement_days: 2,
-                close_time: "16:00".to_string(),
+                close_time: "16:00".to_owned(),
             },
         )
         .await
@@ -129,11 +129,11 @@ mod tests {
 
         let asx = by_mic("XASX");
         assert_eq!(asx.registry_status, "ok");
-        assert_eq!(asx.iso_status, Some("ACTIVE".to_string()));
+        assert_eq!(asx.iso_status, Some("ACTIVE".to_owned()));
 
         let nyse = by_mic("XNYS");
         assert_eq!(nyse.registry_status, "expired");
-        assert_eq!(nyse.expiry_date, Some("2024-06-30".to_string()));
+        assert_eq!(nyse.expiry_date, Some("2024-06-30".to_owned()));
 
         let bogus = by_mic("XBOG");
         assert_eq!(bogus.registry_status, "unknown");

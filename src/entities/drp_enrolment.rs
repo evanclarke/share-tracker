@@ -1051,7 +1051,7 @@ mod tests {
         // The earlier reinvestment's historical snapshot is untouched.
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("1".to_string(), "0".to_string())
+            ("1".to_owned(), "0".to_owned())
         );
 
         // Re-saving the closed period is idempotent — nothing is paid twice.
@@ -1069,7 +1069,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(11)).await,
-            ("0".to_string(), "2.50".to_string())
+            ("0".to_owned(), "2.50".to_owned())
         );
     }
 
@@ -1093,7 +1093,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("5".to_string(), "0".to_string())
+            ("5".to_owned(), "0".to_owned())
         );
     }
 
@@ -1108,7 +1108,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await
@@ -1164,7 +1164,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Personal CHESS".to_string(),
+                name: "Personal CHESS".to_owned(),
             },
         )
         .await
@@ -1196,7 +1196,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("5".to_string(), "0".to_string())
+            ("5".to_owned(), "0".to_owned())
         );
     }
 
@@ -1232,14 +1232,14 @@ mod tests {
         db_upsert(&pool, &closed).await.unwrap();
         assert_eq!(
             residuals(&pool, TradeId(11)).await,
-            ("0".to_string(), "2.50".to_string())
+            ("0".to_owned(), "2.50".to_owned())
         );
 
         // … and correct it: the leftover is carried again, not lost.
         db_upsert(&pool, &open).await.unwrap();
         assert_eq!(
             residuals(&pool, TradeId(11)).await,
-            ("2.50".to_string(), "0".to_string()),
+            ("2.50".to_owned(), "0".to_owned()),
             "re-opening the period restores the carry it refunded"
         );
 
@@ -1260,11 +1260,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("0".to_string(), "1".to_string())
+            ("0".to_owned(), "1".to_owned())
         );
         assert_eq!(
             residuals(&pool, TradeId(11)).await,
-            ("2.50".to_string(), "0".to_string())
+            ("2.50".to_owned(), "0".to_owned())
         );
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("0".to_string(), "2".to_string())
+            ("0".to_owned(), "2".to_owned())
         );
 
         // The period cannot be deleted: it plainly produced a reinvestment,
@@ -1341,7 +1341,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("0".to_string(), "2".to_string()),
+            ("0".to_owned(), "2".to_owned()),
             "the trade belongs to the period its distribution went ex in"
         );
     }
@@ -1378,7 +1378,7 @@ mod tests {
         );
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("5.50".to_string(), "0".to_string()),
+            ("5.50".to_owned(), "0".to_owned()),
             "and leaves the reinvestment's residual chain untouched"
         );
 
@@ -1397,7 +1397,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             residuals(&pool, TradeId(10)).await,
-            ("0".to_string(), "5.50".to_string())
+            ("0".to_owned(), "5.50".to_owned())
         );
         // Closed, but still covering the reinvestment — still refused.
         assert!(matches!(
@@ -1416,7 +1416,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Personal CHESS".to_string(),
+                name: "Personal CHESS".to_owned(),
             },
         )
         .await
@@ -1678,7 +1678,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("overlaps"), "detail: {detail}");
     }
 
@@ -1718,7 +1718,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await

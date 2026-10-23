@@ -760,7 +760,7 @@ mod tests {
             .ticker("VAS")
             .name("Vanguard Australian Shares ETF")
             .amit(true)
-            .with(|l| l.isin = Some("AU0000VASAU4".to_string()))
+            .with(|l| l.isin = Some("AU0000VASAU4".to_owned()))
             .build()
     }
 
@@ -782,7 +782,7 @@ mod tests {
         let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "VAS");
         assert_eq!(got.exchange_mic.as_deref(), Some("XASX"));
-        assert_eq!(got.isin, Some("AU0000VASAU4".to_string()));
+        assert_eq!(got.isin, Some("AU0000VASAU4".to_owned()));
         assert!(got.amit);
     }
 
@@ -803,7 +803,7 @@ mod tests {
     async fn db_blank_ticker_and_name_are_refused() {
         let pool = test_pool().await;
         let mut blank_ticker = xtest();
-        blank_ticker.ticker = "   ".to_string();
+        blank_ticker.ticker = "   ".to_owned();
         assert!(matches!(
             db_upsert(&pool, &blank_ticker).await.unwrap_err(),
             UpsertError::BlankTicker
@@ -1140,7 +1140,7 @@ mod tests {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
         let mut updated = xtest();
-        updated.name = "Updated ETF".to_string();
+        updated.name = "Updated ETF".to_owned();
         updated.amit = false;
         db_upsert(&pool, &updated).await.unwrap();
         let got = db_get(&pool, ListingId(1)).await.unwrap().unwrap();
@@ -1156,7 +1156,7 @@ mod tests {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
         let mut renamed = xtest();
-        renamed.ticker = "VASX".to_string();
+        renamed.ticker = "VASX".to_owned();
         db_upsert(&pool, &renamed).await.unwrap();
         assert_eq!(
             db_get(&pool, ListingId(1)).await.unwrap().unwrap().ticker,
@@ -1175,14 +1175,14 @@ mod tests {
         crate::test_support::buy(1, 1).insert(&pool).await;
 
         let mut ticker_changed = xtest();
-        ticker_changed.ticker = "VASX".to_string();
+        ticker_changed.ticker = "VASX".to_owned();
         assert!(matches!(
             db_upsert(&pool, &ticker_changed).await.unwrap_err(),
             UpsertError::IdentityChangeRequiresRename
         ));
 
         let mut exchange_changed = xtest();
-        exchange_changed.exchange_mic = Some("XNYS".to_string());
+        exchange_changed.exchange_mic = Some("XNYS".to_owned());
         assert!(matches!(
             db_upsert(&pool, &exchange_changed).await.unwrap_err(),
             UpsertError::IdentityChangeRequiresRename
@@ -1190,7 +1190,7 @@ mod tests {
 
         // A same-identity edit (name only) is unaffected.
         let mut renamed_only = xtest();
-        renamed_only.name = "Renamed ETF".to_string();
+        renamed_only.name = "Renamed ETF".to_owned();
         db_upsert(&pool, &renamed_only).await.unwrap();
         assert_eq!(
             db_get(&pool, ListingId(1)).await.unwrap().unwrap().name,
@@ -1250,7 +1250,7 @@ mod tests {
             "USD"
         );
         let mut renamed_only = to_usd;
-        renamed_only.name = "Renamed".to_string();
+        renamed_only.name = "Renamed".to_owned();
         db_upsert(&pool, &renamed_only).await.unwrap();
     }
 
@@ -1290,7 +1290,7 @@ mod tests {
         // A name-only edit changes no stored figure.
         fresh(pool.clone()).await;
         let mut renamed = xtest();
-        renamed.name = "Renamed ETF".to_string();
+        renamed.name = "Renamed ETF".to_owned();
         db_upsert(&pool, &renamed).await.unwrap();
         assert!(!stale(pool.clone()).await);
 
@@ -1347,7 +1347,7 @@ mod tests {
             None
         );
         let mut with_symbol = xtest();
-        with_symbol.price_symbol = Some("VAS.AX".to_string());
+        with_symbol.price_symbol = Some("VAS.AX".to_owned());
         db_upsert(&pool, &with_symbol).await.unwrap();
         assert_eq!(
             db_get(&pool, ListingId(1))
@@ -1355,7 +1355,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .price_symbol,
-            Some("VAS.AX".to_string())
+            Some("VAS.AX".to_owned())
         );
     }
 
@@ -1377,7 +1377,7 @@ mod tests {
     async fn db_fk_constraint_rejects_unknown_exchange() {
         let pool = test_pool().await;
         let mut bad = xtest();
-        bad.exchange_mic = Some("XXXX".to_string());
+        bad.exchange_mic = Some("XXXX".to_owned());
         let UpsertError::Db(err) = db_upsert(&pool, &bad).await.unwrap_err() else {
             panic!("expected a DB error");
         };
@@ -1422,14 +1422,14 @@ mod tests {
         // 'DOGE' has no DigitalToken row in `currencies`: rejected, nothing
         // persisted (a Crypto listing's ticker is its token code).
         let mut bad = crypto();
-        bad.ticker = "DOGE".to_string();
+        bad.ticker = "DOGE".to_owned();
         assert!(matches!(
             db_upsert(&pool, &bad).await.unwrap_err(),
             UpsertError::UnrecognisedDigitalToken
         ));
         assert!(db_get(&pool, ListingId(2)).await.unwrap().is_none());
         // A fiat code is no better: BTC must be a *DigitalToken* row.
-        bad.ticker = "USD".to_string();
+        bad.ticker = "USD".to_owned();
         assert!(matches!(
             db_upsert(&pool, &bad).await.unwrap_err(),
             UpsertError::UnrecognisedDigitalToken
@@ -1446,7 +1446,7 @@ mod tests {
         let pool = test_pool().await;
         // A Crypto listing with an exchange...
         let mut bad = crypto();
-        bad.exchange_mic = Some("XASX".to_string());
+        bad.exchange_mic = Some("XASX".to_owned());
         assert!(matches!(
             db_upsert(&pool, &bad).await.unwrap_err(),
             UpsertError::CryptoWithExchange
@@ -1689,7 +1689,7 @@ mod tests {
                 }),
             )
             .await;
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("has no exchange"), "detail: {detail}");
         assert!(!detail.contains("CHECK"), "detail: {detail}");
 
@@ -1702,7 +1702,7 @@ mod tests {
                 }),
             )
             .await;
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("needs an exchange"), "detail: {detail}");
         assert!(!detail.contains("CHECK"), "detail: {detail}");
 
@@ -1716,7 +1716,7 @@ mod tests {
                 }),
             )
             .await;
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("digital-token"), "detail: {detail}");
         // …and it names the way out: the seeded list is two rows long, so a
         // token that is not BTC or ETH needs the ISO 24165 import first

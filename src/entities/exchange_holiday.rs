@@ -70,7 +70,7 @@ pub(crate) async fn db_list(
     let mut qb =
         sqlx::QueryBuilder::new("SELECT id, mic, holiday_date, name FROM exchange_holidays");
     http::FilterClauses::over(&mut qb)
-        .eq("mic", mic.map(str::to_string))
+        .eq("mic", mic.map(str::to_owned))
         .date_range("holiday_date", params.from, params.to);
     qb.push(" ORDER BY mic, holiday_date");
     qb.build_query_as().fetch_all(pool).await
@@ -407,9 +407,9 @@ mod tests {
         let pool = test_pool().await;
         let holiday = ExchangeHoliday {
             id: 0,
-            mic: "XASX".to_string(),
+            mic: "XASX".to_owned(),
             holiday_date: ymd(2030, 1, 1),
-            name: "New Year's Day".to_string(),
+            name: "New Year's Day".to_owned(),
         };
         db_upsert(&pool, &holiday).await.unwrap();
         let got = db_get(&pool, "XASX", ymd(2030, 1, 1))
@@ -425,12 +425,12 @@ mod tests {
         let pool = test_pool().await;
         let mut holiday = ExchangeHoliday {
             id: 0,
-            mic: "XASX".to_string(),
+            mic: "XASX".to_owned(),
             holiday_date: ymd(2030, 1, 1),
-            name: "New Year".to_string(),
+            name: "New Year".to_owned(),
         };
         db_upsert(&pool, &holiday).await.unwrap();
-        holiday.name = "New Year's Day".to_string();
+        holiday.name = "New Year's Day".to_owned();
         db_upsert(&pool, &holiday).await.unwrap();
         let got = db_get(&pool, "XASX", ymd(2030, 1, 1))
             .await
@@ -445,9 +445,9 @@ mod tests {
         let pool = test_pool().await;
         let holiday = ExchangeHoliday {
             id: 0,
-            mic: "ZZZZ".to_string(),
+            mic: "ZZZZ".to_owned(),
             holiday_date: ymd(2030, 1, 1),
-            name: "Nope".to_string(),
+            name: "Nope".to_owned(),
         };
         let err = db_upsert(&pool, &holiday).await.unwrap_err();
         assert!(
@@ -607,9 +607,9 @@ mod tests {
         };
         let flags = |d3: i64, d5: i64, d9: i64| {
             vec![
-                ("2026-06-03".to_string(), d3),
-                ("2026-06-05".to_string(), d5),
-                ("2026-06-09".to_string(), d9),
+                ("2026-06-03".to_owned(), d3),
+                ("2026-06-05".to_owned(), d5),
+                ("2026-06-09".to_owned(), d9),
             ]
         };
 
@@ -617,16 +617,16 @@ mod tests {
         // snapshot from it on was valued on a day the market never traded.
         let mut holiday = ExchangeHoliday {
             id: 0,
-            mic: "XASX".to_string(),
+            mic: "XASX".to_owned(),
             holiday_date: ymd(2026, 6, 5),
-            name: "Test Closure".to_string(),
+            name: "Test Closure".to_owned(),
         };
         db_upsert(&pool, &holiday).await.unwrap();
         assert_eq!(stale(pool.clone()).await, flags(0, 1, 1));
 
         // A name-only edit changes no figure.
         unstale(pool.clone()).await;
-        holiday.name = "Test Closure (renamed)".to_string();
+        holiday.name = "Test Closure (renamed)".to_owned();
         db_upsert(&pool, &holiday).await.unwrap();
         assert_eq!(stale(pool.clone()).await, flags(0, 0, 0));
 
@@ -753,9 +753,9 @@ mod tests {
             &pool,
             &ExchangeHoliday {
                 id: 0,
-                mic: "XASX".to_string(),
+                mic: "XASX".to_owned(),
                 holiday_date: ymd(2026, 4, 3),
-                name: "Good Friday".to_string(),
+                name: "Good Friday".to_owned(),
             },
         )
         .await

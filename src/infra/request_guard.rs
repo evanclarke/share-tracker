@@ -165,7 +165,7 @@ mod tests {
     }
 
     fn open() -> RequestGuard {
-        RequestGuard::new(AuthMode::Open, &["Bigbrain.lan".to_string()])
+        RequestGuard::new(AuthMode::Open, &["Bigbrain.lan".to_owned()])
     }
 
     #[test]

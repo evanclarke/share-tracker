@@ -29,13 +29,13 @@ impl QuoteStub {
         closes: &[(NaiveDate, &str)],
     ) -> Self {
         self.closes.insert(
-            symbol.to_string(),
+            symbol.to_owned(),
             closes
                 .iter()
                 .map(|(date, price)| FetchedClose {
                     date: *date,
                     price: price.parse().unwrap(),
-                    currency: currency.to_string().into(),
+                    currency: currency.to_owned().into(),
                 })
                 .collect(),
         );
@@ -53,7 +53,7 @@ impl QuoteStub {
             ListingId(listing_id),
             LatestQuote {
                 price: price.parse().unwrap(),
-                currency: currency.to_string().into(),
+                currency: currency.to_owned().into(),
                 as_of,
             },
         );
@@ -62,7 +62,7 @@ impl QuoteStub {
 
     pub fn failing(msg: &str) -> Self {
         QuoteStub {
-            fail: Some(FetchError::Other(msg.to_string())),
+            fail: Some(FetchError::Other(msg.to_owned())),
             ..Default::default()
         }
     }
@@ -111,7 +111,7 @@ impl PriceFetcher for QuoteStub {
     fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
         Box::pin(async move {
             if let Some(failure) = &self.fail {
-                return Err(failure.message().to_string());
+                return Err(failure.message().to_owned());
             }
             self.quotes
                 .get(&market.listing.id)

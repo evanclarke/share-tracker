@@ -214,7 +214,7 @@ mod tests {
     fn an_event_is_dated_by_its_own_candle_and_kept_if_it_lands_in_the_window() {
         let joined = candles(&[(ymd(2024, 12, 31), ymd(2025, 1, 1))]);
         let out = place(
-            [(ymd(2024, 12, 31), dec("0.0187"), "AUD".to_string())],
+            [(ymd(2024, 12, 31), dec("0.0187"), "AUD".to_owned())],
             &joined,
             ymd(2024, 1, 1),
             ymd(2025, 6, 30),
@@ -234,7 +234,7 @@ mod tests {
         let out = place(
             // Four days before the window opens: inside the five-day margin
             // the request was widened by, outside what the job asked for.
-            [(ymd(2023, 12, 28), dec("0.10"), "AUD".to_string())],
+            [(ymd(2023, 12, 28), dec("0.10"), "AUD".to_owned())],
             &candles(&[]),
             ymd(2024, 1, 1),
             ymd(2024, 12, 31),
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn an_unjoinable_event_inside_the_window_is_still_reported() {
         let out = place(
-            [(ymd(2024, 6, 30), dec("0.10"), "AUD".to_string())],
+            [(ymd(2024, 6, 30), dec("0.10"), "AUD".to_owned())],
             &candles(&[]),
             ymd(2024, 1, 1),
             ymd(2024, 12, 31),
@@ -270,7 +270,7 @@ mod tests {
         let boundary = ymd(2023, 12, 31);
         assert_eq!(
             place(
-                [(boundary, dec("0.10"), "AUD".to_string())],
+                [(boundary, dec("0.10"), "AUD".to_owned())],
                 &candles(&[]),
                 ymd(2024, 1, 1),
                 ymd(2024, 12, 31),
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn a_joinable_event_dated_outside_the_window_is_dropped_silently() {
         let out = place(
-            [(ymd(2023, 12, 31), dec("0.10"), "AUD".to_string())],
+            [(ymd(2023, 12, 31), dec("0.10"), "AUD".to_owned())],
             &candles(&[(ymd(2023, 12, 31), ymd(2023, 12, 31))]),
             ymd(2024, 1, 1),
             ymd(2024, 12, 31),

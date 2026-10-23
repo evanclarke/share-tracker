@@ -437,7 +437,7 @@ pub fn panic_response(err: Box<dyn std::any::Any + Send + 'static>) -> Response 
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
         .or_else(|| err.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "panic with a non-string payload".to_string());
+        .unwrap_or_else(|| "panic with a non-string payload".to_owned());
     tracing::error!(panic = %message, "request handler panicked");
     StatusCode::INTERNAL_SERVER_ERROR.into_response()
 }
@@ -956,7 +956,7 @@ fn dependant_label(table: &str) -> String {
     DEPENDANT_LABELS
         .iter()
         .find(|(name, _)| *name == table)
-        .map(|(_, label)| (*label).to_string())
+        .map(|(_, label)| (*label).to_owned())
         .unwrap_or_else(|| table.replace('_', " "))
 }
 
@@ -1005,7 +1005,7 @@ where
             // `to` is NULL when the foreign key names no parent column, which
             // means the parent's primary key — the column the delete keyed on.
             let to: Option<String> = fk.try_get("to")?;
-            let to = to.unwrap_or_else(|| key_column.to_string());
+            let to = to.unwrap_or_else(|| key_column.to_owned());
             clauses.push(format!(
                 "\"{from}\" IN (SELECT \"{to}\" FROM \"{table}\" WHERE \"{key_column}\" = ?)"
             ));
@@ -1104,7 +1104,7 @@ impl From<sqlx::Error> for ApiError {
         if let Some(db) = err.as_database_error() {
             if is_busy(db) {
                 return ApiError::Busy {
-                    body: BUSY_BODY.to_string(),
+                    body: BUSY_BODY.to_owned(),
                     source: err.into(),
                 };
             }
@@ -1114,7 +1114,7 @@ impl From<sqlx::Error> for ApiError {
             let detail = db.message();
             let body = match db.kind() {
                 ErrorKind::ForeignKeyViolation => {
-                    "the request refers to a record that does not exist".to_string()
+                    "the request refers to a record that does not exist".to_owned()
                 }
                 ErrorKind::CheckViolation => {
                     format!("a value falls outside its allowed set ({detail})")
@@ -1229,7 +1229,7 @@ fn error_cases() -> Vec<(&'static str, Response, StatusCode, Option<&'static str
         ),
         (
             "413",
-            ApiError::PayloadTooLarge("the upload is over the limit".to_string()).into_response(),
+            ApiError::PayloadTooLarge("the upload is over the limit".to_owned()).into_response(),
             StatusCode::PAYLOAD_TOO_LARGE,
             Some(PLAIN),
         ),
@@ -1266,7 +1266,7 @@ fn error_cases() -> Vec<(&'static str, Response, StatusCode, Option<&'static str
         (
             "503",
             ApiError::Busy {
-                body: BUSY_BODY.to_string(),
+                body: BUSY_BODY.to_owned(),
                 source: "database is locked (code: 5)".into(),
             }
             .into_response(),
@@ -1341,7 +1341,7 @@ mod tests {
         let sql = |filter: fn(&mut FilterClauses<'_>)| {
             let mut qb = QueryBuilder::<Sqlite>::new("SELECT id FROM trades");
             filter(&mut FilterClauses::over(&mut qb));
-            qb.sql().as_str().to_string()
+            qb.sql().as_str().to_owned()
         };
         assert_eq!(sql(|_| {}), "SELECT id FROM trades WHERE 1=1");
         assert_eq!(
@@ -1492,7 +1492,7 @@ mod tests {
         assert_eq!(
             still_referenced(
                 "listing",
-                &[("closing_prices".to_string(), 2), ("trades".to_string(), 1)]
+                &[("closing_prices".to_owned(), 2), ("trades".to_owned(), 1)]
             ),
             "this listing is still referenced by closing prices (2), trades (1) — remove those \
              records first"
@@ -1542,7 +1542,7 @@ mod tests {
             let sent = resp
                 .headers()
                 .get(CONTENT_TYPE)
-                .map(|value| value.to_str().unwrap().to_string());
+                .map(|value| value.to_str().unwrap().to_owned());
             assert_eq!(sent.as_deref(), content_type, "{label}: wrong media type");
             // …and the shape the table claims: an entry with no content type is
             // an *empty* body, not a text one that merely omits its header.
@@ -1930,7 +1930,7 @@ mod tests {
                             .rsplit(char::is_whitespace)
                             .next()
                             .unwrap_or("")
-                            .to_string();
+                            .to_owned();
                         let ty: String = trimmed[colon + 1..]
                             .trim()
                             .trim_end_matches(',')
@@ -1988,7 +1988,7 @@ mod tests {
                         if let Some(name) = name.rsplit("::").next()
                             && !name.is_empty()
                         {
-                            found.push(name.to_string());
+                            found.push(name.to_owned());
                         }
                     }
                 }

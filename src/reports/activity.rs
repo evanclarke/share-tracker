@@ -420,7 +420,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::Transfers,
                     id: t.id,
-                    event: "Transfer between accounts".to_string(),
+                    event: "Transfer between accounts".to_owned(),
                     detail,
                     holding_account_id: None,
                     quantity: None,
@@ -472,7 +472,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::Income,
                     id: i.id,
-                    event: event.to_string(),
+                    event: event.to_owned(),
                     detail,
                     holding_account_id: Some(i.holding_account_id),
                     quantity: None,
@@ -491,7 +491,7 @@ impl Sources {
             rank: 1,
             record: RecordTable::AmmaStatements,
             id: a.id,
-            event: "AMMA statement".to_string(),
+            event: "AMMA statement".to_owned(),
             detail: format!(
                 // The FY the statement is attributed to, by the one shared
                 // rule — the same bucket its figures land in everywhere else.
@@ -511,7 +511,7 @@ impl Sources {
             rank: 1,
             record: RecordTable::EssStatements,
             id: s.id,
-            event: "ESS statement".to_string(),
+            event: "ESS statement".to_owned(),
             detail: format!(
                 "taxing point: {} share(s) at market value {} {}",
                 s.quantity, s.market_value_per_share, s.currency
@@ -540,7 +540,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::RightsSales,
                     id: rs.id,
-                    event: "Rights sale/lapse".to_string(),
+                    event: "Rights sale/lapse".to_owned(),
                     detail: format!(
                         "{} right(s) at {} {} per right (share holding untouched)",
                         rs.units, rs.proceeds_per_right, rs.currency
@@ -573,7 +573,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::ListingRenames,
                     id: r.id,
-                    event: "Ticker/exchange change".to_string(),
+                    event: "Ticker/exchange change".to_owned(),
                     detail,
                     holding_account_id: None,
                     quantity: None,
@@ -594,7 +594,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::DrpEnrolments,
                     id: e.id,
-                    event: "DRP enrolment".to_string(),
+                    event: "DRP enrolment".to_owned(),
                     detail: format!("residual handling: {:?}", e.residual_handling),
                     holding_account_id: Some(e.holding_account_id),
                     quantity: None,
@@ -606,7 +606,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::DrpEnrolments,
                     id: e.id,
-                    event: "DRP unenrolment".to_string(),
+                    event: "DRP unenrolment".to_owned(),
                     detail: format!("enrolled since {}", e.enrolment_date),
                     holding_account_id: Some(e.holding_account_id),
                     quantity: None,
@@ -634,7 +634,7 @@ impl Sources {
                     rank: 1,
                     record: RecordTable::InvestmentExpenses,
                     id: e.id,
-                    event: "Investment expense".to_string(),
+                    event: "Investment expense".to_owned(),
                     detail,
                     holding_account_id: e.holding_account_id,
                     quantity: None,
@@ -767,7 +767,7 @@ pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<TradeId>) -> String 
     };
     match qualifier {
         Some(q) => format!("{base} ({q})"),
-        None => base.to_string(),
+        None => base.to_owned(),
     }
 }
 
@@ -786,7 +786,7 @@ fn describe_action(
             currency,
             record_date,
         } => (
-            "Return of capital".to_string(),
+            "Return of capital".to_owned(),
             // The row is dated by the payment; the record date, when recorded,
             // is what decided which parcels the payment reached, so it belongs
             // in the line explaining the row.
@@ -808,7 +808,7 @@ fn describe_action(
                 "Share split"
             };
             (
-                label.to_string(),
+                label.to_owned(),
                 format!("{split_new_units}-for-{split_old_units}"),
                 Some((*split_new_units, *split_old_units)),
             )
@@ -817,7 +817,7 @@ fn describe_action(
             bonus_units,
             bonus_held_units,
         } => (
-            "Bonus issue".to_string(),
+            "Bonus issue".to_owned(),
             format!("{bonus_units} bonus unit(s) per {bonus_held_units} held"),
             Some((*bonus_held_units + *bonus_units, *bonus_held_units)),
         ),
@@ -828,7 +828,7 @@ fn describe_action(
             currency,
             renounceable,
         } => (
-            "Rights issue".to_string(),
+            "Rights issue".to_owned(),
             format!(
                 "{rights_units}-for-{rights_held_units}, exercisable at {exercise_price} \
                  {currency} ({})",
@@ -846,7 +846,7 @@ fn describe_action(
             currency,
             ..
         } => (
-            "Buy-back offer".to_string(),
+            "Buy-back offer".to_owned(),
             format!("{buyback_price} {currency} per unit (dividend component {buyback_dividend})"),
             None,
         ),
@@ -866,7 +866,7 @@ fn describe_action(
                 write!(detail, " plus {cash} {cur} cash per unit")
                     .expect("writing to a String cannot fail");
             }
-            ("Scrip-for-scrip takeover".to_string(), detail, None)
+            ("Scrip-for-scrip takeover".to_owned(), detail, None)
         }
         ActionKind::Demerger {
             demerger_listing_id,
@@ -875,7 +875,7 @@ fn describe_action(
             demerger_cost_base_pct,
             ..
         } => (
-            "Demerger".to_string(),
+            "Demerger".to_owned(),
             format!(
                 "{demerger_new_units} unit(s) of {} per \
                  {demerger_held_units} held; {demerger_cost_base_pct}% of cost base",
@@ -884,13 +884,13 @@ fn describe_action(
             None,
         ),
         ActionKind::WorthlessShares { worthless_event } => (
-            "Worthless shares".to_string(),
+            "Worthless shares".to_owned(),
             match worthless_event {
                 WorthlessEvent::G3Declaration => {
-                    "liquidator/administrator declaration (CGT event G3)".to_string()
+                    "liquidator/administrator declaration (CGT event G3)".to_owned()
                 }
                 WorthlessEvent::C2Cancellation => {
-                    "deregistration/cancellation (CGT event C2)".to_string()
+                    "deregistration/cancellation (CGT event C2)".to_owned()
                 }
             },
             None,
@@ -1076,7 +1076,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Personal".to_string(),
+                name: "Personal".to_owned(),
             },
         )
         .await
@@ -1317,7 +1317,7 @@ mod tests {
                 gross_amount: None,
                 deductible_percentage: None,
                 currency: "AUD".into(),
-                description: Some("adviser".to_string()),
+                description: Some("adviser".to_owned()),
                 listing_id: Some(ListingId(1)),
                 holding_account_id: None,
             },
@@ -1538,13 +1538,13 @@ mod tests {
         crate::entities::exchange::db_upsert(
             &pool,
             &crate::entities::exchange::Exchange {
-                mic: "CXAX".to_string(),
-                name: "Second AUD market".to_string(),
-                country: "Australia".to_string(),
+                mic: "CXAX".to_owned(),
+                name: "Second AUD market".to_owned(),
+                country: "Australia".to_owned(),
                 currency: "AUD".into(),
-                timezone: "Australia/Sydney".to_string(),
+                timezone: "Australia/Sydney".to_owned(),
                 settlement_days: 2,
-                close_time: "16:00".to_string(),
+                close_time: "16:00".to_owned(),
             },
         )
         .await
@@ -1559,8 +1559,8 @@ mod tests {
             ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 6, 1),
-                ticker: "LAR".to_string(),
-                exchange_mic: Some("CXAX".to_string()),
+                ticker: "LAR".to_owned(),
+                exchange_mic: Some("CXAX".to_owned()),
                 name: None,
                 price_symbol: None,
                 note: None,
@@ -1618,7 +1618,7 @@ mod tests {
             listing_id,
             &crate::entities::listing_rename::RenameBody {
                 effective_date,
-                ticker: ticker.to_string(),
+                ticker: ticker.to_owned(),
                 exchange_mic: None,
                 name: None,
                 price_symbol: None,

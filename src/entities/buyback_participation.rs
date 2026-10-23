@@ -883,7 +883,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Personal CHESS".to_string(),
+                name: "Personal CHESS".to_owned(),
             },
         )
         .await
@@ -956,7 +956,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Personal CHESS".to_string(),
+                name: "Personal CHESS".to_owned(),
             },
         )
         .await
@@ -999,7 +999,7 @@ mod tests {
                 .post("/corporate_actions/10/participate", &body)
                 .await;
             assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-            let text = resp.text().to_string();
+            let text = resp.text().to_owned();
             assert!(
                 text.contains(expected_text),
                 "expected the 422 body to say {expected_text:?}, got {text:?}"

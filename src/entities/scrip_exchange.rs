@@ -674,7 +674,7 @@ mod tests {
                     scrip_old_units: old.parse().unwrap(),
                     scrip_cash_per_unit: cash.map(|(c, _)| c.parse().unwrap()),
                     scrip_market_value: cash.map(|(_, mv)| mv.parse().unwrap()),
-                    scrip_cash_currency: cash.map(|_| "AUD".to_string()).map(CurrencyCode::from),
+                    scrip_cash_currency: cash.map(|_| "AUD".to_owned()).map(CurrencyCode::from),
                 },
             },
         )
@@ -1421,7 +1421,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await

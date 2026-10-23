@@ -217,7 +217,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<Currency>, sqlx::Error> {
 
 #[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, code: &str) -> Result<Option<Currency>, sqlx::Error> {
-    http::crud_get(pool, code.to_string()).await
+    http::crud_get(pool, code.to_owned()).await
 }
 
 /// Insert or update a currency by `code`. A currency's name / minor units can be
@@ -326,7 +326,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                     cur_tag = None;
                     entry = CcyNtry::default();
                 } else if in_entry {
-                    cur_tag = Some(tag.to_string());
+                    cur_tag = Some(tag.to_owned());
                     pending.clear();
                 }
             }
@@ -353,7 +353,7 @@ pub fn parse_iso4217(content: &str) -> Result<Vec<Currency>, ImportError> {
                         out.push(currency);
                     }
                 } else if cur_tag.as_deref() == Some(tag) {
-                    let text = pending.trim().to_string();
+                    let text = pending.trim().to_owned();
                     match tag {
                         "CcyNm" => entry.name = Some(text),
                         "Ccy" => entry.ccy = Some(text),
@@ -401,7 +401,7 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
             .and_then(|h| h.get("DTI"))
             .and_then(Value::as_str)
         {
-            Some(d) if !d.is_empty() => d.to_string(),
+            Some(d) if !d.is_empty() => d.to_owned(),
             _ => continue, // not a token record (no DTI) — skip like the DTIF tooling
         };
         if !seen.insert(dti.clone()) {
@@ -411,7 +411,7 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
         let name = informative
             .and_then(|i| i.get("LongName"))
             .and_then(Value::as_str)
-            .map(str::to_string)
+            .map(str::to_owned)
             .unwrap_or_else(|| dti.clone());
         let short_name = informative
             .and_then(|i| i.get("ShortNames"))
@@ -440,10 +440,10 @@ pub fn parse_iso24165(content: &str) -> Result<Vec<Currency>, ImportError> {
 /// a bare string.
 fn first_short_name(value: &Value) -> Option<String> {
     fn one(v: &Value) -> Option<String> {
-        v.as_str().map(str::to_string).or_else(|| {
+        v.as_str().map(str::to_owned).or_else(|| {
             v.get("ShortName")
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(str::to_owned)
         })
     }
     match value {
@@ -504,7 +504,7 @@ pub async fn import_feeds(
     let mut summary = import_from_content(pool, fiat).await?;
     match tokens {
         Some(content) => summary.merge(&import_from_content(pool, content).await?),
-        None => summary.skipped = Some(TOKEN_FEED_NOT_CONFIGURED.to_string()),
+        None => summary.skipped = Some(TOKEN_FEED_NOT_CONFIGURED.to_owned()),
     }
     Ok(summary)
 }
@@ -675,10 +675,10 @@ mod tests {
 
     fn aud() -> Currency {
         Currency {
-            code: "AUD".to_string(),
+            code: "AUD".to_owned(),
             kind: CurrencyKind::Fiat,
-            numeric_code: Some("036".to_string()),
-            name: "Australian Dollar".to_string(),
+            numeric_code: Some("036".to_owned()),
+            name: "Australian Dollar".to_owned(),
             short_name: None,
             minor_units: Some(2),
             source: CurrencySource::Iso4217,
@@ -724,7 +724,7 @@ mod tests {
         let pool = test_pool().await;
         db_upsert(&pool, &aud()).await.unwrap();
         let mut renamed = aud();
-        renamed.name = "Aussie Dollar".to_string();
+        renamed.name = "Aussie Dollar".to_owned();
         db_upsert(&pool, &renamed).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM currencies WHERE code = 'AUD'")
             .fetch_one(&pool)
@@ -777,7 +777,7 @@ mod tests {
 
         let eur = &parsed[1];
         assert_eq!(eur.code, "EUR");
-        assert_eq!(eur.numeric_code, Some("978".to_string()));
+        assert_eq!(eur.numeric_code, Some("978".to_owned()));
 
         // Gold: N.A. minor units → None.
         let xau = &parsed[2];
@@ -828,12 +828,12 @@ mod tests {
         assert_eq!(btc.code, "4H95J0R2X");
         assert_eq!(btc.kind, CurrencyKind::DigitalToken);
         assert_eq!(btc.name, "Bitcoin");
-        assert_eq!(btc.short_name, Some("BTC".to_string()));
+        assert_eq!(btc.short_name, Some("BTC".to_owned()));
         assert_eq!(btc.numeric_code, None);
         assert_eq!(btc.source, CurrencySource::Iso24165);
 
         // ShortNames given as bare strings still resolves.
-        assert_eq!(parsed[1].short_name, Some("ETH".to_string()));
+        assert_eq!(parsed[1].short_name, Some("ETH".to_owned()));
     }
 
     #[test]
@@ -1087,7 +1087,7 @@ mod tests {
         let half = ImportSummary {
             fiat: Some(178),
             tokens: None,
-            skipped: Some(TOKEN_FEED_NOT_CONFIGURED.to_string()),
+            skipped: Some(TOKEN_FEED_NOT_CONFIGURED.to_owned()),
         };
         let json = serde_json::to_value(&half).unwrap();
         assert_eq!(json["fiat"], 178);

@@ -189,7 +189,7 @@ pub async fn db_franking_at_risk(
             } else {
                 "denied"
             }
-            .to_string(),
+            .to_owned(),
         });
     }
     alerts.sort_by_key(|a| (a.ex_date, a.income_id));
@@ -243,7 +243,7 @@ pub async fn db_franking_what_if(
             } else {
                 "denied"
             }
-            .to_string(),
+            .to_owned(),
         });
     }
     alerts.sort_by_key(|a| (a.ex_date, a.income_id));
@@ -275,9 +275,7 @@ async fn what_if(
     Query(req): Query<WhatIfRequest>,
 ) -> Result<Json<Vec<FrankingWhatIfAlert>>, ApiError> {
     if req.units <= Decimal::ZERO {
-        return Err(ApiError::Unprocessable(
-            "units must be positive".to_string(),
-        ));
+        return Err(ApiError::Unprocessable("units must be positive".to_owned()));
     }
     db_franking_what_if(&pool, &req)
         .await

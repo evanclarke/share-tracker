@@ -188,7 +188,7 @@ impl PriceFetcher for YahooFetcher {
                     Err(e) => {
                         let message = format!("yahoo quote for {} failed: {e}", chunk.join(", "));
                         for &symbol in chunk {
-                            failures.insert(symbol.to_string(), message.clone());
+                            failures.insert(symbol.to_owned(), message.clone());
                         }
                     }
                 }

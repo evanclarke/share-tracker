@@ -351,9 +351,9 @@ mod tests {
         let entry = ScheduleEntry {
             line: 1,
             cron,
-            expr: "30 3 1 6 *".to_string(),
+            expr: "30 3 1 6 *".to_owned(),
             tz: None,
-            name: "fake".to_string(),
+            name: "fake".to_owned(),
         };
         tokio::spawn(run_entry(pool, entry, job, clock));
         // Paused time auto-advances through the loop's sleeps; run well past
@@ -681,7 +681,7 @@ mod tests {
                         "preference": false,
                     });
                     let resp = app.put(format!("/listings/{id}"), &body).await;
-                    (id, resp.status, resp.text().to_string())
+                    (id, resp.status, resp.text().to_owned())
                 }));
             }
             for write in writes {
@@ -1156,7 +1156,7 @@ mod tests {
             "backup",
             job,
             JobParams {
-                suffix: Some("pre-9.9.9".to_string()),
+                suffix: Some("pre-9.9.9".to_owned()),
                 skip_command: true,
             },
         )
@@ -1328,9 +1328,9 @@ mod tests {
         let pool = test_pool().await;
         let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
         jobs.insert(
-            "always-fails".to_string(),
+            "always-fails".to_owned(),
             RegisteredJob::from_fn(JobTrigger::ManualOnly, |_| async {
-                Err("could not fetch the RBA FX rate feed: connection refused".to_string())
+                Err("could not fetch the RBA FX rate feed: connection refused".to_owned())
             }),
         );
         let reg: JobRegistry = Arc::new(jobs);
@@ -1464,7 +1464,7 @@ mod tests {
         let (reg, pool, _dir, _path) = test_registry().await;
         let note = "imported 178 ISO 4217 fiat currencies; ISO 24165 digital token feed skipped";
         let half = RegisteredJob::from_fn(JobTrigger::Scheduled, move |_| async move {
-            Ok(Some(note.to_string()))
+            Ok(Some(note.to_owned()))
         });
         // The run itself succeeds: POST /jobs/{name} would answer 204.
         run_job(&pool, "currency-import", &half, JobParams::default())
@@ -1828,10 +1828,10 @@ mod tests {
         assert_eq!(
             rows[0],
             (
-                "backup".to_string(),
-                "2026-06-01T00:00:00Z".to_string(),
+                "backup".to_owned(),
+                "2026-06-01T00:00:00Z".to_owned(),
                 false,
-                Some("boom".to_string())
+                Some("boom".to_owned())
             )
         );
         assert_eq!(rows[1].0, "price-import");
@@ -1885,18 +1885,18 @@ mod tests {
             vec![
                 (
                     7,
-                    "backup".to_string(),
-                    "2026-06-01T00:00:00Z".to_string(),
-                    Some("2026-06-01T00:00:01Z".to_string()),
-                    "failed".to_string(),
-                    Some("boom".to_string()),
+                    "backup".to_owned(),
+                    "2026-06-01T00:00:00Z".to_owned(),
+                    Some("2026-06-01T00:00:01Z".to_owned()),
+                    "failed".to_owned(),
+                    Some("boom".to_owned()),
                 ),
                 (
                     9,
-                    "price-import".to_string(),
-                    "2026-06-02T00:00:00Z".to_string(),
-                    Some("2026-06-02T00:00:01Z".to_string()),
-                    "ok".to_string(),
+                    "price-import".to_owned(),
+                    "2026-06-02T00:00:00Z".to_owned(),
+                    Some("2026-06-02T00:00:01Z".to_owned()),
+                    "ok".to_owned(),
                     None,
                 ),
             ],
@@ -2031,7 +2031,7 @@ mod tests {
         let done = finished.clone();
         let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
         jobs.insert(
-            "slow".to_string(),
+            "slow".to_owned(),
             RegisteredJob::from_fn(JobTrigger::ManualOnly, move |_| {
                 let channels = channels.clone();
                 let done = done.clone();
@@ -2095,7 +2095,7 @@ mod tests {
         assert_eq!(err, "job panicked: the feed parser hit an impossible row");
         assert_eq!(
             latest_run(&pool, "flaky").await,
-            Some(("failed".to_string(), Some(err)))
+            Some(("failed".to_owned(), Some(err)))
         );
 
         // The lock was released, so this neither deadlocks nor fails.
@@ -2119,7 +2119,7 @@ mod tests {
         let pool = test_pool().await;
         let mut jobs: HashMap<String, Arc<RegisteredJob>> = HashMap::new();
         jobs.insert(
-            "panics".to_string(),
+            "panics".to_owned(),
             RegisteredJob::from_fn(JobTrigger::ManualOnly, |_| async {
                 panic!("{}", format!("index {} out of range", 7))
             }),
@@ -2162,9 +2162,9 @@ mod tests {
         let entry = ScheduleEntry {
             line: 1,
             cron: Cron::from_str("* * * * *").unwrap(),
-            expr: "* * * * *".to_string(),
+            expr: "* * * * *".to_owned(),
             tz: None,
-            name: "flaky".to_string(),
+            name: "flaky".to_owned(),
         };
         let looping = tokio::spawn(run_entry(pool, entry, job, clock));
         // Fires at 00:01 (panics) and 00:02, 00:03 (succeed).

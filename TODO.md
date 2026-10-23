@@ -163,7 +163,8 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
     `exchange_holiday.rs` clean-up below); `cast_possible_truncation` is done too (with the
     `as`-cast clean-up below, test code included); `format_push_string` is done too (with the
     string-building clean-up below, test code included); `needless_for_each` is enabled too, an
-    extra lint beyond this list (with the `for_each` clean-up below, test code included); the
+    extra lint beyond this list (with the `for_each` clean-up below, test code included);
+    `str_to_string` is done too (with the `to_owned` clean-up below, test code included); the
     remaining lints are still open
 
 ## Google Rust style guide pass (2026-10-23) — mechanical clean-ups
@@ -206,7 +207,12 @@ Each closed by the lint named in the section above once it is enabled and clean.
     a block-bodied closure, so these four expression-bodied ones were converted by hand. Test:
     `clippy::needless_for_each = "warn"` in `Cargo.toml`, enforced by CI's
     `cargo clippy --all-targets -- -D warnings` (mutation-checked)
-- [ ] 22 `.to_string()` calls on `&str` → `to_owned()` (`clippy::str_to_string`, auto-fixable)
+- [x] 22 `.to_string()` calls on `&str` → `to_owned()` (`clippy::str_to_string`, auto-fixable)
+  - Done 2026-10-23: the lint found far more than 22 — 162 in production code and 566 more in
+    test code (728 in all, across 100 files), every one a `.to_string()` → `.to_owned()` or
+    `ToString::to_string` → `str::to_owned` applied by `cargo clippy --fix`; test code is held to
+    it too, the fix being purely mechanical. Test: `clippy::str_to_string = "warn"` in
+    `Cargo.toml`, enforced by CI's `cargo clippy --all-targets -- -D warnings` (mutation-checked)
 - [ ] Nine by-value arguments never consumed (e.g. `config.rs:232`, `decimal.rs:286` → `&str`;
   `http.rs:425`; `scheduler/registry.rs:215`; `amit_adjustment.rs:566`; `trade/checks.rs:330`) and
   the redundant clone at `scheduler/registry.rs:402`

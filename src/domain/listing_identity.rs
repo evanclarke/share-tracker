@@ -166,7 +166,7 @@ impl RenameHistory {
             date,
             Identity {
                 from: None,
-                ticker: current_ticker.to_string(),
+                ticker: current_ticker.to_owned(),
                 exchange_mic: None,
             },
         )
@@ -226,8 +226,8 @@ mod tests {
     fn ident(ticker: &str, mic: Option<&str>) -> Identity {
         Identity {
             from: None,
-            ticker: ticker.to_string(),
-            exchange_mic: mic.map(str::to_string),
+            ticker: ticker.to_owned(),
+            exchange_mic: mic.map(str::to_owned),
         }
     }
 
@@ -239,7 +239,7 @@ mod tests {
         let history = RenameHistory::load(&mut conn).await.unwrap();
         assert_eq!(
             history.ticker_as_at(ListingId(1), ymd(2024, 1, 1), "VAS"),
-            "VAS".to_string()
+            "VAS".to_owned()
         );
     }
 

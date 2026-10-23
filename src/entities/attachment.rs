@@ -370,7 +370,7 @@ async fn upload(
         .map_err(|_| bad_request("the multipart upload is malformed"))?
     {
         // Take an owned name so the field can be consumed in the arm below.
-        let name = field.name().map(str::to_string);
+        let name = field.name().map(str::to_owned);
         match name.as_deref() {
             Some("trade_id") => trade_id = read_owner_field(field).await?.map(TradeId),
             Some("income_id") => income_id = read_owner_field(field).await?,
@@ -379,8 +379,8 @@ async fn upload(
             Some("interest_income_id") => interest_income_id = read_owner_field(field).await?,
             Some("corporate_action_id") => corporate_action_id = read_owner_field(field).await?,
             Some("file") => {
-                let filename = field.file_name().unwrap_or("attachment").to_string();
-                let declared = field.content_type().map(str::to_string);
+                let filename = field.file_name().unwrap_or("attachment").to_owned();
+                let declared = field.content_type().map(str::to_owned);
                 let bytes = field
                     .bytes()
                     .await
@@ -444,7 +444,7 @@ async fn upload(
     let id = db_insert(&pool, &new).await.map_err(ApiError::from)?;
     let stored = db_get(&pool, id)
         .await?
-        .ok_or_else(|| ApiError::internal("the stored attachment row vanished".to_string()))?;
+        .ok_or_else(|| ApiError::internal("the stored attachment row vanished".to_owned()))?;
     Ok(Created(stored))
 }
 
@@ -648,10 +648,10 @@ mod tests {
                 ess_statement_id,
                 interest_income_id: None,
                 corporate_action_id: None,
-                filename: name.to_string(),
+                filename: name.to_owned(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
-                uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                uploaded_at: "2024-01-01T00:00:00Z".to_owned(),
                 content: b"x",
             },
         )
@@ -718,10 +718,10 @@ mod tests {
                 ess_statement_id: None,
                 interest_income_id: None,
                 corporate_action_id: None,
-                filename: "conf.pdf".to_string(),
+                filename: "conf.pdf".to_owned(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(content),
-                uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                uploaded_at: "2024-01-01T00:00:00Z".to_owned(),
                 content,
             },
         )
@@ -937,10 +937,10 @@ mod tests {
                     ess_statement_id: e,
                     interest_income_id: i,
                     corporate_action_id: a,
-                    filename: "x.pdf".to_string(),
+                    filename: "x.pdf".to_owned(),
                     content_type: ContentType::Pdf,
                     checksum: checksum_hex(b"x"),
-                    uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                    uploaded_at: "2024-01-01T00:00:00Z".to_owned(),
                     content: b"x",
                 },
             )
@@ -1085,7 +1085,7 @@ mod tests {
         let trade_id = insert_trade(&pool).await;
         // The guard runs before any lookup, so the other owners' ids need not
         // exist — only that the filter is seen.
-        let mut queries = vec!["include_linked=true".to_string()];
+        let mut queries = vec!["include_linked=true".to_owned()];
         for owner in [
             "income_id",
             "amma_statement_id",
@@ -1173,10 +1173,10 @@ mod tests {
                     ess_statement_id: None,
                     interest_income_id: None,
                     corporate_action_id: None,
-                    filename: name.to_string(),
+                    filename: name.to_owned(),
                     content_type: ContentType::Pdf,
                     checksum: checksum_hex(b"x"),
-                    uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                    uploaded_at: "2024-01-01T00:00:00Z".to_owned(),
                     content: b"x",
                 },
             )
@@ -1190,7 +1190,7 @@ mod tests {
             .await;
         assert_eq!(resp.status, StatusCode::OK);
         // The JSON carries metadata fields but never a "content" key.
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(
             !text.contains("\"content\""),
             "list must not include the blob"
@@ -1213,10 +1213,10 @@ mod tests {
                 ess_statement_id: None,
                 interest_income_id: None,
                 corporate_action_id: None,
-                filename: "x.pdf".to_string(),
+                filename: "x.pdf".to_owned(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
-                uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                uploaded_at: "2024-01-01T00:00:00Z".to_owned(),
                 content: b"x",
             },
         )
@@ -1244,10 +1244,10 @@ mod tests {
                 ess_statement_id: None,
                 interest_income_id: None,
                 corporate_action_id: None,
-                filename: "x.pdf".to_string(),
+                filename: "x.pdf".to_owned(),
                 content_type: ContentType::Pdf,
                 checksum: checksum_hex(b"x"),
-                uploaded_at: "2024-01-01T00:00:00Z".to_string(),
+                uploaded_at: "2024-01-01T00:00:00Z".to_owned(),
                 content: b"x",
             },
         )

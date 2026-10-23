@@ -64,7 +64,7 @@ pub async fn fetch_live_aud_prices(
     // fetcher to it here rather than letting `zip` drop the tail, which would
     // leave a held listing missing from the valuation with nothing said.
     quotes.resize_with(markets.len(), || {
-        Err("price source returned no result for this listing".to_string())
+        Err("price source returned no result for this listing".to_owned())
     });
     for ((id, market), quote) in quoted_ids.into_iter().zip(&markets).zip(quotes) {
         let result = match quote {
@@ -150,7 +150,7 @@ pub async fn resolve_live_prices(
         Some(fetcher) => fetch_live_aud_prices(pool, fetcher, &ids).await,
         None => Ok(ids
             .into_iter()
-            .map(|id| (id, Err("live price source unavailable".to_string())))
+            .map(|id| (id, Err("live price source unavailable".to_owned())))
             .collect()),
     }
 }

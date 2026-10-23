@@ -156,8 +156,8 @@ pub async fn db_attachments(pool: &SqlitePool) -> Result<Vec<AttachmentIndexRow>
             content_type: row.try_get("content_type")?,
             byte_size: row.try_get("byte_size")?,
             uploaded_at: row.try_get("uploaded_at")?,
-            owner_type: owner_type.to_string(),
-            owner_field: owner_field.to_string(),
+            owner_type: owner_type.to_owned(),
+            owner_field: owner_field.to_owned(),
             owner_id,
             owner_description,
             listing_id,
@@ -195,8 +195,8 @@ mod tests {
         attachment::db_insert(
             pool,
             &attachment::NewAttachment {
-                filename: filename.to_string(),
-                uploaded_at: uploaded_at.to_string(),
+                filename: filename.to_owned(),
+                uploaded_at: uploaded_at.to_owned(),
                 ..owner
             },
         )
@@ -214,7 +214,7 @@ mod tests {
             corporate_action_id: None,
             filename: String::new(),
             content_type: attachment::ContentType::Pdf,
-            checksum: "deadbeef".to_string(),
+            checksum: "deadbeef".to_owned(),
             uploaded_at: String::new(),
             content,
         }
@@ -344,7 +344,7 @@ mod tests {
                 foreign_source: false,
                 foreign_tax_paid: Decimal::ZERO,
                 currency: "AUD".into(),
-                source: Some("ANZ savings".to_string()),
+                source: Some("ANZ savings".to_owned()),
                 holding_account_id: None,
             },
         )

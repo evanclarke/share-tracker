@@ -720,13 +720,13 @@ async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
     crate::entities::exchange::db_upsert(
         &pool,
         &crate::entities::exchange::Exchange {
-            mic: "CXAX".to_string(),
-            name: "Second AUD market".to_string(),
-            country: "Australia".to_string(),
+            mic: "CXAX".to_owned(),
+            name: "Second AUD market".to_owned(),
+            country: "Australia".to_owned(),
             currency: "AUD".into(),
-            timezone: "Australia/Sydney".to_string(),
+            timezone: "Australia/Sydney".to_owned(),
             settlement_days: 2,
-            close_time: "16:00".to_string(),
+            close_time: "16:00".to_owned(),
         },
     )
     .await
@@ -741,8 +741,8 @@ async fn a_hole_straddling_a_rename_uses_the_calendar_of_the_date() {
         ListingId(1),
         &crate::entities::listing_rename::RenameBody {
             effective_date: ymd(2026, 6, 10),
-            ticker: "NEW".to_string(),
-            exchange_mic: Some("CXAX".to_string()),
+            ticker: "NEW".to_owned(),
+            exchange_mic: Some("CXAX".to_owned()),
             name: None,
             price_symbol: None,
             note: None,
@@ -1605,9 +1605,9 @@ async fn insert_demerger(
                 demerger_close_date: stated_close.map(|(d, _)| d),
                 demerger_close_price: stated_close.map(|(_, p)| dec(p)),
                 demerger_close_sourced_from: stated_close
-                    .map(|_| "nyse.com daily close".to_string()),
+                    .map(|_| "nyse.com daily close".to_owned()),
                 demerger_close_reason: stated_close
-                    .map(|_| "the provider adjusts the pre-demerger series".to_string()),
+                    .map(|_| "the provider adjusts the pre-demerger series".to_owned()),
             },
         },
     )
@@ -1628,7 +1628,7 @@ async fn insert_trade_with_note(
 ) {
     test_support::buy(id, listing_id.0)
         .date(date)
-        .with(|t| t.contract_note_ref = note.map(str::to_string))
+        .with(|t| t.contract_note_ref = note.map(str::to_owned))
         .insert(pool)
         .await;
 }
@@ -1755,7 +1755,7 @@ async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
         &pool,
         &crate::entities::holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Second".to_string(),
+            name: "Second".to_owned(),
         },
     )
     .await
@@ -1764,7 +1764,7 @@ async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
     test_support::buy(2, 1)
         .date(ymd(2026, 3, 10))
         .account(2)
-        .with(|t| t.contract_note_ref = Some("CN-8891".to_string()))
+        .with(|t| t.contract_note_ref = Some("CN-8891".to_owned()))
         .insert(&pool)
         .await;
 
@@ -1953,7 +1953,7 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
         &pool,
         &crate::entities::holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Second".to_string(),
+            name: "Second".to_owned(),
         },
     )
     .await
@@ -2113,7 +2113,7 @@ async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate()
         &pool,
         &crate::entities::holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Second".to_string(),
+            name: "Second".to_owned(),
         },
     )
     .await
@@ -2200,7 +2200,7 @@ async fn insert_interest(
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
             currency: "AUD".into(),
-            source: source.map(str::to_string),
+            source: source.map(str::to_owned),
             holding_account_id: None,
         },
     )
@@ -2272,7 +2272,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
         &pool,
         &crate::entities::holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Second".to_string(),
+            name: "Second".to_owned(),
         },
     )
     .await
@@ -2302,7 +2302,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
             currency: "AUD".into(),
-            source: Some("ANZ savings".to_string()),
+            source: Some("ANZ savings".to_owned()),
             holding_account_id: Some(HoldingAccountId(2)),
         },
     )
@@ -2320,7 +2320,7 @@ async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
             currency: "AUD".into(),
-            source: Some("ANZ savings".to_string()),
+            source: Some("ANZ savings".to_owned()),
             holding_account_id: None,
         },
     )
@@ -2355,7 +2355,7 @@ async fn duplicated_expense_rows_are_reported_with_their_ids() {
     for id in [1, 2] {
         let mut e = an_expense(id, ymd(2026, 3, 10), ExpenseType::AdviceFee, dec("200"));
         e.listing_id = Some(ListingId(1));
-        e.description = Some("Annual advice fee".to_string());
+        e.description = Some("Annual advice fee".to_owned());
         insert_expense(&pool, &e).await;
     }
     for id in [3, 4] {
@@ -2420,11 +2420,11 @@ async fn expenses_differing_in_any_key_field_are_not_duplicates() {
     // …different description: one invoice per quarter, keyed the same day.
     let mut e = base.clone();
     e.id = 5;
-    e.description = Some("Q1".to_string());
+    e.description = Some("Q1".to_owned());
     insert_expense(&pool, &e).await;
     let mut f = base.clone();
     f.id = 6;
-    f.description = Some("Q2".to_string());
+    f.description = Some("Q2".to_owned());
     insert_expense(&pool, &f).await;
     // …and one carrying the apportionment provenance the other lacks.
     let mut g = base.clone();
@@ -2511,7 +2511,7 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
         &pool,
         &crate::entities::holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Second".to_string(),
+            name: "Second".to_owned(),
         },
     )
     .await
@@ -2814,7 +2814,7 @@ async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
         &pool,
         &holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "ICE Employee Plan".to_string(),
+            name: "ICE Employee Plan".to_owned(),
         },
     )
     .await
@@ -2980,7 +2980,7 @@ async fn inheritances_from_one_death_that_differ_are_not_reported() {
         &pool,
         &crate::entities::holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Broker".to_string(),
+            name: "Broker".to_owned(),
         },
     )
     .await
@@ -3351,7 +3351,7 @@ async fn operation_written_closing_sells_are_never_flagged() {
         &pool,
         &holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Broker".to_string(),
+            name: "Broker".to_owned(),
         },
     )
     .await
@@ -3678,7 +3678,7 @@ async fn each_holding_account_is_asked_separately() {
         &pool,
         &holding_account::HoldingAccount {
             id: HoldingAccountId(2),
-            name: "Second".to_string(),
+            name: "Second".to_owned(),
         },
     )
     .await

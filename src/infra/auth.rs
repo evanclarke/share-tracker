@@ -296,7 +296,7 @@ impl Source {
         match self {
             Source::V4(ip) => ip.to_string(),
             Source::V6Prefix(ip) => format!("{ip}/64"),
-            Source::Unknown => "<unknown peer>".to_string(),
+            Source::Unknown => "<unknown peer>".to_owned(),
         }
     }
 }
@@ -908,7 +908,7 @@ impl Auth {
             .ok()?;
         let username_matches = username == self.username;
         let hash = self.password_hash.clone();
-        let password = password.to_string();
+        let password = password.to_owned();
         let verified = tokio::task::spawn_blocking(move || {
             let in_flight = VERIFIES_IN_FLIGHT.fetch_add(1, Relaxed) + 1;
             VERIFIES_PEAK.fetch_max(in_flight, Relaxed);
@@ -1212,7 +1212,7 @@ impl utoipa::IntoResponses for LoginOutcome {
     > {
         let mut responses = <SeeOther as utoipa::IntoResponses>::responses();
         responses.insert(
-            "429".to_string(),
+            "429".to_owned(),
             utoipa::openapi::ResponseBuilder::new()
                 .description(
                     "This source has exhausted its failed-attempt budget: the body is the \
@@ -1324,12 +1324,12 @@ async fn login_submit(
         return match client {
             LoginClient::Browser => (
                 StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, "1".to_string())],
+                [(header::RETRY_AFTER, "1".to_owned())],
                 render_login(&base_path, Some(message)),
             )
                 .into_response(),
             LoginClient::Script => {
-                ApiError::too_many_requests(message.to_string(), 1).into_response()
+                ApiError::too_many_requests(message.to_owned(), 1).into_response()
             }
         };
     };
@@ -1343,7 +1343,7 @@ async fn login_submit(
         (
             StatusCode::SEE_OTHER,
             [
-                (header::LOCATION, base_path.home().to_string()),
+                (header::LOCATION, base_path.home().to_owned()),
                 (header::SET_COOKIE, cookie),
             ],
         )
@@ -1383,7 +1383,7 @@ async fn logout(auth: Auth, base_path: BasePath) -> Response {
     (
         StatusCode::SEE_OTHER,
         [
-            (header::LOCATION, base_path.home().to_string()),
+            (header::LOCATION, base_path.home().to_owned()),
             (header::SET_COOKIE, cookie),
         ],
     )
@@ -1414,7 +1414,7 @@ mod tests {
 
     fn auth() -> Auth {
         Auth::new(
-            "evan".to_string(),
+            "evan".to_owned(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             Some(TEST_TOKEN.clone()),
             CookieSecurity::Secure,
@@ -1496,7 +1496,7 @@ mod tests {
         let old = auth();
         let cookie = old.mint_cookie();
         let new = Auth::new(
-            "evan".to_string(),
+            "evan".to_owned(),
             Auth::hash_password(&WRONG_PASSWORD).unwrap(),
             None,
             CookieSecurity::Secure,
@@ -1679,7 +1679,7 @@ mod tests {
             Source::Unknown,
             LoginClient::Script,
             LoginForm {
-                username: "evil\nforged login succeeded".to_string(),
+                username: "evil\nforged login succeeded".to_owned(),
                 password: WRONG_PASSWORD.clone(),
             },
         )
@@ -1772,7 +1772,7 @@ mod api_tests {
 
     fn auth() -> Auth {
         Auth::new(
-            "evan".to_string(),
+            "evan".to_owned(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             Some(TEST_TOKEN.clone()),
             // `PlainHttp` — the in-process `oneshot` client never
@@ -1792,7 +1792,7 @@ mod api_tests {
         let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
         let registry = crate::infra::scheduler::registry(
             pool.clone(),
-            ":memory:".to_string(),
+            ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
@@ -1826,7 +1826,7 @@ mod api_tests {
             .expect("login sets a cookie")
             .to_str()
             .unwrap();
-        set_cookie.split(';').next().unwrap().to_string()
+        set_cookie.split(';').next().unwrap().to_owned()
     }
 
     #[tokio::test]
@@ -2007,7 +2007,7 @@ mod lockout_tests {
 
     fn auth_with(policy: LockoutPolicy) -> Auth {
         Auth::with_lockout_policy(
-            "evan".to_string(),
+            "evan".to_owned(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             Some(TEST_TOKEN.clone()),
             CookieSecurity::PlainHttp,
@@ -2356,7 +2356,7 @@ mod lockout_tests {
                     peer(n + 1),
                     LoginClient::Script,
                     LoginForm {
-                        username: "evan".to_string(),
+                        username: "evan".to_owned(),
                         password: format!("wrong {n}"),
                     },
                 )
@@ -2731,7 +2731,7 @@ mod lockout_tests {
         let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
         let registry = crate::infra::scheduler::registry(
             pool.clone(),
-            ":memory:".to_string(),
+            ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
@@ -2814,7 +2814,7 @@ mod lockout_tests {
             .expect("a 429 names how long to wait")
             .to_str()
             .unwrap()
-            .to_string();
+            .to_owned();
         assert_eq!(retry_after, "2");
         assert!(
             exhausting

@@ -278,14 +278,14 @@ fn resolve_email(config: EmailConfig) -> Result<super::email::EmailSettings, Str
         // call `deny_unknown_fields` makes: a config that cannot do what it
         // plainly means to do must not start.
         (Some(_), None) => {
-            return Err("email username is set without a password".to_string());
+            return Err("email username is set without a password".to_owned());
         }
         (None, Some(_)) => {
-            return Err("email password is set without a username".to_string());
+            return Err("email password is set without a username".to_owned());
         }
     };
     if config.to.is_empty() {
-        return Err("email to is empty: name at least one recipient".to_string());
+        return Err("email to is empty: name at least one recipient".to_owned());
     }
     let to = config
         .to
@@ -623,7 +623,7 @@ mod tests {
         ] {
             assert_eq!(
                 raw.parse::<BasePath>().map(|b| b.to_string()),
-                Ok("/share_tracker".to_string()),
+                Ok("/share_tracker".to_owned()),
                 "{raw:?}"
             );
         }
@@ -632,7 +632,7 @@ mod tests {
             "apps/share-tracker/"
                 .parse::<BasePath>()
                 .map(|b| b.to_string()),
-            Ok("/apps/share-tracker".to_string())
+            Ok("/apps/share-tracker".to_owned())
         );
     }
 
@@ -1110,7 +1110,7 @@ password = \"hunter2\"
         .expect("both halves resolve");
         assert_eq!(
             email.credentials,
-            Some(("me".to_string(), "hunter2".to_string()))
+            Some(("me".to_owned(), "hunter2".to_owned()))
         );
     }
 

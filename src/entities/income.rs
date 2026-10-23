@@ -782,7 +782,7 @@ pub(crate) fn per_share_detail(e: &PerShareError) -> String {
         PerShareError::SuppliedAlone => {
             "amount_per_security and securities_held must be supplied together \
              — provide both or neither"
-                .to_string()
+                .to_owned()
         }
         PerShareError::ProductMismatch { product } => {
             format!(
@@ -1853,7 +1853,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await
@@ -2151,7 +2151,7 @@ mod tests {
 
         let resp = client(&pool).delete("/income/1").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(text.contains("undo the reinvestment"), "body: {text}");
         assert!(
             db_get(&pool, 1).await.unwrap().is_some(),
@@ -2204,7 +2204,7 @@ mod tests {
     ) -> (StatusCode, String) {
         let resp = client(pool).put(format!("/income/{id}"), &body).await;
         let status = resp.status;
-        (status, resp.text().to_string())
+        (status, resp.text().to_owned())
     }
 
     /// PLS 2023 final dividend payment advice: 14 cents per share × 19,695
@@ -2466,7 +2466,7 @@ mod tests {
         let pool = test_pool().await;
         insert_test_listing(&pool).await;
         let row = |franked: &str, credits: &str| {
-            let (franked, credits) = (franked.to_string(), credits.to_string());
+            let (franked, credits) = (franked.to_owned(), credits.to_owned());
             test_support::income(1, 1, ymd(2024, 3, 15))
                 .with(move |i: &mut Income| {
                     i.franked_amount = franked.parse().unwrap();
@@ -3192,7 +3192,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await

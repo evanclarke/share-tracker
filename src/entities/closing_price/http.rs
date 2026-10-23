@@ -219,8 +219,8 @@ async fn put_manual(
         status: PriceStatus::Ok,
         error: None,
         origin: PriceOrigin::Manual,
-        sourced_from: Some(sourced_from.to_string()),
-        reason: Some(reason.to_string()),
+        sourced_from: Some(sourced_from.to_owned()),
+        reason: Some(reason.to_owned()),
     };
     // A manual price is an upsert on the (listing, day) natural key, so it
     // reports the same create-vs-replace outcome every other PUT does: the

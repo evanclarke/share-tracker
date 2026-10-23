@@ -393,7 +393,7 @@ mod tests {
             foreign_source: false,
             foreign_tax_paid: Decimal::ZERO,
             currency: "AUD".into(),
-            source: Some("savings account".to_string()),
+            source: Some("savings account".to_owned()),
             holding_account_id: None,
         }
     }
@@ -531,7 +531,7 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "negative {field} must be rejected"
             );
-            let detail = resp.text().to_string();
+            let detail = resp.text().to_owned();
             assert!(
                 detail.contains(field) && detail.contains("cannot be negative"),
                 "negative {field}: detail must name the field, got: {detail}"
@@ -571,7 +571,7 @@ mod tests {
         ] {
             let resp = client(&pool).put("/interest_income/1", &body).await;
             assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-            let detail = resp.text().to_string();
+            let detail = resp.text().to_owned();
             assert!(
                 detail.contains(needle),
                 "expected '{needle}', got: {detail}"

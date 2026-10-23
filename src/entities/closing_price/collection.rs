@@ -123,11 +123,11 @@ pub(super) async fn fetch_and_store(
         for date in wanted {
             let result = match &by_date {
                 Err(FetchError::NoSuchSymbol(e)) => Err(dead_symbol_message(e)),
-                Err(e) => Err(e.message().to_string()),
+                Err(e) => Err(e.message().to_owned()),
                 Ok(_) if symbol_dead_or_wrong => Err(no_candles_message()),
                 Ok(map) => match map.get(&date) {
                     None => {
-                        Err("provider returned no candle for an expected trading day".to_string())
+                        Err("provider returned no candle for an expected trading day".to_owned())
                     }
                     Some(close) if close.currency != market.listing.currency => Err(format!(
                         "currency mismatch: provider quoted {}, listing is {}",
@@ -157,7 +157,7 @@ pub(super) async fn fetch_and_store(
     for &date in dates {
         let (fetched_symbol, result) = outcome
             .remove(&date)
-            .unwrap_or_else(|| (None, Err("no identity span covers this date".to_string())));
+            .unwrap_or_else(|| (None, Err("no identity span covers this date".to_owned())));
         let row = match result {
             Ok(as_observed) => {
                 ok += 1;

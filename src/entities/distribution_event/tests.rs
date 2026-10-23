@@ -389,9 +389,9 @@ async fn a_span_straddling_a_rename_is_fetched_under_each_ticker_in_force() {
     assert_eq!(
         stub.calls(),
         vec![
-            ("LAAC".to_string(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
-            ("LAR".to_string(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
-            ("LAR".to_string(), ymd(2025, 3, 1), ymd(2026, 8, 27)),
+            ("LAAC".to_owned(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
+            ("LAR".to_owned(), ymd(2024, 1, 10), ymd(2025, 2, 28)),
+            ("LAR".to_owned(), ymd(2025, 3, 1), ymd(2026, 8, 27)),
         ]
     );
     let stored = db_list(&pool).await.unwrap();
@@ -442,8 +442,8 @@ async fn a_span_wholly_under_a_retired_ticker_is_recovered_from_the_surviving_on
     assert_eq!(
         stub.calls(),
         vec![
-            ("LAAC".to_string(), ymd(2021, 3, 25), ymd(2025, 1, 12)),
-            ("LAR".to_string(), ymd(2021, 3, 25), ymd(2025, 1, 12)),
+            ("LAAC".to_owned(), ymd(2021, 3, 25), ymd(2025, 1, 12)),
+            ("LAR".to_owned(), ymd(2021, 3, 25), ymd(2025, 1, 12)),
         ],
         "one segment, asked under its own ticker and then the surviving one"
     );

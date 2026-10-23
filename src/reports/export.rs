@@ -100,7 +100,7 @@ pub fn csv_response<T: Serialize>(
     Ok(Payload::from_response(
         (
             [
-                (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_owned()),
                 (
                     header::CONTENT_DISPOSITION,
                     format!("attachment; filename=\"{filename}\""),

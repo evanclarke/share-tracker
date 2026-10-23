@@ -1972,7 +1972,7 @@ mod tests {
             .put("/inheritances/1", &body)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("acquisition date"), "detail: {detail}");
     }
 
@@ -1995,7 +1995,7 @@ mod tests {
             .put("/inheritances/1", &body)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("after today"), "detail: {detail}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
@@ -2414,7 +2414,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await

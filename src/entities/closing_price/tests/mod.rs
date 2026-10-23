@@ -161,7 +161,7 @@ impl StubFetcher {
     /// other kind.
     fn failing(msg: &str) -> Self {
         StubFetcher {
-            fail: Some(FetchError::Other(msg.to_string())),
+            fail: Some(FetchError::Other(msg.to_owned())),
             ..Default::default()
         }
     }
@@ -170,7 +170,7 @@ impl StubFetcher {
     /// what Yahoo does for a ticker retired by a rename.
     fn failing_no_such_symbol(msg: &str) -> Self {
         StubFetcher {
-            fail: Some(FetchError::NoSuchSymbol(msg.to_string())),
+            fail: Some(FetchError::NoSuchSymbol(msg.to_owned())),
             ..Default::default()
         }
     }
@@ -231,7 +231,7 @@ impl PriceFetcher for StubFetcher {
     fn latest_quote<'a>(&'a self, market: &'a Market) -> QuoteFuture<'a> {
         Box::pin(async move {
             if let Some(failure) = &self.fail {
-                return Err(failure.message().to_string());
+                return Err(failure.message().to_owned());
             }
             self.quotes
                 .get(&market.listing.id)
@@ -302,8 +302,8 @@ async fn rename_listing(
         listing_id,
         &crate::entities::listing_rename::RenameBody {
             effective_date,
-            ticker: new_ticker.to_string(),
-            exchange_mic: new_mic.map(str::to_string),
+            ticker: new_ticker.to_owned(),
+            exchange_mic: new_mic.map(str::to_owned),
             name: None,
             price_symbol: None,
             note: None,

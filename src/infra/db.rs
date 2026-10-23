@@ -89,7 +89,7 @@ pub const BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 /// how the schema gets there.
 fn connect_options(db_path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
     let url = if db_path == ":memory:" {
-        "sqlite::memory:".to_string()
+        "sqlite::memory:".to_owned()
     } else {
         format!("sqlite:{db_path}")
     };
@@ -361,7 +361,7 @@ fn backup_path_at(
             let name = Path::new(stem)
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_else(|| stem.to_string());
+                .unwrap_or_else(|| stem.to_owned());
             Path::new(dir)
                 .join(format!("{name}-{ts}{suffix_part}.db"))
                 .to_string_lossy()
@@ -385,7 +385,7 @@ pub const MAX_BACKUP_SUFFIX_LEN: usize = 40;
 /// failure, suitable for a `422` response body.
 pub fn validate_backup_suffix(suffix: &str) -> Result<(), String> {
     if suffix.is_empty() {
-        return Err("suffix must not be empty".to_string());
+        return Err("suffix must not be empty".to_owned());
     }
     if suffix.len() > MAX_BACKUP_SUFFIX_LEN {
         return Err(format!(
@@ -396,10 +396,10 @@ pub fn validate_backup_suffix(suffix: &str) -> Result<(), String> {
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
     {
-        return Err("suffix may only contain ASCII letters, digits, '.', '_', and '-'".to_string());
+        return Err("suffix may only contain ASCII letters, digits, '.', '_', and '-'".to_owned());
     }
     if suffix.starts_with('-') || suffix.starts_with('.') {
-        return Err("suffix must not start with '-' or '.'".to_string());
+        return Err("suffix must not start with '-' or '.'".to_owned());
     }
     Ok(())
 }
@@ -438,7 +438,7 @@ pub async fn backup(
     // bypassable by a caller that skips the handler.
     if let Some(s) = suffix {
         validate_backup_suffix(s).map_err(|reason| BackupError::InvalidSuffix {
-            suffix: s.to_string(),
+            suffix: s.to_owned(),
             reason,
         })?;
     }
@@ -615,7 +615,7 @@ async fn run_backup_command_within(
     // (dest may be a relative path when no --backup-dir is configured).
     let abs_dest = std::fs::canonicalize(dest)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| dest.to_string());
+        .unwrap_or_else(|_| dest.to_owned());
     let substituted = command.replace("{BACKUP_FILE}", &shell_quote(&abs_dest));
     // What is logged and recorded, never what is run: the operator's hook must
     // receive the credential it was configured with.
@@ -660,7 +660,7 @@ async fn run_backup_command_within(
     };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         tracing::error!(
             command = %redacted,
             status = %output.status,
@@ -818,7 +818,7 @@ async fn verify_or_quarantine(
         ),
     }
     Err(BackupError::Verification {
-        path: dest.to_string(),
+        path: dest.to_owned(),
         reason,
     })
 }
@@ -900,7 +900,7 @@ fn backup_stem(db_path: &str) -> String {
     Path::new(stem_path)
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_else(|| stem_path.to_string())
+        .unwrap_or_else(|| stem_path.to_owned())
 }
 
 /// Delete leftover staging files (`<backup>.partial`) of this database,
@@ -1641,11 +1641,11 @@ mod tests {
                 .await
                 .unwrap();
         assert!(
-            names.contains(&"keep".to_string()),
+            names.contains(&"keep".to_owned()),
             "pre-backup row survives"
         );
         assert!(
-            !names.contains(&"lose".to_string()),
+            !names.contains(&"lose".to_owned()),
             "post-backup mutation must be gone after restore"
         );
     }
@@ -1706,7 +1706,7 @@ mod tests {
             .expect("a backup taken mid-transaction verifies");
         assert_eq!(
             names_in(&mid).await,
-            vec!["committed".to_string()],
+            vec!["committed".to_owned()],
             "a backup must hold a committed state, never an open transaction's rows"
         );
 
@@ -1716,7 +1716,7 @@ mod tests {
         backup_to(&pool, &after).await.unwrap();
         assert_eq!(
             names_in(&after).await,
-            vec!["committed".to_string(), "in flight".to_string()],
+            vec!["committed".to_owned(), "in flight".to_owned()],
             "the control: once committed, the row is in the next backup — so its \
              absence above was the open transaction, not an empty database"
         );
@@ -1746,7 +1746,7 @@ mod tests {
     async fn pool_migrated_below(version: i64) -> SqlitePool {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
         for m in sqlx::migrate!().iter().filter(|m| m.version < version) {
-            sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_string()))
+            sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_owned()))
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1760,7 +1760,7 @@ mod tests {
             .iter()
             .find(|m| m.version == version)
             .unwrap_or_else(|| panic!("migration {version} exists"));
-        sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_string()))
+        sqlx::raw_sql(sqlx::AssertSqlSafe(m.sql.as_str().to_owned()))
             .execute(pool)
             .await
             .unwrap();
@@ -2868,9 +2868,9 @@ mod tests {
             price,
             (
                 7,
-                "62.49".to_string(),
-                "yahoo".to_string(),
-                "BHP.AX".to_string()
+                "62.49".to_owned(),
+                "yahoo".to_owned(),
+                "BHP.AX".to_owned()
             )
         );
         let event: (i64, String, String) =
@@ -2878,12 +2878,12 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(event, (9, "0.726547".to_string(), "yahoo".to_string()));
+        assert_eq!(event, (9, "0.726547".to_owned(), "yahoo".to_owned()));
         let mic: (String, String) = sqlx::query_as("SELECT mic, status FROM mic_registry")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(mic, ("XASX".to_string(), "ACTIVE".to_string()));
+        assert_eq!(mic, ("XASX".to_owned(), "ACTIVE".to_owned()));
 
         // Both audited tables carry their full trigger sets again, so a rebuild
         // cannot silently switch the audit trail or snapshot staleness off.
@@ -4046,7 +4046,7 @@ mod tests {
         // The grandchild was killed with its group: once it no longer exists
         // it can never write the marker, so its absence now is final.
         let pid = std::fs::read_to_string(&pidfile).expect("the hook recorded the grandchild");
-        let pid = pid.trim().to_string();
+        let pid = pid.trim().to_owned();
         crate::test_support::await_condition(|| {
             !std::process::Command::new("kill")
                 .args(["-0", &pid])

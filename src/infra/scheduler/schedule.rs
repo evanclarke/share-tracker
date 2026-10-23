@@ -92,7 +92,7 @@ pub(super) fn parse(schedule: &str) -> Result<Vec<ScheduleEntry>, ScheduleError>
             cron,
             expr,
             tz,
-            name: name.to_string(),
+            name: name.to_owned(),
         });
     }
 

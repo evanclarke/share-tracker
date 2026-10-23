@@ -469,7 +469,7 @@ mod tests {
             gross_amount: None,
             deductible_percentage: None,
             currency: "AUD".into(),
-            description: Some("margin loan interest".to_string()),
+            description: Some("margin loan interest".to_owned()),
             listing_id: None,
             holding_account_id: None,
         }
@@ -582,7 +582,7 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "negative {field} must be rejected"
             );
-            let detail = resp.text().to_string();
+            let detail = resp.text().to_owned();
             assert!(
                 detail.contains(field) && detail.contains("cannot be negative"),
                 "negative {field}: detail must name the field, got: {detail}"
@@ -630,7 +630,7 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "deductible_percentage {pct} must be rejected"
             );
-            let detail = resp.text().to_string();
+            let detail = resp.text().to_owned();
             assert!(
                 detail.contains("deductible_percentage") && detail.contains(pct),
                 "deductible_percentage {pct}: detail must name field and value, got: {detail}"
@@ -679,7 +679,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("computes to 50,") && detail.contains("do not reconcile"),
             "the refusal must carry the computed figure, got: {detail}"
@@ -920,7 +920,7 @@ mod tests {
 
         let resp = client.delete("/listings/1").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("investment expenses"),
             "the refusal must name the expense drawing on the listing, got: {detail}"

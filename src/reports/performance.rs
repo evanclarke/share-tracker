@@ -628,7 +628,7 @@ pub async fn db_performance_on(
     result.push(build_row(
         RowKey {
             listing_id: None,
-            ticker: "OVERALL".to_string(),
+            ticker: "OVERALL".to_owned(),
             holding_account_id: None,
         },
         None,
@@ -1022,7 +1022,7 @@ mod tests {
             &pool,
             &holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await

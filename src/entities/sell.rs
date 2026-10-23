@@ -1556,7 +1556,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await
@@ -1602,7 +1602,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await
@@ -1640,7 +1640,7 @@ mod tests {
     ) -> (StatusCode, String) {
         let resp = client(pool).put(format!("/sells/{id}"), &body).await;
         let status = resp.status;
-        (status, resp.text().to_string())
+        (status, resp.text().to_owned())
     }
 
     #[tokio::test]
@@ -2054,7 +2054,7 @@ mod tests {
         });
         let resp = client(&pool).put("/sells/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("1490.05"),
             "detail must carry the net proceeds: {detail}"
@@ -2086,7 +2086,7 @@ mod tests {
         });
         let resp = client(&pool).put("/sells/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("brokerage_currency must equal the trade's currency"),
             "detail must explain the rejection: {detail}"
@@ -2183,7 +2183,7 @@ mod tests {
         });
         let resp = client(&pool).put("/sells/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         // The rejection says why, not a bare "HTTP 422" — and names both
         // figures, so a 50-parcel allocation does not have to be added up by
         // hand to find the amount it is out by (SCENARIOS Y-b). Same wording
@@ -2654,7 +2654,7 @@ mod tests {
                 &pool,
                 &HoldingAccount {
                     id: HoldingAccountId(id),
-                    name: name.to_string(),
+                    name: name.to_owned(),
                 },
             )
             .await
@@ -2816,10 +2816,7 @@ mod tests {
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(
-            allocated,
-            vec![(2, "40".to_string()), (3, "60".to_string())]
-        );
+        assert_eq!(allocated, vec![(2, "40".to_owned()), (3, "60".to_owned())]);
 
         // Amending it *down* frees units and goes through.
         db_upsert_sell(&pool, TradeId(2), &sale(first, 30))
@@ -3233,7 +3230,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await

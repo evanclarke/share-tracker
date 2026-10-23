@@ -162,7 +162,7 @@ pub async fn db_coverage_alerts(
                 (true, true) => "outside_holiday_coverage",
                 (true, false) => "no_holiday_coverage",
             }
-            .to_string(),
+            .to_owned(),
             coverage_start: span.map(|(s, _)| s),
             coverage_end: span.map(|(_, e)| e),
             settlement_non_trading_reason,
@@ -280,13 +280,13 @@ mod tests {
         exchange::db_upsert(
             &pool,
             &exchange::Exchange {
-                mic: "XLON".to_string(),
-                name: "LSE".to_string(),
-                country: "GB".to_string(),
+                mic: "XLON".to_owned(),
+                name: "LSE".to_owned(),
+                country: "GB".to_owned(),
                 currency: "AUD".into(),
-                timezone: "Europe/London".to_string(),
+                timezone: "Europe/London".to_owned(),
                 settlement_days: 2,
-                close_time: "16:00".to_string(),
+                close_time: "16:00".to_owned(),
             },
         )
         .await

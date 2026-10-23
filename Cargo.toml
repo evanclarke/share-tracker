@@ -150,3 +150,7 @@ format_push_string = "warn"
 # means `continue` and `?`/`break` are unavailable: write the `for` loop.
 # Test code is held to it too.
 needless_for_each = "warn"
+# `.to_string()` on a `&str` reads as a formatting conversion (it goes through
+# `Display`) where `to_owned()` says what happens: the borrowed text is copied.
+# Test code is held to it too.
+str_to_string = "warn"

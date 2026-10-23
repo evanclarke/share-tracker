@@ -501,7 +501,7 @@ impl ApiClient {
     pub fn full_with(pool: &SqlitePool, fetcher: closing_price::SharedFetcher) -> Self {
         let registry = crate::infra::scheduler::registry(
             pool.clone(),
-            ":memory:".to_string(),
+            ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
@@ -595,7 +595,7 @@ impl ApiClient {
                 .method(method)
                 .uri(path.as_ref())
                 .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
+                .body(Body::from(body.to_owned()))
                 .unwrap(),
         )
         .await
@@ -732,7 +732,7 @@ impl ApiClient {
     /// or `404` still fails, and a rejection test that needs a specific status
     /// uses [`Self::put`] instead.
     pub async fn put_ok(&self, path: impl AsRef<str>, body: &impl serde::Serialize) {
-        let path = path.as_ref().to_string();
+        let path = path.as_ref().to_owned();
         let status = self.put(&path, body).await.status;
         assert!(
             status == StatusCode::NO_CONTENT || status == StatusCode::CREATED,
@@ -858,7 +858,7 @@ pub fn listing(id: i64) -> ListingBuilder {
     ListingBuilder {
         l: listing::Listing {
             id: ListingId(id),
-            exchange_mic: Some("XASX".to_string()),
+            exchange_mic: Some("XASX".to_owned()),
             ticker: format!("T{id}"),
             name: format!("Test {id}"),
             isin: None,
@@ -881,17 +881,17 @@ pub struct ListingBuilder {
 
 impl ListingBuilder {
     pub fn ticker(mut self, ticker: &str) -> Self {
-        self.l.ticker = ticker.to_string();
+        self.l.ticker = ticker.to_owned();
         self
     }
 
     pub fn name(mut self, name: &str) -> Self {
-        self.l.name = name.to_string();
+        self.l.name = name.to_owned();
         self
     }
 
     pub fn mic(mut self, mic: &str) -> Self {
-        self.l.exchange_mic = Some(mic.to_string());
+        self.l.exchange_mic = Some(mic.to_owned());
         self
     }
 
@@ -944,7 +944,7 @@ impl ListingBuilder {
     }
 
     pub fn price_symbol(mut self, symbol: &str) -> Self {
-        self.l.price_symbol = Some(symbol.to_string());
+        self.l.price_symbol = Some(symbol.to_owned());
         self
     }
 
@@ -1116,7 +1116,7 @@ pub fn closing_price(listing_id: i64, price_date: NaiveDate) -> ClosingPriceBuil
             price: Some(Decimal::from(10)),
             price_as_observed: Some(Decimal::from(10)),
             source: closing_price::PriceSource::Yahoo,
-            fetched_at: "2026-06-05T08:00:00Z".to_string(),
+            fetched_at: "2026-06-05T08:00:00Z".to_owned(),
             fetched_symbol: None,
             status: closing_price::PriceStatus::Ok,
             error: None,
@@ -1148,7 +1148,7 @@ impl ClosingPriceBuilder {
     }
 
     pub fn fetched_at(mut self, fetched_at: &str) -> Self {
-        self.p.fetched_at = fetched_at.to_string();
+        self.p.fetched_at = fetched_at.to_owned();
         self
     }
 
@@ -1156,7 +1156,7 @@ impl ClosingPriceBuilder {
     /// by default, which is what a row stored before that column existed
     /// looks like.
     pub fn fetched_symbol(mut self, symbol: &str) -> Self {
-        self.p.fetched_symbol = Some(symbol.to_string());
+        self.p.fetched_symbol = Some(symbol.to_owned());
         self
     }
 
@@ -1165,7 +1165,7 @@ impl ClosingPriceBuilder {
         self.p.price = None;
         self.p.price_as_observed = None;
         self.p.status = closing_price::PriceStatus::Error;
-        self.p.error = Some(error.to_string());
+        self.p.error = Some(error.to_owned());
         self
     }
 
@@ -1176,8 +1176,8 @@ impl ClosingPriceBuilder {
         self.p.origin = closing_price::PriceOrigin::Manual;
         // Nothing was fetched, so no symbol was used (CHECK-paired, 0038).
         self.p.fetched_symbol = None;
-        self.p.sourced_from = Some(sourced_from.to_string());
-        self.p.reason = Some(reason.to_string());
+        self.p.sourced_from = Some(sourced_from.to_owned());
+        self.p.reason = Some(reason.to_owned());
         self
     }
 
@@ -2051,7 +2051,7 @@ mod tests {
                 .fetch_all(&migrated)
                 .await
                 .unwrap();
-        assert!(tables.contains(&"exchange_holidays".to_string()));
+        assert!(tables.contains(&"exchange_holidays".to_owned()));
         for table in &tables {
             // `_sqlx_migrations` is compared below on the columns that are not
             // per-run measurements.

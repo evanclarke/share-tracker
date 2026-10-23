@@ -945,7 +945,7 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "{date} must be rejected"
             );
-            let detail = resp.text().to_string();
+            let detail = resp.text().to_owned();
             assert!(
                 detail.contains(date) && detail.contains("30 June"),
                 "{date}: detail must carry the date and the rule, got: {detail}"
@@ -1015,7 +1015,7 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "negative {field} must be rejected"
             );
-            let detail = resp.text().to_string();
+            let detail = resp.text().to_owned();
             assert!(
                 detail.contains(field) && detail.contains("cannot be negative"),
                 "negative {field}: detail must name the field, got: {detail}"
@@ -1196,7 +1196,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await

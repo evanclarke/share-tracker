@@ -131,7 +131,7 @@ pub async fn db_list(pool: &SqlitePool) -> Result<Vec<MicEntry>, sqlx::Error> {
 
 #[cfg(test)]
 pub async fn db_get(pool: &SqlitePool, mic: &str) -> Result<Option<MicEntry>, sqlx::Error> {
-    http::crud_get(pool, mic.to_string()).await
+    http::crud_get(pool, mic.to_owned()).await
 }
 
 /// Insert or update a registry entry by MIC. Unlike the FX rates (which are
@@ -201,7 +201,7 @@ pub fn parse_registry(content: &str) -> Result<Vec<MicEntry>, ImportError> {
         col("EXPIRY DATE")?,
     );
 
-    let field = |rec: &csv::StringRecord, idx: usize| rec.get(idx).unwrap_or("").trim().to_string();
+    let field = |rec: &csv::StringRecord, idx: usize| rec.get(idx).unwrap_or("").trim().to_owned();
     let opt = |s: String| if s.is_empty() { None } else { Some(s) };
 
     let mut out = Vec::new();
@@ -342,11 +342,11 @@ mod tests {
 
     fn sample_entry() -> MicEntry {
         MicEntry {
-            mic: "XTES".to_string(),
-            operating_mic: "XTES".to_string(),
-            name: "Test Exchange".to_string(),
-            country_code: "AU".to_string(),
-            city: Some("Sydney".to_string()),
+            mic: "XTES".to_owned(),
+            operating_mic: "XTES".to_owned(),
+            name: "Test Exchange".to_owned(),
+            country_code: "AU".to_owned(),
+            city: Some("Sydney".to_owned()),
             status: MicStatus::Active,
             expiry_date: None,
         }
@@ -407,11 +407,11 @@ mod tests {
         db_upsert(&pool, &sample_entry()).await.unwrap();
         let mut updated = sample_entry();
         updated.status = MicStatus::Expired;
-        updated.expiry_date = Some("2024-01-31".to_string());
+        updated.expiry_date = Some("2024-01-31".to_owned());
         db_upsert(&pool, &updated).await.unwrap();
         let got = db_get(&pool, "XTES").await.unwrap().unwrap();
         assert_eq!(got.status, MicStatus::Expired);
-        assert_eq!(got.expiry_date, Some("2024-01-31".to_string()));
+        assert_eq!(got.expiry_date, Some("2024-01-31".to_owned()));
     }
 
     // Parsing tests
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(nyse.mic, "XNYS");
         assert_eq!(nyse.name, "NEW YORK STOCK EXCHANGE");
         assert_eq!(nyse.country_code, "US");
-        assert_eq!(nyse.city, Some("NEW YORK".to_string()));
+        assert_eq!(nyse.city, Some("NEW YORK".to_owned()));
         assert_eq!(nyse.status, MicStatus::Active);
         assert_eq!(nyse.expiry_date, None);
 
@@ -436,7 +436,7 @@ mod tests {
         // EXPIRED entry keeps its normalised expiry date.
         let expired = &parsed[2];
         assert_eq!(expired.status, MicStatus::Expired);
-        assert_eq!(expired.expiry_date, Some("2021-08-23".to_string()));
+        assert_eq!(expired.expiry_date, Some("2021-08-23".to_owned()));
     }
 
     #[test]
@@ -502,7 +502,7 @@ mod tests {
         import_from_content(&pool, &changed).await.unwrap();
         let nyse = db_get(&pool, "XNYS").await.unwrap().unwrap();
         assert_eq!(nyse.status, MicStatus::Expired);
-        assert_eq!(nyse.expiry_date, Some("2025-05-01".to_string()));
+        assert_eq!(nyse.expiry_date, Some("2025-05-01".to_owned()));
     }
 
     // API-level tests

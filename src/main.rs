@@ -90,7 +90,7 @@ async fn main() {
     // not hard-coded durations. The built-in default is overridable with --schedule.
     let schedule = match &settings.schedule {
         Some(path) => std::fs::read_to_string(path).expect("failed to read schedule file"),
-        None => include_str!("../schedule.cron").to_string(),
+        None => include_str!("../schedule.cron").to_owned(),
     };
     // The live price source, constructed once and shared by the scheduled
     // price-import job and the on-demand live valuation in the router.

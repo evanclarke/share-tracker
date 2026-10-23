@@ -355,7 +355,7 @@ pub async fn db_indexation_cross_check(
                 indexed_cost_base,
                 discount_method_gain,
                 indexation_method_gain,
-                better_method: better_method.to_string(),
+                better_method: better_method.to_owned(),
                 indexation_advantage,
                 // Set per year below, once every allocation competing for
                 // the year's losses is known.
@@ -599,7 +599,7 @@ fn comparison_sentence(capital_losses_realised: Decimal, brought_forward: Decima
             to_cents(capital_losses_realised)
         )
     } else {
-        "This year realised no capital losses".to_string()
+        "This year realised no capital losses".to_owned()
     };
     format!(
         "{rows} {realised} and brought forward A${:.2}: losses are applied before the 50% \

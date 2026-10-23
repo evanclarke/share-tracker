@@ -256,7 +256,7 @@ impl From<RenameError> for ApiError {
                     Some(mic) => format!("on {mic}"),
                     None => "among the exchange-less (Crypto) listings, which are unique by \
                              ticker alone"
-                        .to_string(),
+                        .to_owned(),
                 };
                 ApiError::unprocessable(format!(
                     "listing {holder_id} ({holder_name}) already holds the ticker {ticker} \
@@ -409,7 +409,7 @@ pub async fn db_rename(
             && exchange_currency != current.currency
         {
             return Err(RenameError::ExchangeCurrencyMismatch {
-                mic: mic.to_string(),
+                mic: mic.to_owned(),
                 listing_currency: current.currency.clone(),
                 exchange_currency,
             });
@@ -680,7 +680,7 @@ mod tests {
     fn body(effective_date: &str, ticker: &str) -> RenameBody {
         RenameBody {
             effective_date: effective_date.parse().unwrap(),
-            ticker: ticker.to_string(),
+            ticker: ticker.to_owned(),
             exchange_mic: None,
             name: None,
             price_symbol: None,
@@ -696,13 +696,13 @@ mod tests {
         crate::entities::exchange::db_upsert(
             pool,
             &crate::entities::exchange::Exchange {
-                mic: mic.to_string(),
+                mic: mic.to_owned(),
                 name: format!("{mic} test market"),
-                country: "Australia".to_string(),
+                country: "Australia".to_owned(),
                 currency: "AUD".into(),
-                timezone: "Australia/Sydney".to_string(),
+                timezone: "Australia/Sydney".to_owned(),
                 settlement_days: 2,
-                close_time: "16:00".to_string(),
+                close_time: "16:00".to_owned(),
             },
         )
         .await
@@ -746,8 +746,8 @@ mod tests {
         insert_aud_exchange(&pool, "CXAX").await;
         test_support::listing(1).mic("XASX").insert(&pool).await;
         let mut moved = body("2024-06-01", "SAME");
-        moved.ticker = "T1".to_string(); // ticker unchanged, exchange moves
-        moved.exchange_mic = Some("CXAX".to_string());
+        moved.ticker = "T1".to_owned(); // ticker unchanged, exchange moves
+        moved.exchange_mic = Some("CXAX".to_owned());
 
         let created = db_rename(&pool, ListingId(1), &moved).await.unwrap();
         assert_eq!(created.old_exchange_mic.as_deref(), Some("XASX"));
@@ -783,7 +783,7 @@ mod tests {
         test_support::buy(1, 1).insert(&pool).await;
 
         let mut moved = body("2024-06-01", "CBA");
-        moved.exchange_mic = Some("XNYS".to_string());
+        moved.exchange_mic = Some("XNYS".to_owned());
         let err = db_rename(&pool, ListingId(1), &moved).await.unwrap_err();
         assert!(
             matches!(
@@ -876,7 +876,7 @@ mod tests {
 
         // Exchange named, unchanged.
         let mut same = body("2024-06-02", "NEWER");
-        same.exchange_mic = Some("XASX".to_string());
+        same.exchange_mic = Some("XASX".to_owned());
         db_rename(&pool, ListingId(1), &same).await.unwrap();
         let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
         assert_eq!(got.ticker, "NEWER");
@@ -896,7 +896,7 @@ mod tests {
             .insert(&pool)
             .await;
         let mut moved = body("2024-06-01", "LAR");
-        moved.exchange_mic = Some("XNYS".to_string());
+        moved.exchange_mic = Some("XNYS".to_owned());
 
         db_rename(&pool, ListingId(1), &moved).await.unwrap();
         let got = listing::db_get(&pool, ListingId(1)).await.unwrap().unwrap();
@@ -940,12 +940,12 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .price_symbol,
-            Some("LAAC.OLD".to_string())
+            Some("LAAC.OLD".to_owned())
         );
 
         // Setting it explicitly in the rename body does update it.
         let mut with_symbol = body("2024-07-01", "LAR2");
-        with_symbol.price_symbol = Some("LAR.NEW".to_string());
+        with_symbol.price_symbol = Some("LAR.NEW".to_owned());
         db_rename(&pool, ListingId(1), &with_symbol).await.unwrap();
         assert_eq!(
             listing::db_get(&pool, ListingId(1))
@@ -953,7 +953,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .price_symbol,
-            Some("LAR.NEW".to_string())
+            Some("LAR.NEW".to_owned())
         );
     }
 
@@ -1009,7 +1009,7 @@ mod tests {
             );
         }
         let mut blank_name = body("2024-06-01", "LAR");
-        blank_name.name = Some("  ".to_string());
+        blank_name.name = Some("  ".to_owned());
         assert!(matches!(
             db_rename(&pool, ListingId(1), &blank_name)
                 .await
@@ -1166,7 +1166,7 @@ mod tests {
             .insert(&pool)
             .await;
         let mut moving = body("2024-06-01", "ETH");
-        moving.exchange_mic = Some("XASX".to_string());
+        moving.exchange_mic = Some("XASX".to_owned());
         assert!(matches!(
             db_rename(&pool, ListingId(1), &moving).await.unwrap_err(),
             RenameError::CryptoWithExchange
@@ -1296,7 +1296,7 @@ mod tests {
             .await;
 
         let mut moved = body("2024-06-01", "SAME");
-        moved.exchange_mic = Some("CXAX".to_string());
+        moved.exchange_mic = Some("CXAX".to_owned());
         let created = db_rename(&pool, ListingId(1), &moved).await.unwrap();
         assert_eq!(created.new_ticker, "SAME");
         assert_eq!(created.new_exchange_mic.as_deref(), Some("CXAX"));
@@ -1543,8 +1543,8 @@ mod tests {
             .await;
 
         let mut renaming = body("2024-06-01", "NEWER");
-        renaming.name = Some("Newer Co".to_string());
-        renaming.price_symbol = Some("NEWER.AX".to_string());
+        renaming.name = Some("Newer Co".to_owned());
+        renaming.price_symbol = Some("NEWER.AX".to_owned());
         let created = db_rename(&pool, ListingId(1), &renaming).await.unwrap();
         assert_eq!(created.old_name.as_deref(), Some("Old Co"));
         assert_eq!(created.old_price_symbol.as_deref(), Some("OLD.AX"));
@@ -1606,7 +1606,7 @@ mod tests {
         );
 
         let mut renaming = body("2024-06-01", "NEWER");
-        renaming.price_symbol = Some("NEWER.AX".to_string());
+        renaming.price_symbol = Some("NEWER.AX".to_owned());
         let created = db_rename(&pool, ListingId(1), &renaming).await.unwrap();
         assert_eq!(created.old_price_symbol, None);
         assert_eq!(created.old_name.as_deref(), Some("Test 1"));
@@ -1801,8 +1801,8 @@ mod tests {
             .insert(&pool)
             .await;
         let mut renaming = body("2024-06-01", "NEWER");
-        renaming.name = Some("Newer Co".to_string());
-        renaming.price_symbol = Some("NEWER.AX".to_string());
+        renaming.name = Some("Newer Co".to_owned());
+        renaming.price_symbol = Some("NEWER.AX".to_owned());
         db_rename(&pool, ListingId(1), &renaming).await.unwrap();
         // A second rename, this one over a listing whose override it clears
         // nothing of — its own old_price_symbol is the first one's new value.

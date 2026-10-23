@@ -1109,7 +1109,7 @@ mod tests {
         });
         let (status, text) = {
             let resp = client(&pool).put("/ess_statements/1", &body).await;
-            (resp.status, resp.text().to_string())
+            (resp.status, resp.text().to_owned())
         };
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(text.contains("USD") && text.contains("AUD"), "{text}");
@@ -1264,7 +1264,7 @@ mod tests {
         });
         let resp = client(&pool).put("/ess_statements/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(text.contains("deferral_discount"), "{text}");
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
         });
         let resp = client(&pool).put("/ess_statements/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(text.contains("20 September 1985"), "{text}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
@@ -1356,7 +1356,7 @@ mod tests {
         });
         let resp = client(&pool).put("/ess_statements/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(text.contains("dated after today"), "{text}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
@@ -1492,7 +1492,7 @@ mod tests {
         });
         let resp = client(&pool).put("/ess_statements/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(text.contains("15000") && text.contains("1000"), "{text}");
     }
 
@@ -1785,7 +1785,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await

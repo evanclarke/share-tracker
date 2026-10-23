@@ -304,7 +304,7 @@ impl PriceFetcher for CachingFetcher {
             // fetcher to one result per market it was given, so a short answer
             // cannot slide the results onto the wrong listings below.
             fetched.resize_with(misses.len(), || {
-                Err("price source returned no result for this listing".to_string())
+                Err("price source returned no result for this listing".to_owned())
             });
             for (market, result) in misses.iter().zip(&fetched) {
                 if let Ok(quote) = result {
@@ -321,7 +321,7 @@ impl PriceFetcher for CachingFetcher {
                     // were collected — which is the order of `markets`.
                     None => fetched
                         .next()
-                        .unwrap_or_else(|| Err("price source skipped this listing".to_string())),
+                        .unwrap_or_else(|| Err("price source skipped this listing".to_owned())),
                 })
                 .collect()
         })

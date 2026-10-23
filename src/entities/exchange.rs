@@ -45,7 +45,7 @@ pub struct ExchangeBody {
 }
 
 fn default_close_time() -> String {
-    "16:00".to_string()
+    "16:00".to_owned()
 }
 
 /// The most business days `settlement_days` may be.
@@ -172,7 +172,7 @@ pub async fn db_get<'e, X>(executor: X, mic: &str) -> Result<Option<Exchange>, s
 where
     X: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
-    http::crud_get(executor, mic.to_string()).await
+    http::crud_get(executor, mic.to_owned()).await
 }
 
 pub async fn db_upsert(
@@ -248,7 +248,7 @@ fn is_hh_mm(s: &str) -> bool {
 
 #[cfg(test)]
 pub async fn db_delete(pool: &SqlitePool, mic: &str) -> Result<bool, sqlx::Error> {
-    http::crud_delete::<Exchange>(pool, mic.to_string()).await
+    http::crud_delete::<Exchange>(pool, mic.to_owned()).await
 }
 
 #[utoipa::path(
@@ -289,13 +289,13 @@ mod tests {
 
     fn xtest() -> Exchange {
         Exchange {
-            mic: "XTES".to_string(),
-            name: "Test Exchange".to_string(),
-            country: "Testland".to_string(),
+            mic: "XTES".to_owned(),
+            name: "Test Exchange".to_owned(),
+            country: "Testland".to_owned(),
             currency: "AUD".into(),
-            timezone: "UTC".to_string(),
+            timezone: "UTC".to_owned(),
             settlement_days: 2,
-            close_time: "16:00".to_string(),
+            close_time: "16:00".to_owned(),
         }
     }
 
@@ -321,7 +321,7 @@ mod tests {
         let pool = test_pool().await;
         db_upsert(&pool, &xtest()).await.unwrap();
         let mut updated = xtest();
-        updated.name = "Updated Exchange".to_string();
+        updated.name = "Updated Exchange".to_owned();
         db_upsert(&pool, &updated).await.unwrap();
         let got = db_get(&pool, "XTES").await.unwrap().unwrap();
         assert_eq!(got.name, "Updated Exchange");
@@ -580,13 +580,13 @@ mod tests {
     async fn db_upsert_rejects_malformed_close_time_and_unknown_timezone() {
         let pool = test_pool().await;
         let mut ex = xtest();
-        ex.close_time = "nonsense".to_string();
+        ex.close_time = "nonsense".to_owned();
         assert!(matches!(
             db_upsert(&pool, &ex).await.unwrap_err(),
             UpsertError::MalformedCloseTime(v) if v == "nonsense"
         ));
-        ex.close_time = "16:00".to_string();
-        ex.timezone = "Mars/Olympus".to_string();
+        ex.close_time = "16:00".to_owned();
+        ex.timezone = "Mars/Olympus".to_owned();
         assert!(matches!(
             db_upsert(&pool, &ex).await.unwrap_err(),
             UpsertError::UnknownTimezone(v) if v == "Mars/Olympus"
@@ -594,7 +594,7 @@ mod tests {
         assert!(db_get(&pool, "XTES").await.unwrap().is_none());
 
         // The ordinary seeded shapes are accepted: a real zone and `HH:MM`.
-        ex.timezone = "UTC".to_string();
+        ex.timezone = "UTC".to_owned();
         db_upsert(&pool, &ex).await.unwrap();
         assert_eq!(
             db_get(&pool, "XTES").await.unwrap().unwrap().close_time,

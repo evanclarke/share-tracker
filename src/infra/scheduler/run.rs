@@ -58,7 +58,7 @@ pub(super) async fn run_job(
     job: &Arc<RegisteredJob>,
     params: JobParams,
 ) -> Result<(), String> {
-    let (pool, name, job) = (pool.clone(), name.to_string(), job.clone());
+    let (pool, name, job) = (pool.clone(), name.to_owned(), job.clone());
     tokio::spawn(async move { run_attached(&pool, &name, &job, params).await })
         .await
         .unwrap_or_else(|e| Err(join_failure(e)))
@@ -79,7 +79,7 @@ fn join_failure(e: tokio::task::JoinError) -> String {
         .or_else(|| payload.downcast_ref::<String>().cloned());
     match message {
         Some(m) => format!("job panicked: {m}"),
-        None => "job panicked".to_string(),
+        None => "job panicked".to_owned(),
     }
 }
 
@@ -153,7 +153,7 @@ impl StoredSchedule {
         Self {
             name: entry.name.clone(),
             cron: entry.expr.clone(),
-            timezone: entry.tz.map(|tz| tz.name().to_string()),
+            timezone: entry.tz.map(|tz| tz.name().to_owned()),
             id: None,
         }
     }

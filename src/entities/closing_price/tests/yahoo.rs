@@ -50,7 +50,7 @@ fn yahoo_symbol_prefers_the_listings_stored_price_symbol_override() {
     // XLON has no derived mapping, so without an override it errors...
     assert!(yahoo_symbol(&market, d).is_err());
     // ...but a stored price_symbol resolves it.
-    market.listing.price_symbol = Some("BARC.L".to_string());
+    market.listing.price_symbol = Some("BARC.L".to_owned());
     assert_eq!(yahoo_symbol(&market, d).unwrap(), "BARC.L");
 }
 
@@ -69,6 +69,6 @@ fn yahoo_symbol_override_wins_over_the_stored_price_symbol() {
         None,
         HashSet::new(),
     );
-    market.symbol_override = Some("LAAC-OLD".to_string());
+    market.symbol_override = Some("LAAC-OLD".to_owned());
     assert_eq!(yahoo_symbol(&market, ymd(2024, 6, 3)).unwrap(), "LAAC-OLD");
 }

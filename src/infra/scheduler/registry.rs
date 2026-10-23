@@ -173,7 +173,7 @@ where
     Fut: Future<Output = JobOutcome> + Send + 'static,
 {
     jobs.insert(
-        name.to_string(),
+        name.to_owned(),
         RegisteredJob::from_fn(JobTrigger::Scheduled, work),
     );
 }
@@ -188,7 +188,7 @@ where
     Fut: Future<Output = JobOutcome> + Send + 'static,
 {
     jobs.insert(
-        name.to_string(),
+        name.to_owned(),
         RegisteredJob::from_fn(JobTrigger::ManualOnly, work),
     );
 }
@@ -247,7 +247,7 @@ pub fn registry(
                 // says so rather than showing an unqualified `ok` (SCENARIOS
                 // T-09).
                 Ok(skipped
-                    .then(|| "post-backup command skipped at the caller's request".to_string()))
+                    .then(|| "post-backup command skipped at the caller's request".to_owned()))
             }
         }
     });

@@ -861,7 +861,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await

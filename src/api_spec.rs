@@ -286,7 +286,7 @@ fn operation_id(verb: Verb, path: &str, statuses: &[u16], answers_array: bool) -
     };
     let segments = path.split('/').filter(|s| !s.is_empty());
     let (params, literals): (Vec<&str>, Vec<&str>) = segments.partition(|s| s.starts_with('{'));
-    let mut id = word.to_string();
+    let mut id = word.to_owned();
     if literals.is_empty() {
         id.push_str("Index");
     }
@@ -395,7 +395,7 @@ fn slice_where(
                             .as_str()
                             .and_then(|r| r.strip_prefix("#/components/schemas/"))
                     {
-                        out.push(name.to_string());
+                        out.push(name.to_owned());
                     }
                     refs(child, out);
                 }
@@ -460,7 +460,7 @@ fn slice_where(
             "tags" => Value::Array(tags.clone()),
             "components" => {
                 let mut components = value.as_object()?.clone();
-                components.insert("schemas".to_string(), Value::Object(reached.clone()));
+                components.insert("schemas".to_owned(), Value::Object(reached.clone()));
                 Value::Object(components)
             }
             _ => value.clone(),
@@ -601,7 +601,7 @@ fn complete(op: &mut Operation, verb: Verb, path: &str) {
             if response.content.get("application/json").is_some_and(is_array)
     );
     op.operation_id = Some(operation_id(verb, path, &statuses, answers_array));
-    op.tags = Some(vec![tag_for(path).to_string()]);
+    op.tags = Some(vec![tag_for(path).to_owned()]);
     op.description = None;
     let mut parameters: Vec<RefOr<Parameter>> =
         path_parameters(path).into_iter().map(RefOr::T).collect();
@@ -637,7 +637,7 @@ fn complete(op: &mut Operation, verb: Verb, path: &str) {
                     (false, true, true) => "A JSON array request body.",
                     (false, true, false) => "The JSON request body.",
                 }
-                .to_string(),
+                .to_owned(),
             );
             body.required = Some(Required::True);
             Some(structured)
@@ -763,13 +763,13 @@ fn components(generated: Option<Components>, mode: AuthMode) -> Components {
         // client can be configured rather than guessing.
         let mut schemes = std::collections::BTreeMap::new();
         schemes.insert(
-            "bearerAuth".to_string(),
+            "bearerAuth".to_owned(),
             RefOr::T(SecurityScheme::Http(
                 HttpBuilder::new().scheme(HttpAuthScheme::Bearer).build(),
             )),
         );
         schemes.insert(
-            "sessionCookie".to_string(),
+            "sessionCookie".to_owned(),
             RefOr::T(SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::new(
                 "st_session",
             )))),
@@ -1031,7 +1031,7 @@ async fn serve_document(
             .to_string(),
         (Some(_), Some(_)) => {
             return Err(ApiError::BadRequest(
-                "send at most one of ?tag= and ?operation=".to_string(),
+                "send at most one of ?tag= and ?operation=".to_owned(),
             ));
         }
     };
@@ -1202,7 +1202,7 @@ mod tests {
         let name = |schema: &Value| {
             schema["$ref"]
                 .as_str()
-                .map(|r| r.trim_start_matches("#/components/schemas/").to_string())
+                .map(|r| r.trim_start_matches("#/components/schemas/").to_owned())
         };
         match media.as_str() {
             "application/json" => {
@@ -1211,11 +1211,11 @@ mod tests {
                 } else if schema["type"] == "array" {
                     name(&schema["items"]).map_or(Body::JsonIntegers, Body::JsonArray)
                 } else {
-                    Body::JsonFree(description.to_string())
+                    Body::JsonFree(description.to_owned())
                 }
             }
             FORM => Body::Form(name(schema).expect("a form body names its schema")),
-            other => Body::Other(other.to_string()),
+            other => Body::Other(other.to_owned()),
         }
     }
 
@@ -1249,7 +1249,7 @@ mod tests {
                     verb,
                     path.clone(),
                     statuses,
-                    op["summary"].as_str().unwrap_or("").to_string(),
+                    op["summary"].as_str().unwrap_or("").to_owned(),
                     body_of(&op["requestBody"]["content"], ""),
                     success,
                 ));
@@ -1293,7 +1293,7 @@ mod tests {
         sites.sort();
         let classified: Vec<String> = UNDOCUMENTED_REGISTRATIONS
             .iter()
-            .map(|(file, _)| (*file).to_string())
+            .map(|(file, _)| (*file).to_owned())
             .collect();
         assert_eq!(
             sites, classified,
@@ -1561,7 +1561,7 @@ mod tests {
             // The 500 is named through the shape it comes from (the manual job
             // trigger), not as a bare code — which the empty-bodied 500 shares.
             let needle = if code == 500 {
-                "a failed POST /jobs/{name}'s 500".to_string()
+                "a failed POST /jobs/{name}'s 500".to_owned()
             } else {
                 code.to_string()
             };
@@ -1716,7 +1716,7 @@ mod tests {
                     id.chars().all(|c| c.is_ascii_alphanumeric()),
                     "{method} {path}'s operationId {id:?} is not a plain identifier"
                 );
-                if let Some(other) = ids.insert(id.to_string(), format!("{method} {path}")) {
+                if let Some(other) = ids.insert(id.to_owned(), format!("{method} {path}")) {
                     panic!("{method} {path} and {other} share the operationId {id}");
                 }
                 let tags = op["tags"]
@@ -1853,7 +1853,7 @@ mod tests {
             match v {
                 Value::Object(map) => {
                     if let Some(Value::String(r)) = map.get("$ref") {
-                        refs.push(r.trim_start_matches("#/components/schemas/").to_string());
+                        refs.push(r.trim_start_matches("#/components/schemas/").to_owned());
                     }
                     if let Some(properties) = map.get("properties") {
                         props.push(properties);
@@ -2094,7 +2094,7 @@ mod tests {
         }
         assert_eq!(
             with_429,
-            vec!["POST /login".to_string()],
+            vec!["POST /login".to_owned()],
             "only POST /login answers 429"
         );
 
@@ -2147,7 +2147,7 @@ mod tests {
         let mut unresolved = Vec::new();
         collect_refs(&doc, &mut |name| {
             if !registered.contains_key(name) {
-                unresolved.push(name.to_string());
+                unresolved.push(name.to_owned());
             }
         });
         assert!(
@@ -2210,7 +2210,7 @@ mod tests {
                     params
                         .iter()
                         .filter(|p| p["in"] == "query")
-                        .filter_map(|p| p["name"].as_str().map(str::to_string))
+                        .filter_map(|p| p["name"].as_str().map(str::to_owned))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -2276,7 +2276,7 @@ mod tests {
                 .into_iter()
                 .flatten()
                 .filter(|p| p["in"] == "query")
-                .filter_map(|p| p["name"].as_str().map(str::to_string))
+                .filter_map(|p| p["name"].as_str().map(str::to_owned))
                 .collect();
             let mut mentioned = summary_query_names(summary);
             declared.sort();
@@ -2471,7 +2471,7 @@ mod tests {
             let mut heading = String::new();
             for line in index.lines() {
                 if let Some(rest) = line.strip_prefix("## ") {
-                    heading = rest.split(" — ").next().unwrap_or_default().to_string();
+                    heading = rest.split(" — ").next().unwrap_or_default().to_owned();
                     continue;
                 }
                 let mut words = line.split_whitespace();
@@ -2501,7 +2501,7 @@ mod tests {
                     line.contains(op["summary"].as_str().unwrap_or_default()),
                     "{verb} {path}'s index line must carry its summary"
                 );
-                listed.push((path.to_string(), verb.to_string()));
+                listed.push((path.to_owned(), verb.to_owned()));
             }
             listed.sort();
             let before = listed.len();
@@ -2532,7 +2532,7 @@ mod tests {
                 Value::Object(map) => {
                     for (key, child) in map {
                         if key == "$ref" {
-                            out.insert(child.as_str().unwrap_or_default().to_string());
+                            out.insert(child.as_str().unwrap_or_default().to_owned());
                         }
                         refs(child, out);
                     }
@@ -2652,7 +2652,7 @@ mod tests {
             let id = doc["paths"][&path][method.to_ascii_lowercase()]["operationId"]
                 .as_str()
                 .expect("an operationId")
-                .to_string();
+                .to_owned();
             let slice = operation_slice(&doc, &id).unwrap_or_else(|| panic!("{id} has no slice"));
             assert_self_contained_slice(
                 &doc,
@@ -2700,7 +2700,7 @@ mod tests {
         let one: Value = client.get_json("/openapi.json?operation=createSells").await;
         assert_eq!(
             documented_routes(&one),
-            [("/sells".to_string(), "POST".to_string())]
+            [("/sells".to_owned(), "POST".to_owned())]
         );
         assert!(one["components"]["schemas"]["SellBody"].is_object());
         let unknown = client.get("/openapi.json?operation=nope").await;
@@ -3122,7 +3122,7 @@ mod tests {
                         Verb::Post => client.post(&uri, &body).await,
                         other => panic!("a request body on a {other:?}"),
                     };
-                    resp.text().to_string()
+                    resp.text().to_owned()
                 }
             };
             let full = sample(schemas, &schema);

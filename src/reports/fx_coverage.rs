@@ -247,15 +247,15 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
             ),
         };
         alerts.push(FxCoverageAlert {
-            kind: "missing_rate".to_string(),
-            record: c.record.to_string(),
+            kind: "missing_rate".to_owned(),
+            record: c.record.to_owned(),
             record_id: c.id,
             listing_id: c.listing_id,
             ticker: c.ticker,
             date: c.date,
             currency: c.currency,
             month: month.to_string(),
-            resting_on: Some(resting_on.to_string()),
+            resting_on: Some(resting_on.to_owned()),
             detail,
         });
     }
@@ -276,8 +276,8 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
         let settlement_date: NaiveDate = row.try_get("settlement_date")?;
         let currency: CurrencyCode = row.try_get("currency")?;
         alerts.push(FxCoverageAlert {
-            kind: "settlement_crosses_rate_month".to_string(),
-            record: "trade".to_string(),
+            kind: "settlement_crosses_rate_month".to_owned(),
+            record: "trade".to_owned(),
             record_id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             ticker: row.try_get("ticker")?,
@@ -340,8 +340,8 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
             _ => String::new(),
         };
         alerts.push(FxCoverageAlert {
-            kind: "reduction_converted_at_acquisition_month".to_string(),
-            record: "trade".to_string(),
+            kind: "reduction_converted_at_acquisition_month".to_owned(),
+            record: "trade".to_owned(),
             record_id: row.try_get("id")?,
             listing_id: row.try_get("listing_id")?,
             ticker: row.try_get("ticker")?,

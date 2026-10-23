@@ -1554,8 +1554,8 @@ mod tests {
         };
         *demerger_close_date = Some(d(2024, 6, 28));
         *demerger_close_price = Some("24.90".parse().unwrap());
-        *demerger_close_sourced_from = Some("nyse.com daily close".to_string());
-        *demerger_close_reason = Some("the provider adjusts the series".to_string());
+        *demerger_close_sourced_from = Some("nyse.com daily close".to_owned());
+        *demerger_close_reason = Some("the provider adjusts the series".to_owned());
         corporate_action::db_upsert(&pool, &action).await.unwrap();
 
         let stored: String = sqlx::query_scalar(
@@ -1609,7 +1609,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await

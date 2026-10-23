@@ -1114,7 +1114,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Personal CHESS".to_string(),
+                name: "Personal CHESS".to_owned(),
             },
         )
         .await

@@ -936,7 +936,7 @@ fn edit_it_with(id: TradeId, existing: super::model::TradeType) -> String {
         super::model::TradeType::Buy => format!("Edit that Buy with PUT /trades/{id}"),
         super::model::TradeType::DRP => {
             "A DRP parcel is entered by reinvesting its distribution (POST /income/:id/reinvest)"
-                .to_string()
+                .to_owned()
         }
     }
 }

@@ -467,7 +467,7 @@ mod tests {
             .await;
         let (status, body) = {
             let resp = client.delete("/amma_statements/1").await;
-            (resp.status, resp.text().to_string())
+            (resp.status, resp.text().to_owned())
         };
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
@@ -484,7 +484,7 @@ mod tests {
         let client = ApiClient::over(router().with_state(pool));
         let (status, body) = {
             let resp = client.delete("/listings/1").await;
-            (resp.status, resp.text().to_string())
+            (resp.status, resp.text().to_owned())
         };
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
@@ -508,7 +508,7 @@ mod tests {
             .expect_status(StatusCode::CREATED);
         let (status, body) = {
             let resp = client.delete("/exchanges/XASX").await;
-            (resp.status, resp.text().to_string())
+            (resp.status, resp.text().to_owned())
         };
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(
@@ -556,7 +556,7 @@ mod tests {
             .expect_status(StatusCode::CREATED);
         let (status, body) = {
             let resp = client.delete("/corporate_actions/1").await;
-            (resp.status, resp.text().to_string())
+            (resp.status, resp.text().to_owned())
         };
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(
@@ -1137,7 +1137,7 @@ mod tests {
                 .into_iter()
                 .flatten()
                 .filter(|p| p["in"] == "query")
-                .filter_map(|p| p["name"].as_str().map(str::to_string))
+                .filter_map(|p| p["name"].as_str().map(str::to_owned))
                 .collect();
             params.sort();
             lists.insert(path.clone(), params);
@@ -1162,7 +1162,7 @@ mod tests {
             .map(|r| {
                 let mut filters: Vec<String> = r.filters.iter().map(|f| f.to_string()).collect();
                 filters.sort();
-                (r.path.to_string(), filters)
+                (r.path.to_owned(), filters)
             })
             .collect();
         assert_eq!(

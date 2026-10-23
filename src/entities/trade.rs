@@ -131,7 +131,7 @@ mod tests {
             .price(Decimal::from(100))
             .brokerage(dec("9.95"))
             .gst_on_brokerage(dec("0.995"))
-            .with(|t| t.contract_note_ref = Some("CN001".to_string()))
+            .with(|t| t.contract_note_ref = Some("CN001".to_owned()))
             .build()
     }
 
@@ -180,7 +180,7 @@ mod tests {
             pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await
@@ -213,7 +213,7 @@ mod tests {
             got.settlement_date,
             NaiveDate::from_ymd_opt(2024, 1, 17).unwrap()
         );
-        assert_eq!(got.contract_note_ref, Some("CN001".to_string()));
+        assert_eq!(got.contract_note_ref, Some("CN001".to_owned()));
     }
 
     #[tokio::test]
@@ -1949,7 +1949,7 @@ mod tests {
     ) -> (StatusCode, String) {
         let resp = client(pool).put(format!("/trades/{id}"), &body).await;
         let status = resp.status;
-        (status, resp.text().to_string())
+        (status, resp.text().to_owned())
     }
 
     /// Degenerate core figures are rejected with 422 per shape — a zero or
@@ -3686,7 +3686,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await

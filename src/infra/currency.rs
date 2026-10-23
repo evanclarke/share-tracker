@@ -43,7 +43,7 @@ impl CurrencyCode {
     /// Australian dollars — the reporting currency, the one no `fx_rate`
     /// converts.
     pub fn aud() -> Self {
-        Self("AUD".to_string())
+        Self("AUD".to_owned())
     }
 
     /// Is an amount in this currency already in AUD? Case-insensitive: the
@@ -74,7 +74,7 @@ impl fmt::Display for CurrencyCode {
 
 impl From<&str> for CurrencyCode {
     fn from(code: &str) -> Self {
-        Self(code.to_string())
+        Self(code.to_owned())
     }
 }
 

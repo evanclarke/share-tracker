@@ -253,7 +253,7 @@ mod tests {
     }
 
     async fn body_string(resp: ApiResponse) -> String {
-        resp.text().to_string()
+        resp.text().to_owned()
     }
 
     #[tokio::test]
@@ -476,7 +476,7 @@ mod tests {
                     hits.push(UnassociatedLabel {
                         module,
                         line: i + 1,
-                        source_line: trimmed.to_string(),
+                        source_line: trimmed.to_owned(),
                     });
                 }
             }
@@ -639,7 +639,7 @@ mod tests {
                     hits.push(BarePaint {
                         module,
                         line: i + 1,
-                        source_line: line.trim().to_string(),
+                        source_line: line.trim().to_owned(),
                     });
                 }
             }
@@ -799,7 +799,7 @@ mod tests {
                 hits.push(BareViewReload {
                     module,
                     line: i + 1,
-                    source_line: line.trim().to_string(),
+                    source_line: line.trim().to_owned(),
                 });
             }
         }
@@ -2521,7 +2521,7 @@ mod tests {
                 depth -= trimmed.matches('}').count();
                 continue;
             }
-            out.push((n + 1, line.to_string()));
+            out.push((n + 1, line.to_owned()));
         }
         out
     }
@@ -2532,7 +2532,7 @@ mod tests {
     /// continues into a non-hex letter (`#f00d-something`) is a name too.
     fn colour_literal(line: &str) -> Option<String> {
         if line.contains("rgb(") || line.contains("rgba(") {
-            return Some("rgb()/rgba()".to_string());
+            return Some("rgb()/rgba()".to_owned());
         }
         let chars: Vec<char> = line.chars().collect();
         for (i, c) in chars.iter().enumerate() {
@@ -3669,7 +3669,7 @@ mod tests {
             pool,
             // Only the backup job's *body* reads the path; registration never
             // touches it, and no job runs in this test.
-            "unused.db".to_string(),
+            "unused.db".to_owned(),
             None,
             None,
             crate::entities::closing_price::test_support::QuoteStub::default().shared(),
@@ -4067,7 +4067,7 @@ mod tests {
                         v.split_once('\'')
                             .expect("an option value is a quoted literal")
                             .0
-                            .to_string()
+                            .to_owned()
                     })
                     .collect()
             } else {
@@ -4075,7 +4075,7 @@ mod tests {
             };
             assert!(!values.is_empty(), "the {name} picker offers nothing");
             assert!(
-                pickers.insert(name.to_string(), values).is_none(),
+                pickers.insert(name.to_owned(), values).is_none(),
                 "two sel() pickers are named {name} — the pin below cannot tell them apart"
             );
         }
@@ -4088,7 +4088,7 @@ mod tests {
             .split('\'')
             .skip(1)
             .step_by(2)
-            .map(str::to_string)
+            .map(str::to_owned)
             .collect()
     }
 
@@ -4165,7 +4165,7 @@ mod tests {
             "table",
             crate::reports::row_history::AUDITED_TABLES
                 .iter()
-                .map(|t| (*t).to_string())
+                .map(|t| (*t).to_owned())
                 .collect(),
         );
         // The parcel-selection strategies are never stored, so the source is
@@ -4180,7 +4180,7 @@ mod tests {
                         .expect("a strategy serialises")
                         .as_str()
                         .expect("to a string")
-                        .to_string()
+                        .to_owned()
                 })
                 .collect(),
         );
@@ -4199,7 +4199,7 @@ mod tests {
             "the Trades form enters acquisitions only"
         );
         assert!(
-            trade_types.contains(&"Buy".to_string()),
+            trade_types.contains(&"Buy".to_owned()),
             "trades.trade_type no longer admits Buy"
         );
 
@@ -4518,7 +4518,7 @@ mod tests {
             .zip(main_rs.lines().skip(1))
             .filter(|(attr, item)| attr.trim() == "#[cfg(test)]" && item.trim().ends_with(';'))
             .filter_map(|(_, item)| item.trim().trim_end_matches(';').strip_prefix("mod "))
-            .map(str::to_string)
+            .map(str::to_owned)
             .collect();
 
         let mut found = Vec::new();
@@ -4568,14 +4568,14 @@ mod tests {
                         .split(['<', '{', '(', ';'])
                         .next()
                         .unwrap_or("")
-                        .to_string();
+                        .to_owned();
                     let end = block_end(&lines, i);
                     for field_line in &lines[i..=end] {
                         if let Some(field) = decimal_field(field_line) {
                             found.push(WireDecimal {
                                 file: file.clone(),
                                 ty: ty.clone(),
-                                field: field.to_string(),
+                                field: field.to_owned(),
                             });
                         }
                     }
@@ -4653,7 +4653,7 @@ mod tests {
             let (names, after) = after.split_once(']').expect("the name list closes");
             for (n, literal) in names.split('\'').enumerate() {
                 if n % 2 == 1 {
-                    kinds.insert(literal.to_string(), kind.to_string());
+                    kinds.insert(literal.to_owned(), kind.to_owned());
                 }
             }
             rest = after;
@@ -4833,13 +4833,8 @@ mod tests {
                 hits.push(ProseMoney {
                     module,
                     line,
-                    name: (*name).to_string(),
-                    source_line: source
-                        .lines()
-                        .nth(line - 1)
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
+                    name: (*name).to_owned(),
+                    source_line: source.lines().nth(line - 1).unwrap_or("").trim().to_owned(),
                 });
             }
         }

@@ -331,10 +331,10 @@ pub(crate) async fn load_market_on(
             continue;
         }
         if let Some(exchange) = exchange::db_get(&mut *conn, mic).await? {
-            calendars.exchanges.insert(mic.to_string(), exchange);
+            calendars.exchanges.insert(mic.to_owned(), exchange);
         }
         calendars.holidays.insert(
-            mic.to_string(),
+            mic.to_owned(),
             crate::entities::exchange_holiday::db_holiday_dates_for(&mut *conn, mic).await?,
         );
     }
@@ -469,7 +469,7 @@ impl NonTradingReason {
     pub(crate) fn describe(self, date: NaiveDate) -> String {
         match self {
             NonTradingReason::Weekend => format!("a {}", date.format("%A")),
-            NonTradingReason::Holiday => "a public holiday".to_string(),
+            NonTradingReason::Holiday => "a public holiday".to_owned(),
         }
     }
 }

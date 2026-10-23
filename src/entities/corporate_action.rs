@@ -389,9 +389,9 @@ mod tests {
         {
             *demerger_close_date = Some(close_date);
             *demerger_close_price = Some(close.parse().unwrap());
-            *demerger_close_sourced_from = Some("nyse.com daily close".to_string());
+            *demerger_close_sourced_from = Some("nyse.com daily close".to_owned());
             *demerger_close_reason =
-                Some("the provider adjusts the pre-demerger series".to_string());
+                Some("the provider adjusts the pre-demerger series".to_owned());
         }
         action
     }
@@ -2546,9 +2546,9 @@ mod tests {
                 demerger_cost_base_pct: Decimal::from(36),
                 demerger_close_date: Some(d(2023, 10, 2)),
                 demerger_close_price: Some("24.90".parse().unwrap()),
-                demerger_close_sourced_from: Some("nyse.com daily close".to_string()),
+                demerger_close_sourced_from: Some("nyse.com daily close".to_owned()),
                 demerger_close_reason: Some(
-                    "the provider adjusts the pre-demerger series".to_string()
+                    "the provider adjusts the pre-demerger series".to_owned()
                 ),
             },
             "the provenance is stored trimmed, beside the two sides of the factor"
@@ -2922,7 +2922,7 @@ mod tests {
             .put("/corporate_actions/1", &payment("USD"))
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("recorded in USD") && detail.contains("held in AUD"),
             "detail must name both currencies: {detail}"
@@ -2997,7 +2997,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("recorded in USD") && detail.contains("held in AUD"),
             "detail must name both currencies: {detail}"
@@ -3114,7 +3114,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("cost_base_adjustment") && detail.contains("E10"),
             "the 422 must name where the reduction belongs: {detail}"
@@ -3753,7 +3753,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await
@@ -3813,7 +3813,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains("holding-account transfer #1 on 2023-08-01"),
             "detail: {detail}"

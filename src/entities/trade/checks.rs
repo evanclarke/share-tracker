@@ -240,32 +240,32 @@ pub(crate) fn check_amounts(c: &AmountsCheck<'_>) -> Result<(), AmountsError> {
 /// Human-readable body for an amounts 422 (shown by the web UI).
 pub(crate) fn amounts_detail(e: &AmountsError) -> String {
     match e {
-        AmountsError::QuantityNotPositive => "quantity must be positive".to_string(),
-        AmountsError::PriceNegative => "average_price cannot be negative".to_string(),
-        AmountsError::BrokerageNegative => "brokerage cannot be negative".to_string(),
-        AmountsError::GstNegative => "gst_on_brokerage cannot be negative".to_string(),
+        AmountsError::QuantityNotPositive => "quantity must be positive".to_owned(),
+        AmountsError::PriceNegative => "average_price cannot be negative".to_owned(),
+        AmountsError::BrokerageNegative => "brokerage cannot be negative".to_owned(),
+        AmountsError::GstNegative => "gst_on_brokerage cannot be negative".to_owned(),
         AmountsError::BrokerageCurrencyMismatch => {
             "brokerage_currency must equal the trade's currency — a fee billed in another \
              currency has to be entered converted into the trade's currency, since the cost \
              base, net proceeds and transaction total are all single-currency sums"
-                .to_string()
+                .to_owned()
         }
         AmountsError::FxRateNotPositive => {
-            "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)".to_string()
+            "fx_rate must be a positive foreign-per-AUD rate (1 for an AUD trade)".to_owned()
         }
         AmountsError::SettlementBeforeTrade => {
-            "settlement_date cannot be before the trade date".to_string()
+            "settlement_date cannot be before the trade date".to_owned()
         }
         AmountsError::PreCgtDate => {
             "the trade is dated before 20 September 1985 — a pre-CGT holding is outside CGT \
              and not modelled, so recording it would wrongly compute a capital gain or loss"
-                .to_string()
+                .to_owned()
         }
         AmountsError::FutureDate => {
             "the trade is dated after today — a trade records a transaction that has already \
              happened, and a future date would offer a financial year that has not begun on \
              the annual tax report; the settlement date may still be in the future"
-                .to_string()
+                .to_owned()
         }
         AmountsError::Unrepresentable(e) => e.message(),
     }

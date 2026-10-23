@@ -466,7 +466,7 @@ fn zero_summary(tax_year: i32) -> TaxYearSummary {
         deductions_dividend_and_interest: Decimal::ZERO,
         deductions_total: Decimal::ZERO,
         net_assessable_investment_income: Decimal::ZERO,
-        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
     }
 }
 
@@ -1683,13 +1683,13 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         let labels: Vec<&str> = lines.next().unwrap().split(',').collect();
         let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
         let at = |cells: &[&str], col: &str| {
-            cells[header.iter().position(|c| *c == col).unwrap()].to_string()
+            cells[header.iter().position(|c| *c == col).unwrap()].to_owned()
         };
         assert_eq!(at(&row, "dividends_assessable"), "800.00");
         assert_eq!(at(&labels, "dividends_assessable"), "11S + 11T");
@@ -1742,13 +1742,13 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         let labels: Vec<&str> = lines.next().unwrap().split(',').collect();
         let row: Vec<&str> = lines.next().expect("a record row").split(',').collect();
         let at = |cells: &[&str], col: &str| {
-            cells[header.iter().position(|c| *c == col).unwrap()].to_string()
+            cells[header.iter().position(|c| *c == col).unwrap()].to_owned()
         };
         assert_eq!(at(&labels, "trust_franked_distributions"), "13C");
         assert_eq!(at(&row, "trust_franked_distributions"), "1000.00");
@@ -2997,7 +2997,7 @@ mod tests {
                 .unwrap(),
             "attachment; filename=\"tax-summary.csv\""
         );
-        let csv = resp.text().to_string();
+        let csv = resp.text().to_owned();
         let mut lines = csv.lines();
         // Header names every TaxYearSummary field, in declaration order.
         assert_eq!(lines.next().unwrap(), CSV_HEADER.join(","));
@@ -3026,7 +3026,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next(); // the ATO label row
@@ -3102,7 +3102,7 @@ mod tests {
             .get("/portfolio/tax_summary/export")
             .await
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next();
@@ -3138,7 +3138,7 @@ mod tests {
             .await
             .expect_status(StatusCode::OK)
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         lines.next(); // the ATO label row
@@ -4272,7 +4272,7 @@ mod tests {
             .get("/portfolio/tax_summary/export")
             .await
             .text()
-            .to_string();
+            .to_owned();
         let mut lines = csv.lines();
         let header: Vec<&str> = lines.next().unwrap().split(',').collect();
         let labels: Vec<&str> = lines.next().unwrap().split(',').collect();
@@ -4775,7 +4775,7 @@ mod tests {
         let pool = test_pool().await;
         let resp = client(&pool).get("/portfolio/tax_summary/export").await;
         assert_eq!(resp.status, StatusCode::OK);
-        let csv = resp.text().to_string();
+        let csv = resp.text().to_owned();
         assert_eq!(
             csv,
             CSV_HEADER.join(",") + "\n" + &CSV_ATO_LABELS.join(",") + "\n"

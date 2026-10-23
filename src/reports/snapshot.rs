@@ -670,7 +670,7 @@ pub async fn generate(
             h.fx_provisional = resolved.fx_provisional.contains(&h.listing_id);
             h.price_carried_forward = resolved.carried_forward.contains(&h.listing_id);
         } else if let Some(reason) = excluded_reason.get(&h.listing_id) {
-            h.price_unavailable = Some((*reason).to_string());
+            h.price_unavailable = Some((*reason).to_owned());
         }
     }
     let mut gains = unrealised_gains::db_unrealised_gains_on(&mut tx, date).await?;
@@ -682,7 +682,7 @@ pub async fn generate(
             g.fx_provisional = resolved.fx_provisional.contains(&g.listing_id);
             g.price_carried_forward = resolved.carried_forward.contains(&g.listing_id);
         } else if let Some(reason) = excluded_reason.get(&g.listing_id) {
-            g.price_unavailable = Some((*reason).to_string());
+            g.price_unavailable = Some((*reason).to_owned());
         }
     }
     let mut perf = performance::db_performance_on(&mut tx, &prices, date).await?;
@@ -691,7 +691,7 @@ pub async fn generate(
             row.fx_provisional = resolved.fx_provisional.contains(&listing_id);
             row.price_carried_forward = resolved.carried_forward.contains(&listing_id);
             if let Some(reason) = excluded_reason.get(&listing_id) {
-                row.price_unavailable = Some((*reason).to_string());
+                row.price_unavailable = Some((*reason).to_owned());
             }
         }
     }
@@ -2819,9 +2819,9 @@ mod tests {
                 .map(|p| (p.snapshot_date, p.unit_price.to_string()))
                 .collect::<Vec<_>>(),
             vec![
-                (ymd(2026, 6, 3), "60.00".to_string()),
-                (ymd(2026, 6, 4), "64.91".to_string()),
-                (ymd(2026, 6, 5), "62.48".to_string()),
+                (ymd(2026, 6, 3), "60.00".to_owned()),
+                (ymd(2026, 6, 4), "64.91".to_owned()),
+                (ymd(2026, 6, 5), "62.48".to_owned()),
             ],
             "oldest first, the price per unit rather than this account's holding"
         );
@@ -3412,7 +3412,7 @@ mod tests {
             ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2026, 6, 3),
-                ticker: "LAR".to_string(),
+                ticker: "LAR".to_owned(),
                 exchange_mic: None,
                 name: None,
                 price_symbol: None,

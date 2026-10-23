@@ -390,7 +390,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await
@@ -481,7 +481,7 @@ mod tests {
                 &pool,
                 &HoldingAccount {
                     id: HoldingAccountId(id),
-                    name: name.to_string(),
+                    name: name.to_owned(),
                 },
             )
             .await
@@ -647,7 +647,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await

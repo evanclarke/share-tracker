@@ -172,7 +172,7 @@ mod tests {
         let fetcher = crate::entities::closing_price::test_support::QuoteStub::default().shared();
         let registry = crate::infra::scheduler::registry(
             pool.clone(),
-            ":memory:".to_string(),
+            ":memory:".to_owned(),
             None,
             None,
             fetcher.clone(),
@@ -330,7 +330,7 @@ mod tests {
                     .unwrap_or_else(|| panic!("{what}: no {name}"))
                     .to_str()
                     .unwrap()
-                    .to_string()
+                    .to_owned()
             };
             assert_eq!(header("x-frame-options"), "DENY", "{what}");
             assert_eq!(header("x-content-type-options"), "nosniff", "{what}");
@@ -425,7 +425,7 @@ mod tests {
 
     fn test_auth() -> Auth {
         Auth::new(
-            "evan".to_string(),
+            "evan".to_owned(),
             Auth::hash_password(&TEST_PASSWORD).unwrap(),
             None,
             CookieSecurity::PlainHttp,
@@ -517,7 +517,7 @@ mod tests {
             .split(';')
             .next()
             .unwrap()
-            .to_string();
+            .to_owned();
         let authed = client.with_header("Cookie", cookie);
         for uri in [
             "/share_tracker/static/app.js",
@@ -764,7 +764,7 @@ mod tests {
             mod tests { fn parse(json: &str) -> u8 { 0 } }\n";
         assert_eq!(
             inherent_parse_methods(code),
-            [(2, "parse".to_string()), (3, "from_str".to_string())]
+            [(2, "parse".to_owned()), (3, "from_str".to_owned())]
         );
     }
 

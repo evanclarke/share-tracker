@@ -925,7 +925,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await
@@ -1898,7 +1898,7 @@ mod tests {
             .put("/transfers/1", &body)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("same"), "detail: {detail}");
 
         // Unknown destination account → FK violation → 422.
@@ -1938,7 +1938,7 @@ mod tests {
             });
             let resp = client.put(format!("/transfers/{id}"), &body).await;
             assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-            resp.text().to_string()
+            resp.text().to_owned()
         };
 
         let detail = attempt(1, 2, 1, "2022-01-01", 1, "100").await;

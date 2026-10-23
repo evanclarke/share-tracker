@@ -268,7 +268,7 @@ pub async fn db_import_rate(
     Ok(ImportOutcomeRow::Conflicted(RateConflict {
         id: stored.0,
         currency: currency.into(),
-        month: month.to_string(),
+        month: month.to_owned(),
         stored: stored_rate,
         feed: rate,
     }))
@@ -584,28 +584,28 @@ mod tests {
             parsed,
             vec![
                 (
-                    "USD".to_string(),
-                    "2010-01".to_string(),
+                    "USD".to_owned(),
+                    "2010-01".to_owned(),
                     "0.8909".parse().unwrap()
                 ),
                 (
-                    "GBP".to_string(),
-                    "2010-01".to_string(),
+                    "GBP".to_owned(),
+                    "2010-01".to_owned(),
                     "0.5523".parse().unwrap()
                 ),
                 (
-                    "USD".to_string(),
-                    "2010-02".to_string(),
+                    "USD".to_owned(),
+                    "2010-02".to_owned(),
                     "0.8899".parse().unwrap()
                 ),
                 (
-                    "GBP".to_string(),
-                    "2010-02".to_string(),
+                    "GBP".to_owned(),
+                    "2010-02".to_owned(),
                     "0.5826".parse().unwrap()
                 ),
                 (
-                    "PHP".to_string(),
-                    "2010-02".to_string(),
+                    "PHP".to_owned(),
+                    "2010-02".to_owned(),
                     "40.10".parse().unwrap()
                 ),
             ]
@@ -680,7 +680,7 @@ mod tests {
             vec![RateConflict {
                 id: 1,
                 currency: "USD".into(),
-                month: "2010-01".to_string(),
+                month: "2010-01".to_owned(),
                 stored: "0.8909".parse().unwrap(),
                 feed: "9.9999".parse().unwrap(),
             }]
@@ -763,7 +763,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             stale,
-            vec![("2024-02-28".to_string(), 0), ("2024-03-15".to_string(), 1)]
+            vec![("2024-02-28".to_owned(), 0), ("2024-03-15".to_owned(), 1)]
         );
     }
 
@@ -990,8 +990,8 @@ mod tests {
             prop_oneof![
                 4 => (1i64..=2_000_000, 0u32..=6).prop_map(|(m, s)| Decimal::new(m, s).to_string()),
                 1 => Just(String::new()),
-                1 => Just("0".to_string()),
-                1 => Just("0.0000".to_string()),
+                1 => Just("0".to_owned()),
+                1 => Just("0.0000".to_owned()),
                 1 => (1i64..=1_000).prop_map(|m| format!("-{}", Decimal::new(m, 3))),
                 1 => "[ -~]{0,6}",
             ]

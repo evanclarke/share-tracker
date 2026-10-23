@@ -450,7 +450,7 @@ impl DuplicateCheck for ContractNoteTrade {
                 WHERE TRIM(contract_note_ref) <> '' \
                 GROUP BY listing_id, TRIM(contract_note_ref) HAVING COUNT(*) > 1) \
          ORDER BY id"
-            .to_string()
+            .to_owned()
     }
 
     fn same_entry(&self, other: &Self) -> bool {
@@ -508,7 +508,7 @@ impl DuplicateCheck for ActionEntry {
                (SELECT listing_id, action_type, date FROM corporate_actions \
                 GROUP BY listing_id, action_type, date HAVING COUNT(*) > 1) \
          ORDER BY id"
-            .to_string()
+            .to_owned()
     }
 
     fn same_entry(&self, other: &Self) -> bool {
@@ -568,7 +568,7 @@ impl DuplicateCheck for AmmaEntry {
                 GROUP BY listing_id, tax_year_end_date, holding_account_id \
                 HAVING COUNT(*) > 1) \
          ORDER BY id"
-            .to_string()
+            .to_owned()
     }
 
     fn same_entry(&self, other: &Self) -> bool {
@@ -617,7 +617,7 @@ impl DuplicateCheck for Income {
                          AND o.holding_account_id = i.holding_account_id \
                          AND o.date_paid = i.date_paid AND o.id <> i.id) \
          ORDER BY i.id"
-            .to_string()
+            .to_owned()
     }
 
     /// The same declared payment: same listing, holding account and payment
@@ -692,7 +692,7 @@ impl DuplicateCheck for InterestIncome {
          WHERE EXISTS (SELECT 1 FROM interest_income o \
                        WHERE o.date_paid = i.date_paid AND o.id <> i.id) \
          ORDER BY i.id"
-            .to_string()
+            .to_owned()
     }
 
     /// The same credit entered twice: every stored field except the id, with
@@ -745,7 +745,7 @@ impl DuplicateCheck for InvestmentExpense {
          WHERE EXISTS (SELECT 1 FROM investment_expenses o \
                        WHERE o.date_incurred = e.date_incurred AND o.id <> e.id) \
          ORDER BY e.id"
-            .to_string()
+            .to_owned()
     }
 
     /// The same invoice entered twice: every stored field except the id,

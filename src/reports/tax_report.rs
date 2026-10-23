@@ -907,7 +907,7 @@ fn disposal_parcel_rows(
 
             let acquisition_method = buy_trade
                 .map(|t| activity::trade_event(t, &inputs.fee_sale_ids))
-                .unwrap_or_else(|| "Buy".to_string());
+                .unwrap_or_else(|| "Buy".to_owned());
             let trade_date = buy_trade
                 .map(|t| t.date)
                 .filter(|d| *d != p.acquisition_date);
@@ -1563,7 +1563,7 @@ async fn push_income_rows(
                 foreign_source_income_aud: foreign,
                 tax_deferred_amount: income.tax_deferred_amount,
                 franking_credits_aud: fc - alert.map_or(Decimal::ZERO, |a| a.credits_denied),
-                franking_status: alert.map_or("entitled", |a| a.status.as_str()).to_string(),
+                franking_status: alert.map_or("entitled", |a| a.status.as_str()).to_owned(),
                 franking_credits_denied_aud: alert.map_or(Decimal::ZERO, |a| a.credits_denied),
             });
         } else if !income.is_foreign_only() {
@@ -1586,7 +1586,7 @@ async fn push_income_rows(
                 franking_credits_aud: fc - alert.map_or(Decimal::ZERO, |a| a.credits_denied),
                 lic_capital_gain_deduction_aud: lic,
                 tfn_withholding_tax_aud: tfn,
-                franking_status: alert.map_or("entitled", |a| a.status.as_str()).to_string(),
+                franking_status: alert.map_or("entitled", |a| a.status.as_str()).to_owned(),
                 franking_credits_denied_aud: alert.map_or(Decimal::ZERO, |a| a.credits_denied),
             });
         }
@@ -1866,7 +1866,7 @@ async fn push_deduction_rows(
             listing_id,
             ticker: listing_id.map(|id| ctx.ticker_as_at(id, date_incurred)),
             destination,
-            ato_label: destination.ato_label().to_string(),
+            ato_label: destination.ato_label().to_owned(),
             description: row.try_get("description")?,
         });
     }
@@ -1978,7 +1978,7 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
                 .zip(tax_summary::CSV_ATO_LABELS.iter())
                 .map(|(field, label)| TaxSummaryLine {
                     field: field.to_string(),
-                    ato_label: (*label).to_string(),
+                    ato_label: (*label).to_owned(),
                     value: obj.get(*field).cloned().unwrap_or(serde_json::Value::Null),
                 })
                 .collect()
@@ -1992,8 +1992,8 @@ pub async fn db_tax_report(pool: &SqlitePool, tax_year: i32) -> Result<TaxReport
             period_start,
             period_end,
             generated_at: Utc::now(),
-            taxpayer_basis: super::TAXPAYER_BASIS.to_string(),
-            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            taxpayer_basis: super::TAXPAYER_BASIS.to_owned(),
+            app_version: env!("CARGO_PKG_VERSION").to_owned(),
         },
         completeness,
         disposals,
@@ -2274,7 +2274,7 @@ mod tests {
             ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 3, 1),
-                ticker: "LAR".to_string(),
+                ticker: "LAR".to_owned(),
                 exchange_mic: None,
                 name: None,
                 price_symbol: None,
@@ -2800,7 +2800,7 @@ mod tests {
                 foreign_source: true,
                 foreign_tax_paid: dec("6"),
                 currency: "AUD".into(),
-                source: Some("US broker sweep".to_string()),
+                source: Some("US broker sweep".to_owned()),
                 holding_account_id: None,
             },
         )
@@ -3271,7 +3271,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await
@@ -3722,7 +3722,7 @@ mod tests {
                 gross_amount: None,
                 deductible_percentage: None,
                 currency: "AUD".into(),
-                description: Some("margin loan interest".to_string()),
+                description: Some("margin loan interest".to_owned()),
                 listing_id: None,
                 holding_account_id: None,
             },
@@ -3930,7 +3930,7 @@ mod tests {
             ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: ymd(2024, 3, 1),
-                ticker: "LAR".to_string(),
+                ticker: "LAR".to_owned(),
                 exchange_mic: None,
                 name: None,
                 price_symbol: None,
@@ -5188,12 +5188,12 @@ mod tests {
                 adjustments
                     .iter()
                     .map(|a| (
-                        a["kind"].as_str().expect("a kind").to_string(),
+                        a["kind"].as_str().expect("a kind").to_owned(),
                         json_dec(&a["per_unit"]),
                         json_dec(&a["amount"]),
                     ))
                     .collect::<Vec<_>>(),
-                vec![(kind.to_string(), dec(per_unit), dec(amount))],
+                vec![(kind.to_owned(), dec(per_unit), dec(amount))],
                 "{ticker}: the row states the reduction reaching the 400 costed units"
             );
             assert_eq!(
@@ -5318,12 +5318,12 @@ mod tests {
             adjustments
                 .iter()
                 .map(|a| (
-                    a["kind"].as_str().expect("a kind").to_string(),
+                    a["kind"].as_str().expect("a kind").to_owned(),
                     json_dec(&a["per_unit"]),
                     json_dec(&a["amount"]),
                 ))
                 .collect::<Vec<_>>(),
-            vec![("ReturnOfCapital".to_string(), dec("0.2"), dec("200"))],
+            vec![("ReturnOfCapital".to_owned(), dec("0.2"), dec("200"))],
             "the itemised row is apportioned too, or it explains a gap that isn't there"
         );
         assert_eq!(json_dec(&parcel["adjusted_cost_base_aud"]), dec("1800"));
@@ -5433,18 +5433,14 @@ mod tests {
             adjustments
                 .iter()
                 .map(|a| (
-                    a["kind"].as_str().expect("a kind").to_string(),
-                    a["date"].as_str().expect("a date").to_string(),
+                    a["kind"].as_str().expect("a kind").to_owned(),
+                    a["date"].as_str().expect("a date").to_owned(),
                     a["capped"].as_bool().expect("a capped flag"),
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                (
-                    "ReturnOfCapital".to_string(),
-                    "2023-05-01".to_string(),
-                    false
-                ),
-                ("AmitCostBase".to_string(), "2024-06-30".to_string(), true),
+                ("ReturnOfCapital".to_owned(), "2023-05-01".to_owned(), false),
+                ("AmitCostBase".to_owned(), "2024-06-30".to_owned(), true),
             ],
             "worksheet order and capped flags must match the E10/G1 walk's date order"
         );
@@ -5517,15 +5513,15 @@ mod tests {
             adjustments
                 .iter()
                 .map(|a| (
-                    a["kind"].as_str().expect("a kind").to_string(),
+                    a["kind"].as_str().expect("a kind").to_owned(),
                     json_dec(&a["amount"]),
                     a["capped"].as_bool().expect("a capped flag"),
                 ))
                 .collect::<Vec<_>>(),
             vec![
-                ("AmitCostBase".to_string(), dec("200"), true),
+                ("AmitCostBase".to_owned(), dec("200"), true),
                 // The upward row adds to the balance: nothing was capped by it.
-                ("AmitCostBase".to_string(), dec("-150"), false),
+                ("AmitCostBase".to_owned(), dec("-150"), false),
             ],
             "the worksheet must print the full amounts with the restoring row uncapped"
         );
@@ -5674,7 +5670,7 @@ mod tests {
                 indexation_eligible: false,
                 indexed_cost_base: None,
             }],
-            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
         };
 
         let err = disposal_parcel_rows(&disposal, &inputs).unwrap_err();

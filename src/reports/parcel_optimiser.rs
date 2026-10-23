@@ -615,9 +615,7 @@ async fn optimiser_handler(
     Query(req): Query<OptimiserRequest>,
 ) -> Result<Json<OptimiserResponse>, ApiError> {
     if req.units <= Decimal::ZERO {
-        return Err(ApiError::Unprocessable(
-            "units must be positive".to_string(),
-        ));
+        return Err(ApiError::Unprocessable("units must be positive".to_owned()));
     }
     // The contemplated sale's own date, defaulting to today through the shared
     // resolver rather than a fourth inline `Local::now()` (the date-scoped twin
@@ -706,7 +704,7 @@ async fn optimiser_handler(
         price_as_of,
         strategies,
         allocations,
-        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+        taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
     }))
 }
 

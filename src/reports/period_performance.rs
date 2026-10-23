@@ -1115,7 +1115,7 @@ mod tests {
             let (status, body) = resp.status_and_body();
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {body}");
             match &first {
-                None => first = Some((path, body.to_string())),
+                None => first = Some((path, body.to_owned())),
                 Some((first_path, first_body)) => {
                     assert_eq!(
                         body, first_body,

@@ -699,7 +699,7 @@ impl CorporateActionBody {
         // refused rather than stored — the rule `PUT /closing_prices/…` already
         // applies to a manual price's own `sourced_from`/`reason`.
         let non_blank = |s: String| {
-            let trimmed = s.trim().to_string();
+            let trimmed = s.trim().to_owned();
             (!trimmed.is_empty()).then_some(trimmed)
         };
         match self.action_type {
@@ -989,7 +989,7 @@ mod tests {
                 with_stray
                     .as_object_mut()
                     .unwrap()
-                    .insert(column.to_string(), stray);
+                    .insert(column.to_owned(), stray);
                 assert!(
                     body(action_type, &with_stray).kind().is_none(),
                     "{action_type} should refuse a stray {column}"

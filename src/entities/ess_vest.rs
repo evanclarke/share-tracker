@@ -485,7 +485,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await

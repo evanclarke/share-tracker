@@ -120,7 +120,7 @@ impl ExcludedHolding {
     ) -> Self {
         ExcludedHolding {
             listing_id,
-            ticker: ticker.to_string(),
+            ticker: ticker.to_owned(),
             reason: format!(
                 "no price is obtainable for {ticker} before {unpriced_before} (the provider's \
                  series begins then), so its {valuation_day} value is unknown and the holding is \

@@ -666,7 +666,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 non_discountable_gain: non_discount_gain,
                 capital_loss: loss,
                 parcels,
-                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+                taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
             })
         })
         .collect();
@@ -772,7 +772,7 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             non_discountable_gain: non_discount_gain,
             capital_loss: loss,
             parcels,
-            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_string(),
+            taxpayer_basis: crate::reports::TAXPAYER_BASIS.to_owned(),
         });
     }
 
@@ -890,7 +890,7 @@ mod tests {
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: currency.to_string().into(),
+            currency: currency.to_owned().into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             scrip_cash_per_unit: None,
@@ -911,7 +911,7 @@ mod tests {
             average_price: Decimal::from(price),
             brokerage: Decimal::ZERO,
             gst_on_brokerage: Decimal::ZERO,
-            currency: currency.to_string().into(),
+            currency: currency.to_owned().into(),
             fx_rate: Decimal::ONE,
             spot_fx_rate: None,
             deemed_acquisition_date: None,
@@ -1530,9 +1530,9 @@ mod tests {
             ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: NaiveDate::from_ymd_opt(2024, 6, 3).unwrap(),
-                ticker: "NEW".to_string(),
+                ticker: "NEW".to_owned(),
                 exchange_mic: None,
-                name: Some("NEW".to_string()),
+                name: Some("NEW".to_owned()),
                 price_symbol: None,
                 note: None,
             },
@@ -1975,7 +1975,7 @@ mod tests {
             &pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await

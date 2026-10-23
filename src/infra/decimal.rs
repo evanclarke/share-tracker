@@ -1067,7 +1067,7 @@ mod tests {
             trade_id: TradeId(7),
             listing_id: ListingId(3),
             holding_account_id: HoldingAccountId(1),
-            ticker: "VDHG".to_string(),
+            ticker: "VDHG".to_owned(),
             acquisition_date: NaiveDate::from_ymd_opt(2024, 1, 2).expect("a valid date"),
             // A deliberate mix of whole and fractional figures, so either
             // shape of leak shows up.

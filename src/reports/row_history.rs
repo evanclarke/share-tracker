@@ -648,7 +648,7 @@ mod tests {
             let client = ApiClient::over(router().with_state(pool.clone()));
             async move {
                 let path = if query.is_empty() {
-                    "/reports/row_history".to_string()
+                    "/reports/row_history".to_owned()
                 } else {
                     format!("/reports/row_history?{query}")
                 };
@@ -656,7 +656,7 @@ mod tests {
             }
         };
 
-        let resp = get("table=trades&row_id=1".to_string()).await;
+        let resp = get("table=trades&row_id=1".to_owned()).await;
         assert_eq!(resp.status, StatusCode::OK);
         let entries: Vec<Map<String, Value>> = resp.json();
         assert_eq!(entries.len(), 1);
@@ -664,13 +664,13 @@ mod tests {
         assert_eq!(entries[0]["quantity"], "100");
 
         // A row with no recorded history is an empty trail, not an error.
-        let resp = get("table=trades&row_id=999".to_string()).await;
+        let resp = get("table=trades&row_id=999".to_owned()).await;
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.text(), "[]");
 
         // Unknown table: rejected with the audited list, never interpolated
         // into SQL.
-        let resp = get("table=sqlite_master&row_id=1".to_string()).await;
+        let resp = get("table=sqlite_master&row_id=1".to_owned()).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
         let msg = resp.text();
         assert!(msg.contains("not an audited table"), "{msg}");

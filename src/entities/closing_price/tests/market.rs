@@ -43,9 +43,9 @@ async fn db_weekends_and_holidays_walk_back_to_a_trading_day() {
         &pool,
         &exchange_holiday::ExchangeHoliday {
             id: 0,
-            mic: "XASX".to_string(),
+            mic: "XASX".to_owned(),
             holiday_date: ymd(2026, 6, 5),
-            name: "Test Holiday".to_string(),
+            name: "Test Holiday".to_owned(),
         },
     )
     .await
@@ -192,9 +192,9 @@ async fn db_trading_days_follow_the_exchange_calendar_in_force_then() {
         &pool,
         &exchange_holiday::ExchangeHoliday {
             id: 0,
-            mic: "XASX".to_string(),
+            mic: "XASX".to_owned(),
             holiday_date: ymd(2025, 1, 27),
-            name: "Australia Day".to_string(),
+            name: "Australia Day".to_owned(),
         },
     )
     .await
@@ -247,7 +247,7 @@ async fn db_fetch_straddling_a_rename_calls_the_provider_once_per_identity() {
         ],
         "the range splits at the effective date"
     );
-    assert_eq!(stub.symbols(), vec!["LAAC".to_string(), "LAR".to_string()]);
+    assert_eq!(stub.symbols(), vec!["LAAC".to_owned(), "LAR".to_owned()]);
 }
 
 /// A wholly pre-rename backfill is self-healing: the operator supplies no
@@ -275,7 +275,7 @@ async fn api_backfill_before_a_rename_uses_the_old_symbol_without_an_override() 
         String::from_utf8_lossy(&bytes)
     );
 
-    assert_eq!(stub.symbols(), vec!["LAAC".to_string()]);
+    assert_eq!(stub.symbols(), vec!["LAAC".to_owned()]);
     let row = db_get_one(&pool, ListingId(1), ymd(2026, 6, 1))
         .await
         .unwrap()
@@ -445,7 +445,7 @@ async fn db_dead_symbol_advice_for_an_earlier_span_names_the_backfill_override()
 /// only a positive "no such series" answer counts, never an outage.
 #[test]
 fn yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol() {
-    let url = || "https://query2.finance.yahoo.com/v8/finance/chart/FB".to_string();
+    let url = || "https://query2.finance.yahoo.com/v8/finance/chart/FB".to_owned();
     let dead = [
         yfinance_rs::YfError::NotFound { url: url() },
         yfinance_rs::YfError::Status {
@@ -472,7 +472,7 @@ fn yahoo_classifies_only_a_no_such_series_answer_as_a_dead_symbol() {
             status: 403,
             url: url(),
         },
-        yfinance_rs::YfError::Auth("no crumb".to_string()),
+        yfinance_rs::YfError::Auth("no crumb".to_owned()),
     ];
     for error in transient {
         let classified = classify_yahoo_failure("FB", error);

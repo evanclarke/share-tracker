@@ -332,7 +332,7 @@ impl Table {
     /// so it is asserted rather than silently padded.
     pub fn new(headers: &[(&str, bool)]) -> Self {
         Self {
-            headers: headers.iter().map(|(h, _)| (*h).to_string()).collect(),
+            headers: headers.iter().map(|(h, _)| (*h).to_owned()).collect(),
             numeric: headers.iter().map(|(_, n)| *n).collect(),
             rows: Vec::new(),
         }
@@ -686,7 +686,7 @@ pub mod test_support {
         pub fn failing(message: &str) -> Arc<Self> {
             Arc::new(Self {
                 sent: Mutex::new(Vec::new()),
-                fail_with: Some(message.to_string()),
+                fail_with: Some(message.to_owned()),
             })
         }
 
@@ -733,7 +733,7 @@ pub mod test_support {
         }
 
         fn describe(&self) -> String {
-            "outbox".to_string()
+            "outbox".to_owned()
         }
     }
 }
@@ -859,7 +859,7 @@ mod tests {
                 "one@example.com".parse().expect("a mailbox"),
                 "two@example.com".parse().expect("a mailbox"),
             ],
-            subject_prefix: subject_prefix.map(str::to_string),
+            subject_prefix: subject_prefix.map(str::to_owned),
             price_alert_pct: Decimal::from(5),
         })
         .expect("the transport builds")

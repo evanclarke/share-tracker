@@ -199,7 +199,7 @@ fn headline_section(period: &period_performance::PeriodPerformance) -> Section {
     if period.holding_excluded {
         let mut note = "Holding excluded: a holding at one end of this period has no obtainable \
                         price there, so that endpoint's total omits it."
-            .to_string();
+            .to_owned();
         for excluded in &period.excluded_holdings {
             note.push(' ');
             note.push_str(&excluded.reason);
@@ -214,7 +214,7 @@ fn headline_section(period: &period_performance::PeriodPerformance) -> Section {
             "Return %",
             period
                 .total_return_pct
-                .map_or_else(|| "—".to_string(), email::signed_percent),
+                .map_or_else(|| "—".to_owned(), email::signed_percent),
         )
         .stat("Capital growth", email::signed_money(period.capital_growth))
         .stat("FX movement", email::signed_money(period.fx_movement))
@@ -348,10 +348,10 @@ fn contributions_section(
 /// price — and gets a dash rather than a fabricated zero.
 fn unit_price_cells(points: &[snapshot::HoldingSeriesPoint]) -> (String, String) {
     let ([first, ..], Some(last)) = (points, points.last()) else {
-        return ("—".to_string(), "—".to_string());
+        return ("—".to_owned(), "—".to_owned());
     };
     if points.len() < 2 || first.unit_price.is_zero() {
-        return (email::unit_price(last.unit_price), "—".to_string());
+        return (email::unit_price(last.unit_price), "—".to_owned());
     }
     let move_pct = (last.unit_price - first.unit_price) / first.unit_price * Decimal::ONE_HUNDRED;
     (
@@ -372,7 +372,7 @@ pub async fn run_weekly_summary(
 ) -> JobOutcome {
     let Some(notifier) = notifier else {
         return Ok(Some(
-            "no [email] configured, so no weekly summary was sent".to_string(),
+            "no [email] configured, so no weekly summary was sent".to_owned(),
         ));
     };
     let Some(window) = resolve_window(pool, now.date_naive())
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(prices, "12.5000");
         assert_eq!(move_pct, "—");
         // …and none at all is a dash on both.
-        assert_eq!(unit_price_cells(&[]), ("—".to_string(), "—".to_string()));
+        assert_eq!(unit_price_cells(&[]), ("—".to_owned(), "—".to_owned()));
     }
 
     // Keeps the offline quote stub named here: every test above values from

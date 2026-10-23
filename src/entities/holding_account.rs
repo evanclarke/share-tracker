@@ -451,12 +451,12 @@ mod tests {
             .put_raw("/holding_accounts/2", r#"{"name":"Default"}"#)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("already exists"), "detail: {detail}");
 
         let resp = ApiClient::over(app()).delete("/holding_accounts/1").await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("still has"), "detail: {detail}");
     }
 

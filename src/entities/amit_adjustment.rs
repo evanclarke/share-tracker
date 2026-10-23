@@ -726,7 +726,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await
@@ -873,7 +873,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Broker".to_string(),
+                name: "Broker".to_owned(),
             },
         )
         .await
@@ -1056,7 +1056,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_string(),
+                name: "ICE Employee Plan".to_owned(),
             },
         )
         .await
@@ -1511,7 +1511,7 @@ mod tests {
         });
         let resp = client(&pool).put("/amit_adjustments/1", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("not a Buy or DRP"), "detail: {detail}");
     }
 
@@ -1551,7 +1551,7 @@ mod tests {
         );
         let resp = c.put("/amit_adjustments/2", &body).await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("already has an adjustment"), "{detail}");
         assert!(db_get(&pool, 2).await.unwrap().is_none());
     }
@@ -1568,7 +1568,7 @@ mod tests {
             pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await
@@ -1946,7 +1946,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(detail.contains("listing differs"), "{detail}");
         assert!(
             detail.contains("no transfer, scrip-for-scrip exchange or demerger traces its units"),
@@ -2052,7 +2052,7 @@ mod tests {
             &pool,
             &HoldingAccount {
                 id: HoldingAccountId(2),
-                name: "Second".to_string(),
+                name: "Second".to_owned(),
             },
         )
         .await
@@ -2158,7 +2158,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let detail = resp.text().to_string();
+        let detail = resp.text().to_owned();
         assert!(
             detail.contains(&format!("replacement parcel(s) #{replacement}")),
             "{detail}"

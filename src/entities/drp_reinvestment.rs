@@ -901,7 +901,7 @@ mod tests {
             pool,
             &crate::entities::holding_account::HoldingAccount {
                 id: HoldingAccountId(id),
-                name: name.to_string(),
+                name: name.to_owned(),
             },
         )
         .await
@@ -2249,7 +2249,7 @@ mod tests {
             )
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         assert!(text.contains("82.23000"), "body: {text}"); // 0.600 × 137.05
         assert!(text.contains("68.66"), "body: {text}");
     }
@@ -2263,7 +2263,7 @@ mod tests {
             .post_raw("/income/1/reinvest", r#"{"reinvestment_price":"9"}"#)
             .await;
         assert_eq!(resp.status, StatusCode::UNPROCESSABLE_ENTITY);
-        let text = resp.text().to_string();
+        let text = resp.text().to_owned();
         // The rejection names the account and ticker, not raw ids.
         assert!(text.contains("Default"), "body: {text}");
         assert!(text.contains("T1"), "body: {text}");

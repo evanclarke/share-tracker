@@ -72,7 +72,7 @@ impl DistributionStub {
     /// verdict on the symbol** — an outage, a rate limit, a transport failure.
     pub fn failing(message: &str) -> Self {
         Self {
-            failure: Some(FetchError::Other(message.to_string())),
+            failure: Some(FetchError::Other(message.to_owned())),
             ..Self::default()
         }
     }
@@ -81,7 +81,7 @@ impl DistributionStub {
     /// retired ticker, a standing fact rather than a transient failure.
     pub fn retired(message: &str) -> Self {
         Self {
-            failure: Some(FetchError::NoSuchSymbol(message.to_string())),
+            failure: Some(FetchError::NoSuchSymbol(message.to_owned())),
             ..Self::default()
         }
     }
@@ -89,7 +89,7 @@ impl DistributionStub {
     /// The provider serves its series only under `symbol`; any other symbol
     /// gets the retired-ticker answer. Chainable.
     pub fn serving_only(mut self, symbol: &str) -> Self {
-        self.only_symbol = Some(symbol.to_string());
+        self.only_symbol = Some(symbol.to_owned());
         self
     }
 
@@ -124,7 +124,7 @@ impl DistributionFetcher for DistributionStub {
         to: NaiveDate,
     ) -> DistributionFuture<'a> {
         let listing_id = market.listing.id;
-        let symbol = symbol.to_string();
+        let symbol = symbol.to_owned();
         Box::pin(async move {
             self.calls
                 .lock()

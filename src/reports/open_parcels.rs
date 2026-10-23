@@ -350,9 +350,9 @@ mod tests {
             ListingId(1),
             &crate::entities::listing_rename::RenameBody {
                 effective_date: NaiveDate::from_ymd_opt(2024, 6, 1).unwrap(),
-                ticker: "NEW".to_string(),
+                ticker: "NEW".to_owned(),
                 exchange_mic: None,
-                name: Some("NEW".to_string()),
+                name: Some("NEW".to_owned()),
                 price_symbol: None,
                 note: None,
             },
