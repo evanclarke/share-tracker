@@ -5,19 +5,17 @@ use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, parse_dec};
 use crate::infra::extract::Json;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::Upserted;
-use crate::infra::http::{self, ApiError, CrudEntity, Upsert, UpsertResponse};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::http::{
+    self, ApiError, CrudEntity, CrudListFilter, FilterClauses, Upsert, UpsertResponse, Upserted,
+};
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::Created;
 use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AmitAdjustment {
@@ -676,14 +674,14 @@ impl From<UpsertError> for ApiError {
 mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
-    use crate::domain::cost_base::Whereabouts;
-    use crate::domain::cost_base::{AmitReductionEvent, db_cost_base_reduction_events};
+    use crate::domain::cost_base::{
+        AmitReductionEvent, Whereabouts, db_cost_base_reduction_events,
+    };
     use crate::domain::open_parcels;
-    use crate::entities::demerger;
     use crate::entities::holding_account::{self, HoldingAccount};
-    use crate::entities::scrip_exchange;
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
+    use crate::entities::{demerger, scrip_exchange};
     use crate::reports;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;

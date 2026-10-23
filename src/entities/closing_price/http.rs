@@ -13,16 +13,15 @@ use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
 use crate::infra::id::ListingId;
 use crate::infra::respond::{NoContent, Written};
-use axum::{
-    Extension,
-    extract::{Path, State},
-};
+use axum::Extension;
+use axum::extract::{Path, State};
 use chrono::{Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::fmt;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]

@@ -27,10 +27,8 @@
 use crate::domain::open_parcels;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use crate::infra::id::{ListingId, TradeId};
+use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -364,12 +362,11 @@ mod tests {
     use super::*;
     use crate::domain::open_parcels;
     use crate::entities::amit_adjustment_generation::{self, GenerateBody};
-    use crate::entities::corporate_action;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
-    use crate::entities::{demerger, scrip_exchange};
+    use crate::entities::{corporate_action, demerger, scrip_exchange};
     use crate::reports::open_parcels::{OpenParcel, db_open_parcels};
     use crate::test_support::{self, dec, test_pool, ymd};
 

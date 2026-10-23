@@ -43,28 +43,18 @@ use crate::domain::deduction_destination::{DeductionDestination, DeductionRoutin
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::closing_price::HeldTimeline;
-use crate::entities::corporate_action;
-use crate::entities::corporate_action::UnitsAt;
-use crate::entities::corporate_action::{RocEvent, SplitEvent};
-use crate::entities::income;
+use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
-use crate::entities::listing;
 use crate::entities::trade::Trade;
+use crate::entities::{corporate_action, income, listing};
 use crate::infra::currency::CurrencyCode;
-use crate::infra::date;
-use crate::infra::db;
-use crate::infra::decimal;
 use crate::infra::decimal::{OptMoney, apportion, parse_dec, to_cents};
 use crate::infra::extract::{Json, Query};
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::http::ApiError;
-use crate::infra::http::CrudEntity;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::RightsSaleId;
-use crate::infra::id::TradeId;
+use crate::infra::fx::{FxOverride, FxRates};
+use crate::infra::http::{ApiError, CrudEntity};
+use crate::infra::id::{HoldingAccountId, ListingId, RightsSaleId, TradeId};
+use crate::infra::{date, db, decimal};
 use crate::reports::realised_gains::DisposalId;
 use crate::reports::{
     activity, amit_adjustment_cross_check, amit_cash_cross_check, e4_cross_check, franking_at_risk,
@@ -77,7 +67,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 pub fn router() -> OpenApiRouter<SqlitePool> {
     OpenApiRouter::new()
@@ -2117,26 +2108,18 @@ async fn years_handler(State(pool): State<SqlitePool>) -> Result<Json<Vec<i32>>,
 mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
-    use crate::entities::amit_adjustment_generation;
     use crate::entities::amit_adjustment_generation::GenerateBody;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::ess_vest;
-    use crate::entities::holding_account;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::income;
-    use crate::entities::listing_rename;
     use crate::entities::listing_rename::RenameBody;
-    use crate::entities::sell;
-    use crate::entities::sell::AllocationInput;
-    use crate::entities::sell::SellBody;
-    use crate::entities::{interest_income, investment_expense, rba_fx_rate};
-    use crate::infra::date;
-    use crate::infra::decimal;
+    use crate::entities::sell::{AllocationInput, SellBody};
+    use crate::entities::{
+        amit_adjustment_generation, corporate_action, ess_vest, holding_account, income,
+        interest_income, investment_expense, listing_rename, rba_fx_rate, sell,
+    };
+    use crate::infra::{date, decimal};
     use crate::reports;
-    use crate::test_support::ApiClient;
-    use crate::test_support::{self, dec, ymd};
+    use crate::test_support::{self, ApiClient, dec, ymd};
     use axum::http::StatusCode;
 
     async fn listing_amit(pool: &SqlitePool, id: i64, ticker: &str) {

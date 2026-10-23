@@ -9,8 +9,7 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
-use crate::infra::http::Upserted;
-use crate::infra::http::{self, ApiError, Upsert, UpsertResponse};
+use crate::infra::http::{self, ApiError, Upsert, UpsertResponse, Upserted};
 use crate::infra::id::ListingId;
 use crate::infra::respond::NoContent;
 use axum::extract::{Path, State};
@@ -18,7 +17,8 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ExchangeHoliday {

@@ -34,14 +34,11 @@ use chrono::{Datelike, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
-use sqlx::sqlite::SqliteArgumentsBuffer;
-use sqlx::sqlite::SqliteTypeInfo;
-use sqlx::sqlite::SqliteValueRef;
+use sqlx::sqlite::{SqliteArgumentsBuffer, SqliteTypeInfo, SqliteValueRef};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
-use std::fmt;
-use std::iter;
 use std::str::FromStr;
+use std::{fmt, iter};
 
 use crate::infra::currency::{Aud, CurrencyCode};
 use crate::infra::decimal::parse_dec;
@@ -595,8 +592,7 @@ mod tests {
     use super::*;
     use crate::entities::rba_fx_rate;
     use crate::test_support;
-    use crate::test_support::SourceFile;
-    use crate::test_support::test_pool;
+    use crate::test_support::{SourceFile, test_pool};
 
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()

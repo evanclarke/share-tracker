@@ -2,9 +2,9 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
+use crate::infra::http::{
+    self, ApiError, CrudEntity, CrudListFilter, FilterClauses, UpsertResponse, Upserted,
+};
 use crate::infra::id::ListingId;
 use crate::infra::respond::Created;
 use axum::extract::{Path, State};
@@ -12,7 +12,8 @@ use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 // Variants are serialized verbatim to JSON and persisted to the TEXT
 // `security_type` column (matched by a CHECK constraint), so the acronym

@@ -3,15 +3,14 @@ use crate::entities::listing;
 use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// One open (not fully sold) purchase parcel — the per-parcel schedule a user
 /// reconciles against a broker statement. All monetary figures are AUD,
@@ -186,17 +185,14 @@ async fn open_parcels_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action;
-    use crate::entities::demerger;
-    use crate::entities::listing_rename;
     use crate::entities::listing_rename::RenameBody;
-    use crate::entities::rba_fx_rate;
-    use crate::entities::scrip_exchange;
+    use crate::entities::{
+        corporate_action, demerger, listing_rename, rba_fx_rate, scrip_exchange,
+    };
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
-    use std::time::Duration;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
         test_support::listing(id)

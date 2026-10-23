@@ -91,19 +91,17 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal;
 use crate::infra::extract::Query;
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::fx::RateMonth;
+use crate::infra::fx::{FxOverride, FxRates, RateMonth};
 use crate::infra::http::{ApiError, DryRunQuery};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId};
 use crate::infra::respond::Written;
 use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(thiserror::Error, Debug)]
 pub enum VestError {
@@ -313,22 +311,16 @@ impl From<VestError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::holding_account;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::rba_fx_rate;
-    use crate::entities::sell;
-    use crate::entities::sell::AllocationInput;
-    use crate::entities::sell::SellBody;
+    use crate::entities::sell::{AllocationInput, SellBody};
     use crate::entities::trade::TradeType;
-    use crate::entities::transfer;
     use crate::entities::transfer::TransferBody;
-    use crate::entities::{ess_statement, listing};
-    use crate::reports::portfolio;
-    use crate::reports::realised_gains;
+    use crate::entities::{
+        corporate_action, ess_statement, holding_account, listing, rba_fx_rate, sell, transfer,
+    };
     use crate::reports::realised_gains::DisposalId;
+    use crate::reports::{portfolio, realised_gains};
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
     use chrono::NaiveDate;

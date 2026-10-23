@@ -4,12 +4,12 @@ use super::CorporateActionListQuery;
 use super::db::{db_create, db_delete, db_upsert};
 use super::model::{CorporateAction, CorporateActionBody};
 use crate::infra::extract::Json;
-use crate::infra::http::Upserted;
-use crate::infra::http::{self, ApiError, UpsertResponse};
+use crate::infra::http::{self, ApiError, UpsertResponse, Upserted};
 use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 http::crud_list_route!(
     list,

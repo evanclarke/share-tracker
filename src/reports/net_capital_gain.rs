@@ -41,23 +41,19 @@
 //! a capital loss forward (label 18V is reported until the loss is used, not
 //! only in years with a CGT event — see [`net_years`]).
 
-use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
-use crate::domain::open_parcels;
 use crate::domain::tax_year::tax_year_for;
+use crate::domain::{cgt_discount, open_parcels};
 use crate::entities::cgt_settings;
 use crate::entities::corporate_action::{self, AcquiredUnits, RocEvent};
 use crate::infra::currency::CurrencyCode;
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{Csv, Payload};
+use crate::infra::{date, db};
 use crate::reports;
 use crate::reports::export::{self, Cents};
 use crate::reports::parcel_optimiser::{self, DisposalTotals, HypotheticalAllocation, Strategy};
@@ -70,7 +66,8 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct NetCapitalGainYear {
@@ -1490,20 +1487,18 @@ async fn what_if_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::demerger;
-    use crate::entities::holding_account;
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::scrip_exchange;
     use crate::entities::sell::AllocationInput;
-    use crate::entities::{amma, cgt_settings, corporate_action, rba_fx_rate, trade};
-    use crate::infra::date;
-    use crate::infra::decimal;
+    use crate::entities::{
+        amma, cgt_settings, corporate_action, demerger, holding_account, rba_fx_rate,
+        scrip_exchange, trade,
+    };
+    use crate::infra::{date, decimal};
     use crate::reports;
     use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool};
-    use axum::http::StatusCode;
-    use axum::http::header;
+    use axum::http::{StatusCode, header};
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

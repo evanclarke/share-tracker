@@ -22,9 +22,7 @@ use crate::infra::db;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::reports::realised_gains;
 use axum::extract::State;
 use chrono::NaiveDate;
@@ -32,7 +30,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Review window when none is requested: a Buy within 30 days either side of
 /// the loss Sell is flagged. A convention for review, not an ATO bright line
@@ -192,10 +191,9 @@ async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::holding_account;
     use crate::entities::sell::AllocationInput;
-    use crate::entities::transfer;
     use crate::entities::transfer::TransferBody;
+    use crate::entities::{holding_account, transfer};
     use crate::reports::realised_gains::DisposalId;
     use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
     use axum::http::StatusCode;

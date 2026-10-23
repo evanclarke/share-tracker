@@ -13,30 +13,26 @@
 //! Rust syntax (SCENARIOS T-06). `scheduler::tests::
 //! no_registered_job_records_its_failure_as_a_debug_string` pins it.
 
-use crate::entities::closing_price;
 use crate::entities::closing_price::SharedFetcher;
-use crate::entities::currencies;
-use crate::entities::distribution_event;
 use crate::entities::distribution_event::SharedDistributionFetcher;
-use crate::entities::mic_registry;
-use crate::entities::price_alert;
-use crate::entities::rba_fx_rate;
-use crate::entities::trade;
+use crate::entities::{
+    closing_price, currencies, distribution_event, mic_registry, price_alert, rba_fx_rate, trade,
+};
 use crate::infra::db;
 use crate::infra::email::Notifier;
-use crate::reports::snapshot;
-use crate::reports::weekly_summary;
-use serde::de;
-use serde::{Deserialize, Serialize};
+use crate::reports::{snapshot, weekly_summary};
+use serde::{Deserialize, Serialize, de};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::future;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
-use tokio::sync::Mutex;
-use tokio::sync::MutexGuard;
+use tokio::sync::{Mutex, MutexGuard};
 
 /// What one run of a job returns: `Ok(None)` for a run that did the whole of
 /// its work, `Ok(Some(note))` for one that succeeded while doing **less** than

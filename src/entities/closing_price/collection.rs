@@ -18,8 +18,7 @@ use crate::infra::id::ListingId;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// What to advise when a segment's symbol looks wrong — the remedy that can
 /// actually reach **that** segment.

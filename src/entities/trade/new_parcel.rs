@@ -16,9 +16,7 @@
 
 use crate::infra::db;
 use crate::infra::decimal::{Money, OptMoney};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 

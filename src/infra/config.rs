@@ -9,13 +9,10 @@
 
 use lettre::message::Mailbox;
 use rust_decimal::Decimal;
-use serde::Deserialize;
-use serde::de;
-use std::fmt;
-use std::fs;
+use serde::{Deserialize, de};
 use std::net::IpAddr;
-use std::path;
 use std::str::FromStr;
+use std::{fmt, fs, path};
 
 /// Where the config file is looked for when `--config` is not given.
 pub const DEFAULT_CONFIG_PATH: &str = "/usr/local/etc/share-tracker.toml";
@@ -487,10 +484,8 @@ fn mode_warning(path: &str, mode: u32) -> Option<String> {
 mod tests {
     use super::*;
     use crate::infra::args::Args;
-    use crate::infra::auth::Auth;
-    use crate::infra::auth::CookieSecurity;
-    use crate::infra::email::EmailSettings;
-    use crate::infra::email::Encryption;
+    use crate::infra::auth::{Auth, CookieSecurity};
+    use crate::infra::email::{EmailSettings, Encryption};
     use crate::test_support;
     use clap::Parser;
     use std::fs;

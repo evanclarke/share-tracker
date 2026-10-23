@@ -10,14 +10,13 @@
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
-use crate::infra::http::NoFilter;
-use crate::infra::http::Upserted;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, NoFilter, UpsertResponse, Upserted};
 use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct CgtSettings {

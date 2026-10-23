@@ -38,8 +38,7 @@
 //! transfer's own date, and units landing behind an executed operation are as
 //! stranded there as any other.
 
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use chrono::NaiveDate;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;

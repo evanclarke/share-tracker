@@ -33,8 +33,7 @@
 //! Buy is consumed by later allocations, AMIT adjustments, or income links).
 //! A recorded transfer is immutable — delete it and re-transfer instead.
 
-use crate::domain::cost_base::ParcelRow;
-use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::cost_base::{ParcelRow, UnrepresentableQuantity};
 use crate::domain::whole_holding;
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action::{UnitsAt, checked_as_acquired_quantity};
@@ -45,22 +44,17 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::extract::{Json, Query};
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::fx::RateMonth;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, ApiError, CrudEntity, DryRunQuery};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::fx::{FxOverride, FxRates, RateMonth};
+use crate::infra::http::{self, ApiError, CrudEntity, CrudListFilter, DryRunQuery, FilterClauses};
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{Created, NoContent, Written};
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Transfer {
@@ -910,14 +904,12 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::domain::open_parcels;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::listing::SecurityType;
-    use crate::entities::rba_fx_rate;
     use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
+    use crate::entities::{corporate_action, rba_fx_rate};
     use crate::infra::date;
     use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;

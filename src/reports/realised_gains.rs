@@ -1,19 +1,14 @@
-use crate::domain::cgt_discount;
 use crate::domain::cost_base::{self, ParcelRow};
-use crate::domain::indexation;
+use crate::domain::{cgt_discount, indexation};
 use crate::entities::corporate_action;
-use crate::entities::corporate_action::UnitsAt;
-use crate::entities::corporate_action::{RocEvent, SplitEvent};
+use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::decimal::{Money, OptMoney, apportion, mul_div};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::RightsSaleId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, RightsSaleId, TradeId};
 use crate::reports;
 use axum::extract::State;
 use chrono::NaiveDate;
@@ -21,7 +16,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Which disposal a realised row is, and the row that records it — a trade
 /// id and a rights-sale id are different id spaces, so the variant is what
@@ -804,18 +800,16 @@ async fn realised_gains_handler(
 mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
-    use crate::entities::demerger;
     use crate::entities::demerger::Demerge;
-    use crate::entities::holding_account;
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::listing_rename;
     use crate::entities::listing_rename::RenameBody;
-    use crate::entities::scrip_exchange;
     use crate::entities::scrip_exchange::Exchange;
     use crate::entities::sell::AllocationInput;
-    use crate::entities::transfer;
     use crate::entities::transfer::TransferBody;
-    use crate::entities::{corporate_action, listing, rba_fx_rate, trade};
+    use crate::entities::{
+        corporate_action, demerger, holding_account, listing, listing_rename, rba_fx_rate,
+        scrip_exchange, trade, transfer,
+    };
     use crate::infra::decimal;
     use crate::reports;
     use crate::reports::open_parcels;

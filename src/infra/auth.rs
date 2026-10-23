@@ -122,37 +122,28 @@ use crate::infra::config::BasePath;
 use crate::infra::http::ApiError;
 use crate::infra::respond::{Html as HtmlPage, Payload, SeeOther};
 use crate::web;
-use argon2::{
-    Argon2,
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
-};
-use axum::extract;
-use axum::{
-    Extension,
-    extract::{ConnectInfo, FromRequest, Request, State},
-    http::{HeaderMap, StatusCode, header},
-    middleware::Next,
-    response::{Html, IntoResponse, Redirect, Response},
-};
+use argon2::Argon2;
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use axum::extract::{ConnectInfo, FromRequest, Request, State};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::{Extension, extract};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use sqlx::SqlitePool;
-use std::collections::BTreeMap;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::LazyLock;
-use std::sync::MutexGuard;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
-use tokio::task;
-use tokio::time;
-use utoipa::openapi::RefOr;
-use utoipa::openapi::ResponseBuilder;
-use utoipa::openapi::response;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use tokio::{task, time};
+use utoipa::openapi::{RefOr, ResponseBuilder, response};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 const LOGIN_HTML: &str = include_str!("auth/login.html");
 const COOKIE_NAME: &str = "st_session";
@@ -1420,8 +1411,7 @@ fn build_set_cookie(auth: &Auth, base_path: &BasePath, value: Option<String>) ->
 mod tests {
     use super::*;
     use crate::test_support;
-    use crate::test_support::SourceFile;
-    use crate::test_support::{TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN};
+    use crate::test_support::{SourceFile, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN};
     use std::ops::Range;
 
     fn auth() -> Auth {
@@ -1777,7 +1767,6 @@ mod tests {
 #[cfg(test)]
 mod api_tests {
     use super::{Auth, CookieSecurity};
-    use crate::app;
     use crate::entities::closing_price::test_support::QuoteStub;
     use crate::entities::distribution_event::test_support::DistributionStub;
     use crate::infra::config::BasePath;
@@ -1785,7 +1774,7 @@ mod api_tests {
     use crate::test_support::{
         ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, WRONG_TOKEN, test_pool,
     };
-    use crate::web;
+    use crate::{app, web};
     use axum::http::{StatusCode, header};
     use sqlx::SqlitePool;
 
@@ -2001,8 +1990,9 @@ mod lockout_tests {
     use crate::entities::closing_price::test_support::QuoteStub;
     use crate::entities::distribution_event::test_support::DistributionStub;
     use crate::infra::scheduler;
-    use crate::test_support::ApiResponse;
-    use crate::test_support::{ApiClient, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, test_pool};
+    use crate::test_support::{
+        ApiClient, ApiResponse, TEST_PASSWORD, TEST_TOKEN, WRONG_PASSWORD, test_pool,
+    };
     use axum::http::HeaderValue;
     use sqlx::SqlitePool;
     use std::net::SocketAddr;

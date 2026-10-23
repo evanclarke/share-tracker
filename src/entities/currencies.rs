@@ -14,8 +14,7 @@
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
-use crate::infra::http::NoFilter;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, NoFilter};
 use axum::extract::{Extension, State};
 use quick_xml::escape;
 use quick_xml::events::Event;
@@ -24,10 +23,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
-use std::env;
-use std::mem;
 use std::sync::Arc;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use std::{env, mem};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// SIX Group "List One" — the official machine-readable ISO 4217 currency list.
 /// SIX is the ISO 4217 Maintenance Agency (on behalf of the SNV) and publishes

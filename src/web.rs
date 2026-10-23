@@ -25,14 +25,13 @@
 use crate::infra::auth::AuthMode;
 use crate::infra::config::BasePath;
 use crate::infra::respond::{Css, Html, Payload};
-use axum::{
-    Extension,
-    http::header,
-    response::{IntoResponse, Response},
-    routing::get,
-};
+use axum::Extension;
+use axum::http::header;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 const INDEX_HTML: &str = include_str!("web/index.html");
 const STYLE_CSS: &str = include_str!("web/style.css");
@@ -215,17 +214,12 @@ mod tests {
     use crate::entities::trade;
     use crate::infra::scheduler;
     use crate::reports::activity::RecordTable;
-    use crate::reports::fx_coverage;
-    use crate::reports::parcel_optimiser;
-    use crate::reports::row_history;
+    use crate::reports::{fx_coverage, parcel_optimiser, row_history};
     use crate::test_support;
-    use crate::test_support::SourceFile;
-    use crate::test_support::{ApiClient, ApiResponse, test_pool};
+    use crate::test_support::{ApiClient, ApiResponse, SourceFile, test_pool};
     use axum::http::StatusCode;
-    use std::collections::BTreeMap;
-    use std::collections::BTreeSet;
-    use std::fs;
-    use std::path;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::{fs, path};
 
     #[test]
     fn fill_template_never_rescans_a_substituted_value() {

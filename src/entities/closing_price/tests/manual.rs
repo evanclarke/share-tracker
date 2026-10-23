@@ -3,8 +3,7 @@
 
 use super::*;
 use crate::infra::id::ListingId;
-use crate::reports::row_history;
-use crate::reports::valuation;
+use crate::reports::{row_history, valuation};
 use axum::body::Bytes;
 
 async fn put_json(app: &ApiClient, uri: &str, body: serde_json::Value) -> (StatusCode, Bytes) {

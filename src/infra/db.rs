@@ -1,25 +1,18 @@
 use chrono::{DateTime, Local, NaiveDateTime};
-use sqlx::query;
-use sqlx::sqlite::SqliteArguments;
-use sqlx::{
-    Connection, Sqlite, SqlitePool, Transaction,
-    sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions},
+use sqlx::sqlite::{
+    SqliteArguments, SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqlitePoolOptions,
 };
+use sqlx::{Connection, Sqlite, SqlitePool, Transaction, query};
 use std::cmp::Reverse;
-use std::fs;
+use std::collections::HashSet;
 use std::fs::File;
-use std::io;
-use std::ops::Deref;
-use std::ops::DerefMut;
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::Duration,
-};
-use tokio::process;
-use tokio::time;
+use std::str::FromStr;
+use std::time::Duration;
+use std::{fs, io};
+use tokio::{process, time};
 
 /// How long a queued writer waits for SQLite's single write lock before it
 /// gives up and the request fails.
@@ -1037,12 +1030,9 @@ mod tests {
     use crate::infra::http::ApiError;
     use crate::test_support;
     use crate::test_support::SourceFile;
-    use std::fs;
-    use std::io;
-    use std::path;
-    use std::process::Command;
-    use std::process::Stdio;
+    use std::process::{Command, Stdio};
     use std::time::Instant;
+    use std::{fs, io, path};
     use tokio::time;
 
     /// Report files that begin **no** transaction of their own, each with the

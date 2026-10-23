@@ -1,9 +1,8 @@
 use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::tax_year::tax_year_for;
-use crate::entities::income;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
-use crate::entities::tax_year_settings;
+use crate::entities::{income, tax_year_settings};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::decimal::{mul_div, parse_dec, row_opt_dec, to_cents};
@@ -22,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct TaxYearSummary {
@@ -1292,18 +1292,14 @@ async fn tax_summary_export_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::{
+        amma, ess_statement, income, interest_income, investment_expense, listing, rba_fx_rate,
+        trade,
+    };
     use crate::reports;
     use crate::reports::tax_report;
-    use crate::test_support::ApiClient;
-    use crate::{
-        entities::{
-            amma, ess_statement, income, interest_income, investment_expense, listing, rba_fx_rate,
-            trade,
-        },
-        test_support::{self, test_pool, ymd},
-    };
-    use axum::http::StatusCode;
-    use axum::http::header;
+    use crate::test_support::{self, ApiClient, test_pool, ymd};
+    use axum::http::{StatusCode, header};
 
     /// Client over this module's own routes.
     fn client(pool: &SqlitePool) -> ApiClient {

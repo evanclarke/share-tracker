@@ -1,6 +1,5 @@
-use std::env;
-use std::io;
 use std::io::IsTerminal;
+use std::{env, io};
 use tracing_subscriber::EnvFilter;
 
 /// The filter for a `RUST_LOG` value: its directives, or `info` when it is

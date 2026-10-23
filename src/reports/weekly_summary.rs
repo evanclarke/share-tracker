@@ -38,10 +38,9 @@
 
 use crate::entities::listing;
 use crate::infra::email::{self, Document, Notifier, Section, Table};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId};
 use crate::infra::scheduler::JobOutcome;
 use crate::reports::{period_performance, snapshot};
 use chrono::{DateTime, Duration, NaiveDate, Utc};

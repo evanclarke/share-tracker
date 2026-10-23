@@ -34,27 +34,25 @@
 
 use crate::domain::adjustments::UnitsAt;
 use crate::domain::cgt_discount::discount_eligible;
-use crate::domain::contemplated_disposal;
 use crate::domain::cost_base::ParcelRow;
-use crate::domain::open_parcels;
+use crate::domain::{contemplated_disposal, open_parcels};
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
+use crate::infra::{date, db};
 use crate::reports;
-use axum::{Extension, extract::State};
+use axum::Extension;
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// A parcel-selection strategy: the order in which open parcels are consumed
 /// by a hypothetical sale.
@@ -714,15 +712,12 @@ async fn optimiser_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::sell;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::{corporate_action, sell};
     use crate::infra::date;
     use crate::reports;
     use crate::reports::net_capital_gain::WhatIfResponse;
-    use crate::reports::realised_gains::DisposalId;
-    use crate::reports::realised_gains::RealisedGainLoss;
+    use crate::reports::realised_gains::{DisposalId, RealisedGainLoss};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
     use std::collections::BTreeSet;
@@ -2340,8 +2335,7 @@ mod tests {
     mod properties {
         use super::*;
         use crate::entities::corporate_action;
-        use crate::entities::corporate_action::ActionKind;
-        use crate::entities::corporate_action::CorporateAction;
+        use crate::entities::corporate_action::{ActionKind, CorporateAction};
         use proptest::prelude::{any, prop, prop_assert, prop_assert_eq, prop_assume, proptest};
         use proptest::strategy;
         use proptest::strategy::Strategy as _;

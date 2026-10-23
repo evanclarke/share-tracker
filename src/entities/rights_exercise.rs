@@ -32,12 +32,9 @@
 //! originals and non-renounceable-offer retail premiums (an unfranked
 //! dividend — entered as income, see `docs/ato/retail-premiums.md`).
 
-use crate::domain::cost_base;
-use crate::domain::cost_base::Term;
-use crate::domain::cost_base::UnrepresentableCost;
-use crate::domain::cost_base::UnrepresentableQuantity;
-use crate::domain::whole_holding;
+use crate::domain::cost_base::{Term, UnrepresentableCost, UnrepresentableQuantity};
 use crate::domain::whole_holding::BackDatedParcel;
+use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action::{
     self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
 };
@@ -46,21 +43,19 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::{Json, Query};
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::fx::RateMonth;
+use crate::infra::fx::{FxOverride, FxRates, RateMonth};
 use crate::infra::http::{ApiError, DryRunQuery};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId};
 use crate::infra::respond::Written;
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -536,11 +531,10 @@ async fn exercise(
 mod tests {
     use super::*;
     use crate::entities;
-    use crate::entities::rba_fx_rate;
-    use crate::entities::{corporate_action::CorporateAction, listing, sell};
-    use crate::reports::open_parcels;
-    use crate::reports::realised_gains;
+    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::{listing, rba_fx_rate, sell};
     use crate::reports::realised_gains::DisposalId;
+    use crate::reports::{open_parcels, realised_gains};
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 

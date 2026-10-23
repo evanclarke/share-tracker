@@ -5,17 +5,13 @@
 //! anything about building, configuring or operating the server — and the cited
 //! ATO mirror — is present, so the documented scope cut can't silently vanish.
 
-use crate::api_spec;
-use crate::entities;
 use crate::entities::closing_price;
 use crate::infra::http;
 use crate::reports::snapshot;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::fs;
-use std::path;
-use std::path::Component;
-use std::path::PathBuf;
+use crate::{api_spec, entities};
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, PathBuf};
+use std::{fs, path};
 
 /// A mirrored ATO page as the page itself reads.
 ///

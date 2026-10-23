@@ -10,7 +10,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashSet;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// A trust income row whose statement reported a tax-deferred amount with no
 /// `ReturnOfCapital` corporate action on the listing in the same financial

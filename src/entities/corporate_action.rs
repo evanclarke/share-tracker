@@ -145,8 +145,7 @@ pub use crate::domain::adjustments::{
 /// The list route's filter type — `api_spec` reads its fields through
 /// `utoipa::IntoParams` so the OpenAPI document's query parameters come from
 /// what axum decodes rather than from prose.
-pub use db::CorporateActionListQuery;
-pub use db::{db_get_tx, rebased_quantity_beyond_range};
+pub use db::{CorporateActionListQuery, db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
 pub use model::{
     ActionKind, CorporateAction, CorporateActionBody, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS,
@@ -188,15 +187,12 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::adjustments::RolloverOrigin;
-    use crate::domain::adjustments::SplitRatio;
+    use crate::domain::adjustments::{RolloverOrigin, SplitRatio};
     use crate::domain::open_parcels;
-    use crate::entities::holding_account;
     use crate::entities::holding_account::HoldingAccount;
     use crate::entities::sell::{AllocationInput, SellBody, SellError};
-    use crate::entities::transfer;
     use crate::entities::transfer::TransferBody;
-    use crate::entities::{listing, sell};
+    use crate::entities::{holding_account, listing, sell, transfer};
     use crate::reports;
     use crate::reports::realised_gains;
     use crate::test_support::{self, ApiClient, test_pool};
@@ -4377,8 +4373,7 @@ mod tests {
     /// filters AND.
     #[tokio::test]
     async fn the_list_narrows_by_listing_and_date_range() {
-        use crate::test_support::assert_list_filters;
-        use crate::test_support::ymd;
+        use crate::test_support::{assert_list_filters, ymd};
         let pool = test_pool().await;
         insert_listing(&pool, 1, "CA1").await;
         insert_listing(&pool, 2, "CA2").await;

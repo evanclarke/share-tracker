@@ -162,8 +162,7 @@
 
 use crate::entities::trade::{Trade, TradeType};
 use crate::infra::decimal;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use crate::reports::net_capital_gain::NetCapitalGainYear;
 use crate::reports::open_parcels::OpenParcel;
 use crate::reports::portfolio::HoldingOverview;

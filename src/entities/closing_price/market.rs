@@ -10,8 +10,7 @@
 //! exactly for an exchange-less (Crypto) span.
 
 use crate::domain::listing_identity::{Identity, RenameHistory};
-use crate::entities::exchange_holiday;
-use crate::entities::{exchange, listing};
+use crate::entities::{exchange, exchange_holiday, listing};
 use crate::infra::db;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};

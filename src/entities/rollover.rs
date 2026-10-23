@@ -13,9 +13,7 @@
 //! in `entities`, while writing a Sell or a Buy is an entity's business.
 
 use crate::infra::currency::CurrencyCode;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 

@@ -1,21 +1,21 @@
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::currency::Aud;
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Extension, extract::State};
+use crate::infra::id::{HoldingAccountId, ListingId};
+use crate::infra::{date, db};
+use axum::Extension;
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Cost base figures are in AUD (each parcel converted via the ATO FX rate). The
 /// supplied `current_price` is taken as AUD too, so `market_value` is AUD.
@@ -256,11 +256,10 @@ pub(crate) async fn price_holdings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::demerger;
     use crate::entities::listing::SecurityType;
-    use crate::entities::rba_fx_rate;
-    use crate::entities::scrip_exchange;
-    use crate::entities::{amit_adjustment, amma, corporate_action, trade};
+    use crate::entities::{
+        amit_adjustment, amma, corporate_action, demerger, rba_fx_rate, scrip_exchange, trade,
+    };
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;

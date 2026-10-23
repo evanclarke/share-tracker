@@ -3,19 +3,19 @@
 //! endpoints (`PUT /sells/:id`, `POST /income/:id/reinvest`) so their
 //! invariants (allocations, residual chain) always hold.
 
+use super::model::SettlementDateSource;
 use super::{
     DeleteOutcome, Trade, TradeBody, TradeListQuery, TradeType, db_create, db_delete, db_get,
-    db_list_filtered, db_upsert_resolving_settlement, model::SettlementDateSource,
-    resolve_brokerage,
+    db_list_filtered, db_upsert_resolving_settlement, resolve_brokerage,
 };
 use crate::infra::extract::{Json, Query};
-use crate::infra::http::Upserted;
-use crate::infra::http::{self, ApiError, UpsertResponse};
+use crate::infra::http::{self, ApiError, UpsertResponse, Upserted};
 use crate::infra::id::TradeId;
 use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 pub fn router() -> OpenApiRouter<SqlitePool> {
     OpenApiRouter::new()

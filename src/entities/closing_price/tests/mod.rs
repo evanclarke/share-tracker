@@ -21,13 +21,10 @@ mod unpriced;
 mod yahoo;
 
 use super::*;
-use crate::entities::corporate_action;
-use crate::entities::corporate_action::ActionKind;
-use crate::entities::corporate_action::CorporateAction;
-use crate::entities::listing_rename;
+use crate::entities::corporate_action::{ActionKind, CorporateAction};
 use crate::entities::listing_rename::RenameBody;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::entities::{corporate_action, listing_rename};
+use crate::infra::id::{ListingId, TradeId};
 use crate::test_support;
 use axum::body::Bytes;
 

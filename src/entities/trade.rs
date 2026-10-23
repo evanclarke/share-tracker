@@ -95,14 +95,11 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::closing_price;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::demerger;
-    use crate::entities::holding_account;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::scrip_exchange;
+    use crate::entities::{
+        closing_price, corporate_action, demerger, holding_account, scrip_exchange,
+    };
     use crate::infra;
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};

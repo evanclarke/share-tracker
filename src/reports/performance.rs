@@ -42,29 +42,28 @@
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::open_parcels;
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::entities::corporate_action;
 use crate::entities::corporate_action::AcquiredUnits;
 use crate::entities::income::{Income, IncomeType};
-use crate::entities::listing;
 use crate::entities::trade::TradeType;
+use crate::entities::{corporate_action, listing};
 use crate::infra::currency::Aud;
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
-use axum::{Extension, extract::State};
+use crate::infra::id::{HoldingAccountId, ListingId};
+use crate::infra::{date, db};
+use axum::Extension;
+use axum::extract::State;
 use chrono::{Months, NaiveDate};
 use rust_decimal::{Decimal, MathematicalOps};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, SqlitePool};
 use std::collections::{BTreeMap, HashMap};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize)]
 pub struct HoldingPerformance {

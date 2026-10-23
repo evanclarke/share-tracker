@@ -2,8 +2,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal;
 use crate::infra::extract::Json;
 use crate::infra::fetch::{FeedFetcher, LiveFeedFetcher, SharedFeedFetcher, fetch_feed};
-use crate::infra::http::NoFilter;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, NoFilter};
 use crate::infra::respond::NoContent;
 use crate::reports::snapshot;
 use crate::reports::snapshot::RegenerateSummary;
@@ -13,7 +12,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::sync::Arc;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 use crate::infra::decimal::Money;
 

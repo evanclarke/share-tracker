@@ -43,7 +43,8 @@ use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// A dividend whose entitled shares fail the holding-period walk — its
 /// credits are denied, unless the year's small-shareholder exemption shields

@@ -42,8 +42,7 @@
 //! recorded Sell does.
 
 use crate::domain::tax_year;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use std::collections::HashMap;
 
 use chrono::NaiveDate;

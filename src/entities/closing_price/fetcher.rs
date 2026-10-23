@@ -13,14 +13,11 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
-use std::time::Duration;
-use std::{
-    collections::HashMap,
-    future::Future,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    time::Instant,
-};
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// One daily close as returned by a provider, before it is checked and stored.
 #[derive(Debug, Clone)]

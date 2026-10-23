@@ -3,8 +3,7 @@
 //! validation (exchange MIC validation, settlement-holiday coverage). The one
 //! exception to "no writes" is `snapshot`, which persists the price-dependent
 //! reports' daily results to `report_snapshots`.
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
+use crate::infra::id::{HoldingAccountId, ListingId};
 use sqlx::SqlitePool;
 use utoipa_axum::router::OpenApiRouter;
 

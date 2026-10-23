@@ -31,8 +31,7 @@ pub use http::router;
 /// (`reports::weekly_summary`, `entities::price_alert`) rather than inline in
 /// the registry — a job whose work is a whole report is too big to be an
 /// argument to `register`.
-pub use registry::JobOutcome;
-pub use registry::{JobRegistry, registry};
+pub use registry::{JobOutcome, JobRegistry, registry};
 pub use schedule::spawn;
 
 // Reached only by the inline tests below; not part of the module's surface in
@@ -69,29 +68,19 @@ mod tests {
     use axum::Extension;
     use axum::http::StatusCode;
     use chrono::{DateTime, Local, TimeZone, Utc};
-    use chrono_tz::America;
-    use chrono_tz::Australia;
-    use chrono_tz::Tz;
+    use chrono_tz::{America, Australia, Tz};
     use croner::Cron;
     use sqlx::SqlitePool;
     use std::collections::HashMap;
-    use std::fs;
-    use std::path;
     use std::path::PathBuf;
     use std::str::FromStr;
-    use std::sync::Arc;
-    use std::sync::Mutex;
-    use std::sync::atomic;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::AtomicUsize;
-    use std::time::Duration;
-    use std::time::Instant as StdInstant;
-    use tokio::sync::Mutex as AsyncMutex;
-    use tokio::sync::Semaphore;
-    use tokio::sync::oneshot;
-    use tokio::task;
-    use tokio::time;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{Arc, Mutex, atomic};
+    use std::time::{Duration, Instant as StdInstant};
+    use std::{fs, path};
+    use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot};
     use tokio::time::Instant;
+    use tokio::{task, time};
 
     /// An offline price-source stub so building a registry never constructs the
     /// live `YahooFetcher` (these tests trigger only the `backup` job, but the

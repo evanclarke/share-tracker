@@ -3,7 +3,8 @@ use crate::infra::http::ApiError;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Validation status of a curated exchange's MIC against the ISO 10383 registry.
 /// Non-blocking: writes to `exchanges` are never rejected — this report only

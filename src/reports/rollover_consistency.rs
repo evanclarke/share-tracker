@@ -57,9 +57,8 @@
 //!   the taxpayer chose, so a parcel left behind is a legitimate outcome.
 
 use crate::domain::cost_base::ParcelRow;
-use crate::domain::open_parcels;
 use crate::domain::rollover::CostBaseInputs;
-use crate::domain::whole_holding;
+use crate::domain::{open_parcels, whole_holding};
 use crate::entities::corporate_action::{UnitsAt, as_acquired_quantity};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
@@ -68,15 +67,15 @@ use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqlitePool};
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Which operation a flagged group is.
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,11 +450,10 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<RolloverAlert
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::demerger;
     use crate::entities::holding_account::{self, HoldingAccount};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
-    use crate::entities::{corporate_action as ca, scrip_exchange, trade};
+    use crate::entities::{corporate_action as ca, demerger, scrip_exchange, trade};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
 
     async fn pool_with_transfer() -> (SqlitePool, i64) {

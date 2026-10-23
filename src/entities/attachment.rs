@@ -28,8 +28,7 @@
 //!   content type and a download filename.
 //! - `DELETE /attachments/{id}` removes one attachment.
 
-use crate::infra::http::NoFilter;
-use crate::infra::http::{self, ApiError, CrudEntity};
+use crate::infra::http::{self, ApiError, CrudEntity, NoFilter};
 #[cfg(test)]
 use crate::infra::id::HoldingAccountId;
 use crate::infra::id::TradeId;
@@ -39,16 +38,15 @@ use std::fmt::Write as _;
 
 use crate::infra::extract::{Json, Query};
 use crate::infra::respond::{Created, OctetStream, Payload};
-use axum::{
-    body::Body,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::header,
-    response::Response,
-};
+use axum::body::Body;
+use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
+use axum::http::header;
+use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Per-file upload ceiling (25 MB). Enforced explicitly so an oversized upload is
 /// rejected with `413`; the route's body limit is set a little higher so this

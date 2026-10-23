@@ -1,9 +1,7 @@
 use crate::infra::decimal::Money;
 #[cfg(test)]
 use crate::infra::decimal::parse_dec;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, CrudEntity};
+use crate::infra::http::{self, CrudEntity, CrudListFilter, FilterClauses};
 #[cfg(test)]
 use crate::infra::id::ListingId;
 use crate::infra::id::TradeId;
@@ -12,7 +10,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use sqlx::Row;
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ParcelAllocation {

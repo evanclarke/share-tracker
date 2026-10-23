@@ -1,19 +1,11 @@
 //! Assembles the full axum application from the entity, report, and infra
 //! routers. Kept separate from `main` so the wiring is unit-testable.
-use crate::api_spec;
-use crate::entities;
-use crate::infra::auth;
 use crate::infra::auth::AuthState;
-use crate::infra::http;
-use crate::infra::request_guard;
 use crate::infra::request_guard::RequestGuard;
-use crate::infra::security_headers;
-use crate::reports;
-use crate::web;
-use axum::middleware;
+use crate::infra::{auth, http, request_guard, security_headers};
+use crate::{api_spec, entities, reports, web};
 use axum::response::Redirect;
-use axum::routing;
-use axum::{Extension, Router};
+use axum::{Extension, Router, middleware, routing};
 use sqlx::SqlitePool;
 use tower_http::catch_panic::CatchPanicLayer;
 use utoipa_axum::router::OpenApiRouter;
@@ -168,12 +160,9 @@ mod tests {
     use crate::infra::auth::{Auth, CookieSecurity};
     use crate::infra::config::BasePath;
     use crate::infra::scheduler;
-    use crate::test_support;
-    use crate::test_support::ApiResponse;
-    use crate::test_support::{ApiClient, TEST_PASSWORD, test_pool};
-    use crate::web;
-    use axum::http::StatusCode;
-    use axum::http::header;
+    use crate::test_support::{ApiClient, ApiResponse, TEST_PASSWORD, test_pool};
+    use crate::{test_support, web};
+    use axum::http::{StatusCode, header};
     use axum::routing;
     use sqlx::SqlitePool;
 

@@ -50,33 +50,28 @@
 //! replacement share classes, pre-CGT originals, and exchanges that would
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
-use crate::domain::cost_base;
 use crate::domain::cost_base::UnrepresentableQuantity;
-use crate::domain::whole_holding;
 use crate::domain::whole_holding::BackDatedParcel;
+use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action::{self, ActionKind};
-use crate::entities::holding_account;
-use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
+use crate::entities::{holding_account, rollover};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::apportion;
 use crate::infra::extract::Query;
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::fx::RateMonth;
+use crate::infra::fx::{FxOverride, FxRates, RateMonth};
 use crate::infra::http::{ApiError, DryRunQuery};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::Written;
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// The two sides of an exchange: the closing Sell on the original listing
 /// and the replacement Buys it was substituted with (one per consumed
@@ -575,12 +570,11 @@ impl From<ExchangeError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::rba_fx_rate;
+    use crate::entities::corporate_action::CorporateAction;
     use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
-    use crate::entities::{corporate_action::CorporateAction, listing};
-    use crate::reports::open_parcels;
-    use crate::reports::realised_gains;
+    use crate::entities::{listing, rba_fx_rate};
+    use crate::reports::{open_parcels, realised_gains};
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 

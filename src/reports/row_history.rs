@@ -35,7 +35,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// The audited tables, exactly as migration 0013 enumerates them in the
 /// `row_history.table_name` CHECK and its per-table trigger pairs — a test
@@ -450,8 +451,7 @@ mod tests {
     use super::*;
     use crate::entities::{listing, sell, trade};
     use crate::infra::id::ListingId;
-    use crate::test_support::ApiResponse;
-    use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, ApiResponse, allocate, test_pool, ymd};
     use axum::http::StatusCode;
     use rust_decimal::Decimal;
     use std::collections::HashSet;

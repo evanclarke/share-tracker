@@ -36,8 +36,6 @@
 //! figure, so they are reported rather than blocked.
 
 use crate::infra::currency::CurrencyCode;
-use crate::infra::db;
-use crate::infra::decimal;
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxRates, RateMonth};
 use crate::infra::http::ApiError;
@@ -46,12 +44,14 @@ use crate::infra::id::HoldingAccountId;
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
+use crate::infra::{db, decimal};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// One recorded amount worth a second look before a tax figure rests on it.
 #[derive(utoipa::ToSchema, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,12 +380,9 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<FxCoverageAle
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::rights_sale;
-    use crate::entities::rights_sale::AllocationInput;
-    use crate::entities::rights_sale::SellRightsBody;
-    use crate::entities::{corporate_action, rba_fx_rate};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::rights_sale::{AllocationInput, SellRightsBody};
+    use crate::entities::{corporate_action, rba_fx_rate, rights_sale};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 

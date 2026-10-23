@@ -1,23 +1,21 @@
-use crate::domain::franking_credit;
-use crate::domain::tax_year;
+use crate::domain::{franking_credit, tax_year};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::http::{
+    self, ApiError, CrudEntity, CrudListFilter, FilterClauses, UpsertResponse, Upserted,
+};
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// What kind of payment an income row records — where the amount belongs on
 /// the return (SCENARIOS J-10, migration 0028).
@@ -1339,12 +1337,10 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::domain::franking_credit;
-    use crate::entities::drp_enrolment;
     use crate::entities::drp_enrolment::DrpEnrolment;
-    use crate::entities::drp_reinvestment;
     use crate::entities::drp_reinvestment::ReinvestBody;
-    use crate::entities::holding_account;
     use crate::entities::holding_account::HoldingAccount;
+    use crate::entities::{drp_enrolment, drp_reinvestment, holding_account};
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
     use rust_decimal::Decimal;

@@ -103,36 +103,29 @@
 //! parcel dated on a closed day is surfaced instead, non-blockingly, by
 //! `reports::health`'s `non_trading_day_trades`.
 
-use crate::domain::cost_base;
-use crate::domain::cost_base::Term;
-use crate::domain::cost_base::UnrepresentableCost;
-use crate::domain::cost_base::UnrepresentableQuantity;
-use crate::domain::whole_holding;
+use crate::domain::cost_base::{Term, UnrepresentableCost, UnrepresentableQuantity};
 use crate::domain::whole_holding::BackDatedParcel;
+use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action;
 use crate::entities::trade::ParcelOrigin;
 use crate::infra::currency::CurrencyCode;
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::Money;
 use crate::infra::extract::Json;
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::fx::RateMonth;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::fx::{FxOverride, FxRates, RateMonth};
+use crate::infra::http::{
+    self, ApiError, CrudEntity, CrudListFilter, FilterClauses, UpsertResponse, Upserted,
+};
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{Created, NoContent};
+use crate::infra::{date, db};
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Which QC 66053 rule produced the inheritance's first-element cost base.
 /// Serialized verbatim to JSON and to the CHECK-constrained TEXT
@@ -1000,18 +993,14 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::domain;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::holding_account;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::rba_fx_rate;
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
+    use crate::entities::{corporate_action, holding_account, rba_fx_rate};
     use crate::infra::date;
-    use crate::reports::open_parcels;
-    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
+    use crate::reports::{open_parcels, realised_gains};
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 

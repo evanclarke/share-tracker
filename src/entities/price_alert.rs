@@ -421,17 +421,14 @@ fn note(skipped: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::parcel_allocation;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::parcel_allocation::ParcelAllocation;
+    use crate::entities::{corporate_action, parcel_allocation};
     use crate::infra::email::test_support::Outbox;
     use crate::test_support;
     use crate::test_support::{dec, test_pool, ymd};
     use sqlx::SqlitePool;
-    use std::time::Duration;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     fn now_on(date: NaiveDate) -> DateTime<Utc> {
         date.and_hms_opt(6, 0, 0).unwrap().and_utc()

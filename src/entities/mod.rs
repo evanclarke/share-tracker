@@ -336,10 +336,9 @@ pub(crate) fn filtered_list_routes() -> Vec<(&'static str, &'static [&'static st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities;
     use crate::infra::id::ListingId;
-    use crate::test_support;
     use crate::test_support::{ApiClient, test_pool};
+    use crate::{entities, test_support};
     use axum::http::StatusCode;
     use std::collections::BTreeMap;
 
@@ -424,9 +423,9 @@ mod tests {
     /// (`currencies`/`mic_registry` are keyed too but expose no delete).
     #[test]
     fn a_natural_key_entity_names_its_key_in_its_delete_404() {
-        use crate::entities::{
-            exchange::Exchange, listing::Listing, tax_year_settings::TaxYearSettings,
-        };
+        use crate::entities::exchange::Exchange;
+        use crate::entities::listing::Listing;
+        use crate::entities::tax_year_settings::TaxYearSettings;
         use crate::infra::http::CrudEntity;
 
         assert_ne!(Exchange::KEY_COLUMN, "id");

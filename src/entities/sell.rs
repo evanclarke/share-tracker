@@ -13,26 +13,24 @@
 //! is refused rather than rewritten as a disposal in place (SCENARIOS Z-b).
 
 use crate::domain::open_parcels;
-use crate::entities::closing_price;
-use crate::entities::corporate_action;
 use crate::entities::corporate_action::AcquiredUnits;
 use crate::entities::trade::{self, Trade, TradeType};
+use crate::entities::{closing_price, corporate_action};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::{self, ApiError, DryRunQuery, UpsertResponse, Upserted};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{NoContent, Written};
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -22,13 +22,10 @@ mod web;
 use clap::Parser;
 use infra::args::{Args, Command};
 use infra::{config, db, logging, scheduler};
-use std::fs;
-use std::io;
-use std::net::IpAddr;
-use std::net::SocketAddr;
-use std::process;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, io, process};
 use tokio::net::TcpListener;
 use tokio::signal;
 

@@ -3,8 +3,7 @@
 use super::*;
 use crate::infra::db;
 use crate::infra::id::ListingId;
-use crate::reports::health;
-use crate::reports::row_history;
+use crate::reports::{health, row_history};
 use crate::test_support;
 
 /// An errored row for a day that can never have a price (here: before the

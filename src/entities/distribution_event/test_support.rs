@@ -14,10 +14,8 @@ use crate::entities::closing_price::{FetchError, Market};
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// A canned distribution history, keyed by listing.
 #[derive(Default, Clone)]

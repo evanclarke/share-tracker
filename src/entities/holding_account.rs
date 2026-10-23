@@ -16,14 +16,14 @@
 use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
-use crate::infra::http::NoFilter;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
+use crate::infra::http::{self, ApiError, CrudEntity, NoFilter, UpsertResponse, Upserted};
 use crate::infra::id::HoldingAccountId;
 use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// The account every row migrated to and every write that omits
 /// `holding_account_id` lands in (seeded as 'Default' by migration 0016).

@@ -32,9 +32,7 @@ use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::Written;
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
@@ -43,7 +41,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::future::Future;
 use std::pin::Pin;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -611,14 +610,13 @@ impl From<GenerateError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain;
     use crate::domain::cost_base;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::scrip_exchange;
     use crate::infra::http;
-    use crate::reports;
     use crate::reports::amit_adjustment_cross_check;
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use crate::{domain, reports};
     use axum::http::StatusCode;
 
     fn client(pool: &SqlitePool) -> ApiClient {

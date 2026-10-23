@@ -34,12 +34,10 @@
 //! its public name twice. A request with no `Host` at all is not a browser's
 //! and is served.
 
-use axum::{
-    extract::{Request, State},
-    http::{HeaderMap, Method, header},
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, Method, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use std::net::IpAddr;
 
 use super::auth::AuthMode;
@@ -152,8 +150,7 @@ pub async fn guard(State(guard): State<RequestGuard>, req: Request, next: Next) 
 mod tests {
     use super::*;
     use crate::test_support::{ApiClient, test_pool};
-    use axum::http::HeaderName;
-    use axum::http::StatusCode;
+    use axum::http::{HeaderName, StatusCode};
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();

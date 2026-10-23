@@ -35,24 +35,22 @@ use crate::domain::cost_base;
 use crate::domain::cost_base::UnrepresentableCost;
 use crate::entities::trade;
 use crate::infra::currency::CurrencyCode;
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
 use crate::infra::extract::Json;
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse, Upserted};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::http::{
+    self, ApiError, CrudEntity, CrudListFilter, FilterClauses, UpsertResponse, Upserted,
+};
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::respond::{Created, NoContent};
+use crate::infra::{date, db};
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct EssStatement {
@@ -961,10 +959,8 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::ess_vest;
-    use crate::entities::holding_account;
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::listing;
+    use crate::entities::{ess_vest, holding_account, listing};
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;

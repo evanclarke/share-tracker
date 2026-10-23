@@ -14,8 +14,7 @@
 
 use super::*;
 use crate::entities::corporate_action;
-use crate::entities::corporate_action::ActionKind;
-use crate::entities::corporate_action::CorporateAction;
+use crate::entities::corporate_action::{ActionKind, CorporateAction};
 use crate::infra::id::ListingId;
 use crate::test_support;
 /// The stored price for a listing, and the figure it was observed as.

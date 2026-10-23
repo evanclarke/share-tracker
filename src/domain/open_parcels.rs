@@ -32,8 +32,7 @@
 //! read.
 
 use crate::domain::rollover;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use sqlx::sqlite::SqliteRow;
 use std::collections::HashMap;
 

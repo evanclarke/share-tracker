@@ -32,9 +32,11 @@ use lettre::message::Mailbox;
 use lettre::transport::smtp;
 use rust_decimal::Decimal;
 use std::fmt::Write as _;
+use std::future::Future;
 use std::mem;
+use std::pin::Pin;
 use std::str::FromStr;
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Transport

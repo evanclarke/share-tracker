@@ -5,25 +5,19 @@
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
 use super::model::{ActionKind, CorporateAction};
-use crate::domain::adjustments;
-use crate::domain::adjustments::SplitRatio;
 use crate::domain::adjustments::{
-    AcquiredUnits, UnitsAt, as_acquired_quantity, db_payment_currency_conflict,
+    AcquiredUnits, SplitRatio, UnitsAt, as_acquired_quantity, db_payment_currency_conflict,
     db_splits_for_listing,
 };
-use crate::domain::cost_base;
 use crate::domain::cost_base::UnrepresentableQuantity;
-use crate::domain::tax_year;
+use crate::domain::{adjustments, cost_base, tax_year};
 use crate::entities::closing_price;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{OptMoney, parse_dec};
-use crate::infra::http::CrudListFilter;
-use crate::infra::http::FilterClauses;
-use crate::infra::http::{self, ApiError, CrudEntity, Upserted};
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::http::{self, ApiError, CrudEntity, CrudListFilter, FilterClauses, Upserted};
+use crate::infra::id::{ListingId, TradeId};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};

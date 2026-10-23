@@ -7,14 +7,10 @@
 
 use crate::domain::open_parcels;
 use crate::entities::corporate_action;
-use crate::entities::corporate_action::AcquiredUnits;
-use crate::entities::corporate_action::SplitEvent;
-use crate::infra::date;
-use crate::infra::db;
+use crate::entities::corporate_action::{AcquiredUnits, SplitEvent};
 use crate::infra::decimal::parse_dec;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
+use crate::infra::{date, db};
 use chrono::{Duration, NaiveDate};
 use rust_decimal::Decimal;
 use sqlx::{Row, SqlitePool};

@@ -26,11 +26,9 @@ use axum::response::{IntoResponse, Response};
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use utoipa::IntoResponses;
+use utoipa::openapi::response::Response as DocResponse;
 use utoipa::openapi::schema::{AdditionalProperties, ArrayBuilder, ObjectBuilder, Type};
-use utoipa::openapi::{
-    ContentBuilder, Ref, RefOr, ResponseBuilder, ResponsesBuilder, Schema,
-    response::Response as DocResponse,
-};
+use utoipa::openapi::{ContentBuilder, Ref, RefOr, ResponseBuilder, ResponsesBuilder, Schema};
 
 /// A type the document registers as a named component schema. Implemented by
 /// `api_spec`'s `components!` list and nowhere else, so every type a handler

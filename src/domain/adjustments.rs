@@ -29,8 +29,7 @@
 use crate::domain::cost_base;
 use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::infra::currency::CurrencyCode;
-use crate::infra::decimal::Money;
-use crate::infra::decimal::{mul_div, parse_dec};
+use crate::infra::decimal::{Money, mul_div, parse_dec};
 use crate::infra::id::ListingId;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -39,10 +38,7 @@ use sqlx::sqlite::SqliteRow;
 use std::cmp;
 use std::collections::HashMap;
 use std::iter::Sum;
-use std::ops::Add;
-use std::ops::AddAssign;
-use std::ops::Sub;
-use std::ops::SubAssign;
+use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 /// A return-of-capital payment, as consumed by the cost-base reports.
 #[derive(Debug, Clone)]

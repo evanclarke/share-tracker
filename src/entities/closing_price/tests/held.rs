@@ -2,10 +2,8 @@
 //! the holdings reports across a split or consolidation.
 
 use super::*;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
-use crate::reports::portfolio;
-use crate::reports::snapshot;
+use crate::infra::id::{ListingId, TradeId};
+use crate::reports::{portfolio, snapshot};
 use crate::test_support;
 
 #[tokio::test]

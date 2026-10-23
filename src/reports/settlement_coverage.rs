@@ -3,14 +3,14 @@ use crate::entities::exchange_holiday::{coverage_span_for, window_outside_covera
 use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use axum::extract::State;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// A trade whose settlement date cannot be trusted, for either of two
 /// independent reasons — and a trade can carry both at once, which is why they

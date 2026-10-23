@@ -26,12 +26,11 @@
 //! whole body. The seam ([`FeedFetcher`]) exists so the stalled and oversized
 //! paths are testable without a socket.
 
-use std::error;
-use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{error, fmt};
 use tokio::time;
 
 /// Render an error and everything beneath it as one line, outermost first,

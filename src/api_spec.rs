@@ -32,73 +32,43 @@
 
 #[cfg(test)]
 use crate::app;
-use crate::entities::amit_adjustment::AmitAdjustment;
-use crate::entities::amit_adjustment::AmitAdjustmentBody;
-use crate::entities::amit_adjustment_generation::GenerateBody;
-use crate::entities::amit_adjustment_generation::GeneratedAdjustments;
-use crate::entities::amma::AmmaStatement;
-use crate::entities::amma::AmmaStatementBody;
+use crate::entities::amit_adjustment::{AmitAdjustment, AmitAdjustmentBody};
+use crate::entities::amit_adjustment_generation::{GenerateBody, GeneratedAdjustments};
+use crate::entities::amma::{AmmaStatement, AmmaStatementBody};
 use crate::entities::attachment::Attachment;
-use crate::entities::buyback_participation::Participation;
-use crate::entities::buyback_participation::ParticipationBody;
-use crate::entities::cgt_settings::CgtSettings;
-use crate::entities::cgt_settings::CgtSettingsBody;
-use crate::entities::closing_price::BackfillBody;
-use crate::entities::closing_price::BackfillSummary;
-use crate::entities::closing_price::ClearBody;
-use crate::entities::closing_price::ClearSummary;
-use crate::entities::closing_price::ClosingPrice;
-use crate::entities::closing_price::FetchBody;
-use crate::entities::closing_price::ManualPriceBody;
-use crate::entities::corporate_action::CorporateAction;
-use crate::entities::corporate_action::CorporateActionBody;
-use crate::entities::currencies::Currency;
-use crate::entities::currencies::ImportSummary;
+use crate::entities::buyback_participation::{Participation, ParticipationBody};
+use crate::entities::cgt_settings::{CgtSettings, CgtSettingsBody};
+use crate::entities::closing_price::{
+    BackfillBody, BackfillSummary, ClearBody, ClearSummary, ClosingPrice, FetchBody,
+    ManualPriceBody,
+};
+use crate::entities::corporate_action::{CorporateAction, CorporateActionBody};
+use crate::entities::currencies::{Currency, ImportSummary};
 use crate::entities::demerger::Demerge;
 use crate::entities::distribution_event::DistributionEvent;
-use crate::entities::drp_enrolment::DrpEnrolment;
-use crate::entities::drp_enrolment::DrpEnrolmentBody;
+use crate::entities::drp_enrolment::{DrpEnrolment, DrpEnrolmentBody};
 use crate::entities::drp_reinvestment::ReinvestBody;
-use crate::entities::ess_statement::EssStatement;
-use crate::entities::ess_statement::EssStatementBody;
-use crate::entities::exchange::Exchange;
-use crate::entities::exchange::ExchangeBody;
-use crate::entities::exchange_holiday::ExchangeHoliday;
-use crate::entities::exchange_holiday::ExchangeHolidayBody;
-use crate::entities::holding_account::HoldingAccount;
-use crate::entities::holding_account::HoldingAccountBody;
-use crate::entities::income::Income;
-use crate::entities::income::IncomeBody;
-use crate::entities::inheritance::Inheritance;
-use crate::entities::inheritance::InheritanceBody;
-use crate::entities::interest_income::InterestIncome;
-use crate::entities::interest_income::InterestIncomeBody;
-use crate::entities::investment_expense::InvestmentExpense;
-use crate::entities::investment_expense::InvestmentExpenseBody;
-use crate::entities::listing::Listing;
-use crate::entities::listing::ListingBody;
-use crate::entities::listing_rename::ListingRename;
-use crate::entities::listing_rename::RenameBody;
-use crate::entities::mic_registry;
+use crate::entities::ess_statement::{EssStatement, EssStatementBody};
+use crate::entities::exchange::{Exchange, ExchangeBody};
+use crate::entities::exchange_holiday::{ExchangeHoliday, ExchangeHolidayBody};
+use crate::entities::holding_account::{HoldingAccount, HoldingAccountBody};
+use crate::entities::income::{Income, IncomeBody};
+use crate::entities::inheritance::{Inheritance, InheritanceBody};
+use crate::entities::interest_income::{InterestIncome, InterestIncomeBody};
+use crate::entities::investment_expense::{InvestmentExpense, InvestmentExpenseBody};
+use crate::entities::listing::{Listing, ListingBody};
+use crate::entities::listing_rename::{ListingRename, RenameBody};
 use crate::entities::mic_registry::MicEntry;
 use crate::entities::parcel_allocation::ParcelAllocation;
-use crate::entities::rba_fx_rate;
-use crate::entities::rba_fx_rate::CorrectionBody;
-use crate::entities::rba_fx_rate::ImportOutcome;
-use crate::entities::rba_fx_rate::RbaFxRate;
+use crate::entities::rba_fx_rate::{CorrectionBody, ImportOutcome, RbaFxRate};
 use crate::entities::rights_exercise::ExerciseBody;
-use crate::entities::rights_sale::RightsSale;
-use crate::entities::rights_sale::SellRightsBody;
-use crate::entities::scrip_exchange;
+use crate::entities::rights_sale::{RightsSale, SellRightsBody};
 use crate::entities::sell::SellBody;
-use crate::entities::tax_year_settings::TaxYearSettings;
-use crate::entities::tax_year_settings::TaxYearSettingsBody;
-use crate::entities::trade::Trade;
-use crate::entities::trade::TradeBody;
-use crate::entities::transfer::Transfer;
-use crate::entities::transfer::TransferBody;
-use crate::entities::transfer::TransferGroup;
+use crate::entities::tax_year_settings::{TaxYearSettings, TaxYearSettingsBody};
+use crate::entities::trade::{Trade, TradeBody};
+use crate::entities::transfer::{Transfer, TransferBody, TransferGroup};
 use crate::entities::worthless::Recognise;
+use crate::entities::{mic_registry, rba_fx_rate, scrip_exchange};
 use crate::infra::auth::LoginForm;
 use crate::infra::respond::JavaScript;
 use crate::infra::scheduler::JobStatus;
@@ -107,45 +77,35 @@ use crate::reports::amit_adjustment_cross_check::AmitAdjustmentAlert;
 use crate::reports::amit_cash_cross_check::AmitCashAlert;
 use crate::reports::attachments::AttachmentIndexRow;
 use crate::reports::e4_cross_check::E4CrossCheckAlert;
-use crate::reports::franking_at_risk::FrankingAtRiskAlert;
-use crate::reports::franking_at_risk::FrankingWhatIfAlert;
+use crate::reports::franking_at_risk::{FrankingAtRiskAlert, FrankingWhatIfAlert};
 use crate::reports::fx_coverage::FxCoverageAlert;
 use crate::reports::health::HealthReport;
 use crate::reports::indexation_cross_check::IndexationCrossCheck;
 use crate::reports::mic_validation::ExchangeMicStatus;
-use crate::reports::net_capital_gain::NetCapitalGainYear;
-use crate::reports::net_capital_gain::WhatIfRequest;
-use crate::reports::net_capital_gain::WhatIfResponse;
+use crate::reports::net_capital_gain::{NetCapitalGainYear, WhatIfRequest, WhatIfResponse};
 use crate::reports::open_parcels::OpenParcel;
 use crate::reports::parcel_optimiser::OptimiserResponse;
-use crate::reports::performance::HoldingPerformance;
-use crate::reports::performance::PerformanceRequest;
+use crate::reports::performance::{HoldingPerformance, PerformanceRequest};
 use crate::reports::period_performance::PeriodPerformance;
-use crate::reports::portfolio::HoldingOverview;
-use crate::reports::portfolio::OverviewRequest;
+use crate::reports::portfolio::{HoldingOverview, OverviewRequest};
 use crate::reports::realised_gains::RealisedGainLoss;
 use crate::reports::rollover_consistency::RolloverAlert;
 use crate::reports::row_history::RowHistoryResponse;
 use crate::reports::settlement_coverage::SettlementCoverageAlert;
 use crate::reports::snapshot;
-use crate::reports::snapshot::HoldingSeries;
-use crate::reports::snapshot::RegenerateBody;
-use crate::reports::snapshot::RegenerateRange;
-use crate::reports::snapshot::RegenerateSummary;
-use crate::reports::snapshot::SeriesPoint;
-use crate::reports::snapshot::Snapshot;
-use crate::reports::snapshot::SnapshotMeta;
+use crate::reports::snapshot::{
+    HoldingSeries, RegenerateBody, RegenerateRange, RegenerateSummary, SeriesPoint, Snapshot,
+    SnapshotMeta,
+};
 use crate::reports::tax_report::TaxReport;
 use crate::reports::tax_summary::TaxYearSummary;
-use crate::reports::unrealised_gains::UnrealisedGain;
-use crate::reports::unrealised_gains::UnrealisedGainsRequest;
+use crate::reports::unrealised_gains::{UnrealisedGain, UnrealisedGainsRequest};
 use crate::reports::wash_sales::WashSaleAlert;
 use crate::web;
 use axum::http::header;
-use axum::response;
-use axum::{Router, response::IntoResponse};
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use axum::response::IntoResponse;
+use axum::{Router, response};
+use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 use std::sync::Arc;
 use utoipa::openapi::ServerBuilder;
@@ -157,19 +117,22 @@ use crate::infra::http::ApiError;
 use crate::infra::respond::{JsonBody, Payload, PlainText};
 use sqlx::SqlitePool;
 use std::fmt::Write as _;
+use utoipa::openapi::content::{Content, ContentBuilder};
+use utoipa::openapi::path::{
+    HttpMethod, Operation, OperationBuilder, Parameter, ParameterBuilder, ParameterIn,
+};
+use utoipa::openapi::response::{Response, ResponseBuilder, ResponsesBuilder};
+use utoipa::openapi::schema::{ObjectBuilder, Schema, Type};
+use utoipa::openapi::security::{
+    ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme,
+};
+use utoipa::openapi::tag::{Tag, TagBuilder};
 use utoipa::openapi::{
     Components, ComponentsBuilder, InfoBuilder, OpenApi, OpenApiBuilder, PathItem, RefOr, Required,
-    content::{Content, ContentBuilder},
-    path::{HttpMethod, Operation, OperationBuilder, Parameter, ParameterBuilder, ParameterIn},
-    response::{Response, ResponseBuilder, ResponsesBuilder},
-    schema::{ObjectBuilder, Schema, Type},
-    security::{
-        ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme,
-    },
-    tag::{Tag, TagBuilder},
 };
 use utoipa::{PartialSchema, ToSchema};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// The document's `info.description`: the two global rules every endpoint
 /// obeys, stated in prose *and* carried structurally by the schemas (a money
@@ -1251,17 +1214,13 @@ pub(crate) fn documented_id_keyed_collection_creates() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities;
     use crate::infra::http;
     use crate::reports::row_history;
-    use crate::test_support;
     use crate::test_support::ApiClient;
-    use crate::web;
+    use crate::{entities, test_support, web};
     use axum::http::StatusCode;
     use serde_json::Value;
-    use std::collections::BTreeMap;
-    use std::collections::BTreeSet;
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::sync::LazyLock;
 
     /// The document under test, as JSON.

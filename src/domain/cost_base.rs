@@ -48,14 +48,11 @@
 //!    see Known limitations in `docs/API.md`), material only for a non-AUD
 //!    holding receiving non-AUD reductions.
 
-use crate::domain::open_parcels;
 use crate::domain::open_parcels::UnitsConsumed;
-use crate::domain::tax_year;
+use crate::domain::{open_parcels, tax_year};
 use crate::infra::currency::{Aud, CurrencyCode, Native};
 use crate::infra::date;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;

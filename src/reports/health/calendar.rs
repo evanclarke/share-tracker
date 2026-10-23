@@ -4,8 +4,7 @@
 use crate::entities::closing_price::HeldTimeline;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::Money;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
+use crate::infra::id::{HoldingAccountId, ListingId};
 use chrono::{DateTime, Duration, NaiveDate};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};

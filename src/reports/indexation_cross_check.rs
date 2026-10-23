@@ -143,15 +143,15 @@ use crate::infra::db;
 use crate::infra::decimal::{mul_div, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{ListingId, TradeId};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// One parcel allocation of one disposal, with the two methods' assessable
 /// gains set against each other. Every figure is AUD.

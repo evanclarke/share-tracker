@@ -247,10 +247,9 @@ use rust_decimal::Decimal;
 #[cfg(test)]
 use sqlx::SqlitePool;
 #[cfg(test)]
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::sync::Arc;
 
 /// Reusable price-fetcher stub for the report tests — see the module.
 #[cfg(test)]

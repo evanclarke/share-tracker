@@ -47,7 +47,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -362,13 +363,12 @@ async fn participate(
 mod tests {
     use super::*;
     use crate::entities;
+    use crate::entities::corporate_action::CorporateAction;
     use crate::entities::trade::TradeType;
-    use crate::entities::{corporate_action::CorporateAction, income, listing};
+    use crate::entities::{income, listing};
     use crate::infra::id::ListingId;
-    use crate::reports::open_parcels;
-    use crate::reports::portfolio;
-    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
+    use crate::reports::{open_parcels, portfolio, realised_gains};
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 

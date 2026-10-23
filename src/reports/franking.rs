@@ -389,15 +389,11 @@ pub async fn db_franked_dividends(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::demerger;
-    use crate::entities::holding_account;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::HoldingAccount;
     use crate::entities::sell::AllocationInput;
-    use crate::entities::transfer;
     use crate::entities::transfer::TransferBody;
-    use crate::entities::{listing, trade};
+    use crate::entities::{demerger, holding_account, listing, trade, transfer};
     use crate::infra::db;
     use crate::test_support::{self, test_pool};
     use sqlx::SqlitePool;

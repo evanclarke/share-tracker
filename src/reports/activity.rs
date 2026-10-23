@@ -28,29 +28,25 @@
 use crate::domain::listing_identity::RenameHistory;
 use crate::domain::tax_year::tax_year_for;
 use crate::entities::amma::AmmaStatement;
-use crate::entities::closing_price::LiveQuotes;
-use crate::entities::closing_price::SharedFetcher;
+use crate::entities::closing_price::{LiveQuotes, SharedFetcher};
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::DrpEnrolment;
-use crate::entities::ess_statement;
 use crate::entities::ess_statement::EssStatement;
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::InvestmentExpense;
-use crate::entities::listing;
 use crate::entities::trade::{Trade, TradeType};
 use crate::entities::transfer::Transfer;
-use crate::infra::currency::Aud;
-use crate::infra::currency::CurrencyCode;
+use crate::entities::{ess_statement, listing};
+use crate::infra::currency::{Aud, CurrencyCode};
 use crate::infra::db;
 use crate::infra::decimal::{mul_div, parse_dec};
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::reports::portfolio::{self, HoldingOverview};
-use axum::{Extension, extract::State};
+use axum::Extension;
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -58,7 +54,8 @@ use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::iter;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// One dated row of the ledger. `quantity` is the row's signed unit effect in
 /// its own date's unit basis (absent for rows that move no units), and
@@ -954,19 +951,16 @@ async fn activity_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::drp_enrolment;
     use crate::entities::drp_enrolment::ResidualHandling;
-    use crate::entities::exchange;
     use crate::entities::exchange::Exchange;
-    use crate::entities::holding_account;
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::investment_expense;
     use crate::entities::investment_expense::ExpenseType;
-    use crate::entities::listing_rename;
     use crate::entities::listing_rename::RenameBody;
-    use crate::entities::rba_fx_rate;
     use crate::entities::sell::AllocationInput;
-    use crate::entities::{corporate_action, transfer};
+    use crate::entities::{
+        corporate_action, drp_enrolment, exchange, holding_account, investment_expense,
+        listing_rename, rba_fx_rate, transfer,
+    };
     use crate::test_support::{self, ApiClient, ApiResponse, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 

@@ -22,8 +22,7 @@
 //! where *every* held listing is excluded is a blocker, not an empty
 //! valuation — zero of zero is not a portfolio total.
 
-use crate::infra::currency::Aud;
-use crate::infra::currency::CurrencyCode;
+use crate::infra::currency::{Aud, CurrencyCode};
 use crate::infra::db;
 use crate::infra::id::ListingId;
 use chrono::{DateTime, NaiveDate, Utc};

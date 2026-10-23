@@ -1,16 +1,14 @@
 //! HTTP helpers shared by entity and report handlers.
 
 use crate::infra::db::WriteMode;
-use crate::infra::extract::Json;
-use crate::infra::extract::Query;
+use crate::infra::extract::{Json, Query};
 use crate::infra::fx::FxError;
 use crate::infra::respond::NoContent;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
-use sqlx::error::DatabaseError;
-use sqlx::error::ErrorKind;
+use sqlx::error::{DatabaseError, ErrorKind};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use std::any::Any;
@@ -1340,15 +1338,13 @@ pub(crate) fn documented_error_shapes() -> Vec<(u16, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::fx::FxError;
-    use crate::infra::fx::RateMonth;
+    use crate::infra::fx::{FxError, RateMonth};
     use crate::test_support;
     use crate::test_support::SourceFile;
     use http_body_util::BodyExt;
-    use std::io;
-    use std::mem;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use std::{io, mem};
     use tracing::subscriber;
 
     /// `over` opens the `WHERE` itself, so a caller hands it the statement

@@ -18,14 +18,13 @@
 
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
-use crate::infra::http::NoFilter;
-use crate::infra::http::Upserted;
-use crate::infra::http::{self, ApiError, CrudEntity, UpsertResponse};
+use crate::infra::http::{self, ApiError, CrudEntity, NoFilter, UpsertResponse, Upserted};
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashSet;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// The first financial year that can carry settings: CGT starts 20 September
 /// 1985, inside FY1986. Pinned by the table's CHECK too.

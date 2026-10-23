@@ -94,17 +94,13 @@
 //! residuals back from the most recent prior trade, so undo runs
 //! last-in-first-out.
 
-use crate::domain::cost_base;
-use crate::domain::cost_base::UnrepresentableCost;
-use crate::domain::cost_base::UnrepresentableQuantity;
-use crate::domain::whole_holding;
+use crate::domain::cost_base::{UnrepresentableCost, UnrepresentableQuantity};
 use crate::domain::whole_holding::BackDatedParcel;
+use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action;
-use crate::entities::{
-    drp_enrolment::{self, ResidualHandling},
-    income::{Income, IncomeType},
-    trade::{self, Trade},
-};
+use crate::entities::drp_enrolment::{self, ResidualHandling};
+use crate::entities::income::{Income, IncomeType};
+use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
@@ -120,7 +116,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -791,21 +788,16 @@ async fn unreinvest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::amit_adjustment_generation;
-    use crate::entities::corporate_action;
-    use crate::entities::corporate_action::ActionKind;
-    use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::holding_account;
+    use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::holding_account::HoldingAccount;
-    use crate::entities::sell;
-    use crate::entities::sell::AllocationInput;
-    use crate::entities::sell::SellBody;
-    use crate::entities::{drp_enrolment, income, listing, trade::TradeType};
+    use crate::entities::sell::{AllocationInput, SellBody};
+    use crate::entities::trade::TradeType;
+    use crate::entities::{
+        amit_adjustment_generation, corporate_action, drp_enrolment, holding_account, income,
+        listing, sell,
+    };
     use crate::infra::id::ListingId;
-    use crate::reports::amit_cash_cross_check;
-    use crate::reports::open_parcels;
-    use crate::reports::realised_gains;
-    use crate::reports::tax_summary;
+    use crate::reports::{amit_cash_cross_check, open_parcels, realised_gains, tax_summary};
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 

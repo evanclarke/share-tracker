@@ -58,22 +58,19 @@ use crate::infra::db;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::{Money, parse_dec, row_dec};
 use crate::infra::extract::{Json, Query};
-use crate::infra::fx::FxOverride;
-use crate::infra::fx::FxRates;
-use crate::infra::fx::RateMonth;
+use crate::infra::fx::{FxOverride, FxRates, RateMonth};
 use crate::infra::http::{self, ApiError, DryRunQuery};
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::RightsSaleId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, RightsSaleId, TradeId};
 use crate::infra::respond::{NoContent, Written};
 use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use sqlx::{QueryBuilder, Row, SqliteConnection, SqlitePool, sqlite::SqliteRow};
+use sqlx::sqlite::SqliteRow;
+use sqlx::{QueryBuilder, Row, SqliteConnection, SqlitePool};
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize)]
 pub struct RightsSale {
@@ -865,11 +862,8 @@ async fn delete_one(
 mod tests {
     use super::*;
     use crate::entities::corporate_action::CorporateAction;
-    use crate::entities::rba_fx_rate;
-    use crate::entities::{listing, rights_exercise, trade};
-    use crate::reports::open_parcels;
-    use crate::reports::realised_gains;
-    use crate::reports::tax_summary;
+    use crate::entities::{listing, rba_fx_rate, rights_exercise, trade};
+    use crate::reports::{open_parcels, realised_gains, tax_summary};
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 

@@ -66,8 +66,7 @@ use crate::infra::currency::CurrencyCode;
 use crate::infra::date;
 use crate::infra::db::write_tx;
 use crate::infra::extract::{Json, Query};
-use crate::infra::http::NoFilter;
-use crate::infra::http::{ApiError, CrudEntity};
+use crate::infra::http::{ApiError, CrudEntity, NoFilter};
 use crate::infra::id::ListingId;
 #[cfg(test)]
 use crate::infra::id::TradeId;
@@ -76,7 +75,8 @@ use axum::extract::{Path, State};
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(utoipa::ToSchema, Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ListingRename {
@@ -670,10 +670,8 @@ async fn undo(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::exchange;
     use crate::entities::exchange::Exchange;
-    use crate::entities::listing;
-    use crate::entities::trade;
+    use crate::entities::{exchange, listing, trade};
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;

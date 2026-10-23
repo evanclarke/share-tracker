@@ -1,20 +1,19 @@
-use crate::domain::cgt_discount;
-use crate::domain::open_parcels;
+use crate::domain::{cgt_discount, open_parcels};
 use crate::entities::closing_price::{self, SharedFetcher};
 use crate::infra::currency::Aud;
-use crate::infra::date;
-use crate::infra::db;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use axum::{Extension, extract::State};
+use crate::infra::id::{HoldingAccountId, ListingId};
+use crate::infra::{date, db};
+use axum::Extension;
+use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// Cost base is in AUD (each parcel converted via the ATO FX rate). The supplied
 /// `current_price` is taken as AUD too, so `market_value` and
@@ -224,8 +223,7 @@ async fn unrealised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action;
-    use crate::entities::scrip_exchange;
+    use crate::entities::{corporate_action, scrip_exchange};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 

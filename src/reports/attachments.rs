@@ -6,7 +6,8 @@ use crate::infra::id::TradeId;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// One stored document, joined out to the activity it is attached to (see
 /// `entities::attachment` — ownership is six nullable FKs with a DB CHECK

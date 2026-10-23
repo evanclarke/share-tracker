@@ -37,14 +37,12 @@
 //! separately, as an informational cross-check (see `docs/API.md`'s Known
 //! limitations entry for this report).
 
-use crate::infra::currency::Aud;
-use crate::infra::currency::CurrencyCode;
+use crate::infra::currency::{Aud, CurrencyCode};
 use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::fx::{self, FxError, FxRates};
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
+use crate::infra::id::{HoldingAccountId, ListingId};
 use crate::reports::{performance, realised_gains, valuation};
 use axum::extract::State;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -52,7 +50,8 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]

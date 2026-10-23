@@ -8,13 +8,12 @@ use crate::infra::db;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::respond::NoContent;
-use axum::{
-    Extension,
-    extract::{Path, State},
-};
+use axum::Extension;
+use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// A job's status, surfaced by `GET /jobs` and the Jobs UI. Every registered
 /// job appears in the list; the `last_*` fields are `None` (and `runs` empty)

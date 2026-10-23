@@ -31,27 +31,24 @@
 //! report's year — an AMIT adjustment gap distorts the disposal schedule's
 //! cost base, which is that report's central figure.
 
-use crate::domain::open_parcels;
-use crate::domain::rollover;
 use crate::domain::tax_year::{fy_start, tax_year_for};
+use crate::domain::{open_parcels, rollover};
 use crate::entities::corporate_action::{self, AcquiredUnits, SplitEvent};
 use crate::infra::db;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::ApiError;
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::ListingId;
-use crate::infra::id::TradeId;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use axum::extract::State;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
-use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::iter;
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// One AMMA statement whose per-parcel adjustment set does not reconcile,
 /// with every problem found on it. A statement that reconciles is not
@@ -534,14 +531,12 @@ async fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::amit_adjustment_generation;
     use crate::entities::amit_adjustment_generation::GenerateBody;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::demerger;
     use crate::entities::holding_account::{self, HoldingAccount};
-    use crate::entities::scrip_exchange;
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
+    use crate::entities::{amit_adjustment_generation, demerger, scrip_exchange};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
 

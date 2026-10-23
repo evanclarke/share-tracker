@@ -55,7 +55,8 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
-use utoipa_axum::{router::OpenApiRouter, routes};
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
 /// The result of recognising a worthless holding: the closing Sell that
 /// consumed every open parcel at nil proceeds.
@@ -333,9 +334,8 @@ mod tests {
     use crate::infra::date;
     use crate::infra::id::ListingId;
     use crate::reports;
-    use crate::reports::net_capital_gain;
-    use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
+    use crate::reports::{net_capital_gain, realised_gains};
     use crate::test_support::{self, ApiClient, test_pool};
     use axum::http::StatusCode;
 

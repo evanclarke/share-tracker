@@ -11,7 +11,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use croner::Cron;
 use sqlx::SqlitePool;
 use std::fmt;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::task::JoinError;
 use tokio::time;
 
