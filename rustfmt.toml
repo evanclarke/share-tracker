@@ -13,7 +13,9 @@
 # All three are nightly-only. On stable rustfmt they are ignored with a
 # warning, so `cargo fmt --check` cannot enforce them, and setting them would
 # only claim a rule nothing gates. `imports_granularity = "Module"` (one module
-# per `use`, no nested braces) is instead to be enforced by a source-scan test
-# — the open "84 `use` lines nesting a path inside braces" item in TODO.md.
+# per `use` — no path inside a brace list — and the declarations importing
+# from one module merged) is instead enforced by a source-scan test,
+# `app::tests::every_use_declaration_imports_from_one_module`, over every
+# file in `src`, test modules included.
 # `hex_literal_case` and `format_macro_matchers` are not adopted: the tree has
 # few hex literals and six `macro_rules!`, not worth a hand-maintained rule.

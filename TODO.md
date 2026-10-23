@@ -78,9 +78,14 @@ falls under the existing rules.
     and consts called through their imported module; a clashing name keeps its module
     (`io::Error`, `fmt::Write`, `process::Command`), and two test-module renames
     (`StdInstant`, `AsyncMutex` in `scheduler.rs`) where the std and tokio types meet
-- [ ] 84 `use` lines nesting a path inside braces (`use utoipa_axum::{router::OpenApiRouter,
+- [x] 84 `use` lines nesting a path inside braces (`use utoipa_axum::{router::OpenApiRouter,
   routes};`) → one module per `use` statement. Needs a scan test, since the rustfmt option that
   would enforce it is nightly-only
+  - Done 2026-10-23: 102 nested-brace declarations (in 84 import groups) split per module, and the
+    same-module declarations of each import group merged, as `imports_granularity = "Module"`
+    would (193 groups rewritten). Enforced by `app::tests::every_use_declaration_imports_from_one_module`
+    (test code included; `rustfmt.toml` names it), with the scanner self-tested by
+    `the_import_scan_flags_what_module_granularity_would_rewrite`
 - [ ] Non-leaf modules carrying APIs beyond tolerated glue: move `reports/mod.rs`'s
   `TAXPAYER_BASIS`/`listing_label`/`account_label` into a leaf; slim `entities/mod.rs` (1353 lines)
   and `reports/health/mod.rs` to declarations, re-exports and the router; move the split parents'

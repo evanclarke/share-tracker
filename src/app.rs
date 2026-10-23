@@ -790,4 +790,141 @@ mod tests {
             "implement `std::str::FromStr` instead of an inherent parse method: {found:?}"
         );
     }
+
+    /// How a `use` declaration departs from rustfmt's
+    /// `imports_granularity = "Module"`.
+    #[derive(Debug, PartialEq)]
+    enum ImportShape {
+        /// A brace list spanning more than one module — a path or a further
+        /// brace list inside it (`use a::{b::C, D}`), which Module granularity
+        /// splits into one declaration per module.
+        Nested,
+        /// A second declaration importing from a module the same run of
+        /// adjacent declarations already imports from (`use a::B; use a::C;`),
+        /// which Module granularity merges into the first.
+        Unmerged,
+    }
+
+    /// The `use` declarations in `code` that rustfmt's nightly-only
+    /// `imports_granularity = "Module"` would rewrite, as `(line, shape)`.
+    /// That option is the Google Rust style guide's, and stable rustfmt
+    /// ignores it (`rustfmt.toml`), so this is what enforces it. Module
+    /// granularity is syntactic: each declaration names items of one module,
+    /// so a brace list may hold names (`self` among them — `a::{self, B}` is
+    /// the module `a` and its item `B`, which rustfmt keeps together) but no
+    /// path. It merges only what rustfmt would: declarations of the same
+    /// visibility in one run of adjacent lines, a blank line or an attribute
+    /// (`#[cfg(test)]`) ending the run, since rustfmt merges neither across an
+    /// import group nor into an attributed declaration.
+    fn non_module_granular_imports(code: &str) -> Vec<(usize, ImportShape)> {
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut found = Vec::new();
+        // The (visibility, module) pairs the current run already imports.
+        let mut run: Vec<(&str, String)> = Vec::new();
+        let mut previous_end = 0;
+        let mut previous_attributed = true;
+        let mut search = 0;
+        while let Some(offset) = code[search..].find("use") {
+            let at = search + offset;
+            search = at + 3;
+            if code[..at].chars().next_back().is_some_and(ident)
+                || !code[at + 3..].starts_with(char::is_whitespace)
+            {
+                continue;
+            }
+            let Some(semicolon) = code[at..].find(';') else {
+                break;
+            };
+            let line_start = code[..at].rfind('\n').map_or(0, |i| i + 1);
+            let visibility = code[line_start..at].trim();
+            let gap = code.get(previous_end..line_start).unwrap_or("");
+            let attributed = gap
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .is_some_and(|l| l.trim_start().starts_with("#["));
+            let adjacent = gap.trim().is_empty() && gap.matches('\n').count() <= 1;
+            if !adjacent || attributed || previous_attributed {
+                run.clear();
+            }
+            previous_end = at + semicolon + 1;
+            previous_attributed = attributed;
+            let line = code[..at].matches('\n').count() + 1;
+            let tree: String = code[at + 3..at + semicolon]
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let module = match tree.split_once('{') {
+                Some((_, list)) if list.contains("::") || list.contains('{') => {
+                    found.push((line, ImportShape::Nested));
+                    continue;
+                }
+                Some((head, _)) => head.trim_end_matches("::").to_owned(),
+                None => {
+                    let path = tree.split(' ').next().unwrap_or("");
+                    path.rsplit_once("::").map_or("", |(m, _)| m).to_owned()
+                }
+            };
+            if run.iter().any(|(v, m)| *v == visibility && *m == module) {
+                found.push((line, ImportShape::Unmerged));
+            } else {
+                run.push((visibility, module));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_import_scan_flags_what_module_granularity_would_rewrite() {
+        let code = "\
+            use a::b::{C, D};\n\
+            use a::{b::E, F};\n\
+            use a::{self, G};\n\
+            use h::{i, j};\n\
+            use k::{\n    l::{M, N},\n    O,\n};\n\
+            use a::b::P;\n\
+            pub use a::b::Q;\n\
+            use super::*;\n\
+            \n\
+            use a::b::R;\n\
+            #[cfg(test)]\n\
+            use a::b::S;\n\
+            use a::b::T;\n\
+            use a::b::U as V;\n\
+            fn reuse() { let used = 1; }\n\
+            mod tests { use x::{y::Z}; }\n";
+        assert_eq!(
+            non_module_granular_imports(code),
+            [
+                (2, ImportShape::Nested),
+                (5, ImportShape::Nested),
+                (9, ImportShape::Unmerged),
+                (17, ImportShape::Unmerged),
+                (19, ImportShape::Nested),
+            ]
+        );
+    }
+
+    /// Every `use` declaration — test modules included — is in the shape
+    /// rustfmt's `imports_granularity = "Module"` (the Google Rust style
+    /// guide's setting) leaves it: one module per declaration, merged per
+    /// module. The option is nightly-only, so stable `cargo fmt --check`
+    /// cannot gate it; `rustfmt.toml` points here.
+    #[test]
+    fn every_use_declaration_imports_from_one_module() {
+        let found: Vec<_> = test_support::rust_sources()
+            .iter()
+            .flat_map(|source| {
+                non_module_granular_imports(&source.code)
+                    .into_iter()
+                    .map(|(line, shape)| format!("{}:{line} {shape:?}", source.path))
+            })
+            .collect();
+        assert!(
+            found.is_empty(),
+            "one module per `use` (rustfmt `imports_granularity = \"Module\"`): split a \
+             Nested brace list into one declaration per module, and merge an Unmerged \
+             declaration into the earlier one importing from the same module: {found:?}"
+        );
+    }
 }
