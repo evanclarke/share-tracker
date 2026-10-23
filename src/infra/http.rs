@@ -570,7 +570,7 @@ impl<'a> FilterClauses<'a> {
 /// all is `deny_unknown_fields`' unknown-field rejection — which axum's `Query`
 /// turns into the documented `400` naming it. Both halves are pinned against
 /// the real routes by
-/// `entities::tests::every_list_route_refuses_an_unknown_parameter`.
+/// `entities::tests::list::every_list_route_refuses_an_unknown_parameter`.
 #[derive(Debug, Default, serde::Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct NoFilter {}

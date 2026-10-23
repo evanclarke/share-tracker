@@ -358,7 +358,7 @@ fn list_ordering_post_reads_and_pagination_documented() {
 /// accepts, that the date bounds are inclusive, that an unrecognised parameter
 /// is refused `400` naming it, and that cursor paging is the part deliberately
 /// left open. The behaviour itself is pinned by the per-entity list tests and
-/// `entities::tests::every_list_route_refuses_an_unknown_parameter`; this is
+/// `entities::tests::list::every_list_route_refuses_an_unknown_parameter`; this is
 /// the documentation half, scoped to the section so a stray mention elsewhere
 /// cannot satisfy it.
 #[test]
@@ -4018,7 +4018,7 @@ fn top_menu_bar_documented() {
 /// of a missing row answers with a plain-text reason, and that only a path no
 /// route matches is empty — the signal a client tells a mistyped URL from an
 /// absent row by. The behaviour is pinned by
-/// `entities::tests::deleting_a_missing_row_is_404_naming_what_was_missing`
+/// `entities::tests::delete::deleting_a_missing_row_is_404_naming_what_was_missing`
 /// and `api_spec::tests::every_get_one_route_names_the_missing_row_in_its_404`.
 #[test]
 fn missing_row_404_reason_documented() {

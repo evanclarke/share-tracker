@@ -842,7 +842,7 @@ pub fn unreachable_url(path: &str) -> String {
 /// field — rather than silently accepted with these ignored.
 ///
 /// Listed here once because three tests replay a read as a write
-/// (`entities::tests::what_a_get_returns_can_be_put_back_unchanged` and the
+/// (`entities::tests::put::what_a_get_returns_can_be_put_back_unchanged` and the
 /// two GST-inclusive round trips), and because the list is the answer to
 /// "what does the write not own": a new server-owned column belongs here, and
 /// a read field that is *not* server-owned must never be added — the round

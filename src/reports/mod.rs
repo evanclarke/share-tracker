@@ -325,7 +325,7 @@ mod tests {
 
     /// A misspelt or unparseable query parameter on a report read is refused
     /// `400` naming it, never silently defaulted — the same boundary the entity
-    /// lists pin (`entities::tests::every_list_route_refuses_an_unknown_parameter`),
+    /// lists pin (`entities::tests::list::every_list_route_refuses_an_unknown_parameter`),
     /// applied to the scalar report reads the audit moved onto `GET`. The
     /// highest-stakes cases are the optimiser and the activity ledger, where a
     /// silently-defaulted `price` is a wrong **money** figure.

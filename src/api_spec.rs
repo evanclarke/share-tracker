@@ -2077,7 +2077,7 @@ mod tests {
     /// `entities::route_tables::PUT_ROUTES`** rather than transcribed: a third one, or a
     /// reclassified existing one, changes what the description has to say and
     /// fails here until it does. The general rule stays a prose pin — it is
-    /// pinned behaviourally by `entities::tests::every_put_route_reports_create_then_replace`
+    /// pinned behaviourally by `entities::tests::put::every_put_route_reports_create_then_replace`
     /// and structurally by [`every_put_route_documents_its_outcome`].
     #[test]
     fn the_put_outcome_rule_is_stated_in_the_description() {
