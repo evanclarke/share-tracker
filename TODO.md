@@ -162,7 +162,9 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   - 2026-10-23: `unwrap_used` and `allow-unwrap-in-tests = true` are done (with the
     `exchange_holiday.rs` clean-up below); `cast_possible_truncation` is done too (with the
     `as`-cast clean-up below, test code included); `format_push_string` is done too (with the
-    string-building clean-up below, test code included); the remaining lints are still open
+    string-building clean-up below, test code included); `needless_for_each` is enabled too, an
+    extra lint beyond this list (with the `for_each` clean-up below, test code included); the
+    remaining lints are still open
 
 ## Google Rust style guide pass (2026-10-23) — mechanical clean-ups
 Each closed by the lint named in the section above once it is enabled and clean.
@@ -198,7 +200,12 @@ Each closed by the lint named in the section above once it is enabled and clean.
     `fill_template_fills_every_occurrence_and_leaves_unknown_names`; the lint is
     `clippy::format_push_string = "warn"` in `Cargo.toml`, enforced by CI's
     `cargo clippy --all-targets -- -D warnings` (mutation-checked)
-- [ ] `Iterator::for_each` → `for` loops at `api_spec.rs:395`, `:1846`, `:1848`, `:2514`
+- [x] `Iterator::for_each` → `for` loops at `api_spec.rs:395`, `:1846`, `:1848`, `:2514`
+  - Done 2026-10-23: all four (now `api_spec.rs:403`, `:1857`, `:1859`, `:2530`, the last three in
+    test code) are `for` loops; they were the only `for_each` calls in `src`. The lint fires only on
+    a block-bodied closure, so these four expression-bodied ones were converted by hand. Test:
+    `clippy::needless_for_each = "warn"` in `Cargo.toml`, enforced by CI's
+    `cargo clippy --all-targets -- -D warnings` (mutation-checked)
 - [ ] 22 `.to_string()` calls on `&str` → `to_owned()` (`clippy::str_to_string`, auto-fixable)
 - [ ] Nine by-value arguments never consumed (e.g. `config.rs:232`, `decimal.rs:286` → `&str`;
   `http.rs:425`; `scheduler/registry.rs:215`; `amit_adjustment.rs:566`; `trade/checks.rs:330`) and

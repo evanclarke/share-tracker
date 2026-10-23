@@ -146,3 +146,7 @@ cast_possible_truncation = "warn"
 # per call only to copy it into `s`: `write!(s, …)` formats straight into it.
 # Test code is held to it too.
 format_push_string = "warn"
+# `iter.for_each(|x| { … })` hides a plain loop behind a closure, where `return`
+# means `continue` and `?`/`break` are unavailable: write the `for` loop.
+# Test code is held to it too.
+needless_for_each = "warn"

@@ -400,7 +400,11 @@ fn slice_where(
                     refs(child, out);
                 }
             }
-            Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
+            Value::Array(items) => {
+                for item in items {
+                    refs(item, out);
+                }
+            }
             Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
         }
     }
@@ -1854,9 +1858,15 @@ mod tests {
                     if let Some(properties) = map.get("properties") {
                         props.push(properties);
                     }
-                    map.values().for_each(|c| walk(c, refs, props));
+                    for c in map.values() {
+                        walk(c, refs, props);
+                    }
                 }
-                Value::Array(items) => items.iter().for_each(|c| walk(c, refs, props)),
+                Value::Array(items) => {
+                    for c in items {
+                        walk(c, refs, props);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2527,7 +2537,11 @@ mod tests {
                         refs(child, out);
                     }
                 }
-                Value::Array(items) => items.iter().for_each(|item| refs(item, out)),
+                Value::Array(items) => {
+                    for item in items {
+                        refs(item, out);
+                    }
+                }
                 _ => {}
             }
         }
