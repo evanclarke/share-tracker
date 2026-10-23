@@ -560,6 +560,8 @@ pub struct AcquiredUnits {
 }
 
 impl AcquiredUnits {
+    /// No units (the exact fraction `0 / 1`): what an emptied parcel's
+    /// remainder, or an empty covered count, is compared against.
     pub const ZERO: Self = Self {
         num: Decimal::ZERO,
         den: Decimal::ONE,

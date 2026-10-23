@@ -72,6 +72,9 @@ pub struct Costing {
 }
 
 impl Costing {
+    /// Read every parcel's AMIT reduction events (CGT event E10, unbounded by
+    /// date), each listing's return-of-capital (G1) and split events, and the
+    /// imported ATO FX rates, on the caller's connection.
     pub async fn load(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
         Ok(Costing {
             amit: cost_base::db_cost_base_reduction_events(&mut *conn, None).await?,

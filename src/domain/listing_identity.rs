@@ -73,6 +73,8 @@ type RenameRow = (
 );
 
 impl RenameHistory {
+    /// Read every `listing_renames` row on the caller's connection, grouped
+    /// by listing in ascending `effective_date` order.
     pub async fn load(conn: &mut sqlx::SqliteConnection) -> Result<Self, sqlx::Error> {
         let rows: Vec<RenameRow> = sqlx::query_as(
             "SELECT listing_id, effective_date, old_ticker, new_ticker, \
