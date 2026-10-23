@@ -24,6 +24,7 @@ use chrono::NaiveDate;
 use http_body_util::BodyExt;
 use rust_decimal::Decimal;
 use sqlx::SqlitePool;
+use std::fmt::Write as _;
 use std::sync::{Arc, LazyLock};
 use tower::ServiceExt;
 
@@ -382,12 +383,14 @@ async fn push_rows(pool: &SqlitePool, table: &str, out: &mut String) {
 
     const ROWS_PER_STATEMENT: usize = 128;
     for chunk in rows.chunks(ROWS_PER_STATEMENT) {
-        out.push_str(&format!(
-            "INSERT INTO {} ({}) VALUES {};\n",
+        writeln!(
+            out,
+            "INSERT INTO {} ({}) VALUES {};",
             quote_ident(table),
             quoted.join(","),
             chunk.join(",")
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
 }
 

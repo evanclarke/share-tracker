@@ -142,3 +142,7 @@ unwrap_used = "warn"
 # `try_from`, propagating client input as a 422 and `expect`ing the impossible.
 # Test code is held to it too — it was clean once its few casts were rewritten.
 cast_possible_truncation = "warn"
+# `s.push_str(&format!(…))` / `s += &format!(…)` builds a throwaway `String`
+# per call only to copy it into `s`: `write!(s, …)` formats straight into it.
+# Test code is held to it too.
+format_push_string = "warn"

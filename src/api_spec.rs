@@ -38,6 +38,7 @@ use crate::infra::extract::Query;
 use crate::infra::http::ApiError;
 use crate::infra::respond::{JsonBody, Payload, PlainText};
 use sqlx::SqlitePool;
+use std::fmt::Write as _;
 use utoipa::openapi::{
     Components, ComponentsBuilder, InfoBuilder, OpenApi, OpenApiBuilder, PathItem, RefOr, Required,
     content::{Content, ContentBuilder},
@@ -276,7 +277,9 @@ fn operation_id(verb: Verb, path: &str, statuses: &[u16], answers_array: bool) -
             .map(|word| {
                 let mut chars = word.chars();
                 chars.next().map_or(String::new(), |first| {
-                    first.to_ascii_uppercase().to_string() + chars.as_str()
+                    std::iter::once(first.to_ascii_uppercase())
+                        .chain(chars)
+                        .collect()
                 })
             })
             .collect()
@@ -352,15 +355,19 @@ fn route_index(document: &OpenApi, base_path: &BasePath) -> String {
         if group.is_empty() {
             continue;
         }
-        out.push_str(&format!(
+        write!(
+            out,
             "\n## {tag} — GET /openapi.json?tag={}\n",
             tag.replace(' ', "%20")
-        ));
+        )
+        .expect("writing to a String cannot fail");
         for (verb, path, id, summary) in group {
-            out.push_str(&format!(
-                "{:<6} {path}  {id} — {summary}\n",
+            writeln!(
+                out,
+                "{:<6} {path}  {id} — {summary}",
                 format!("{verb:?}").to_uppercase(),
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
     }
     out

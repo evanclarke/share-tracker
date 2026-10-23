@@ -51,6 +51,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 /// One dated row of the ledger. `quantity` is the row's signed unit effect in
@@ -411,7 +412,8 @@ impl Sources {
                     None => format!("from {from} to {to}"),
                 };
                 if let Some(fee_sell) = t.fee_sale_trade_id {
-                    detail.push_str(&format!(" (network fee disposal: trade #{fee_sell})"));
+                    write!(detail, " (network fee disposal: trade #{fee_sell})")
+                        .expect("writing to a String cannot fail");
                 }
                 Proto {
                     date: t.date,
@@ -452,10 +454,12 @@ impl Sources {
                 let gross = i.gross_cash_income();
                 let mut detail = format!("gross {gross} {}", i.currency);
                 if i.franking_credits > Decimal::ZERO {
-                    detail.push_str(&format!(", franking credits {}", i.franking_credits));
+                    write!(detail, ", franking credits {}", i.franking_credits)
+                        .expect("writing to a String cannot fail");
                 }
                 if let Some(trade_id) = i.reinvestment_trade_id {
-                    detail.push_str(&format!(", reinvested (trade #{trade_id})"));
+                    write!(detail, ", reinvested (trade #{trade_id})")
+                        .expect("writing to a String cannot fail");
                 }
                 // The AUD month follows the tax summary, on the model's own
                 // `assessment_date`: present entitlement governs a trust row
@@ -556,11 +560,13 @@ impl Sources {
             .map(|r| {
                 let mut detail = format!("renamed {} -> {}", r.old_ticker, r.new_ticker);
                 if r.old_exchange_mic != r.new_exchange_mic {
-                    detail.push_str(&format!(
+                    write!(
+                        detail,
                         " (exchange {} -> {})",
                         r.old_exchange_mic.as_deref().unwrap_or("Crypto"),
                         r.new_exchange_mic.as_deref().unwrap_or("Crypto")
-                    ));
+                    )
+                    .expect("writing to a String cannot fail");
                 }
                 Proto {
                     date: r.effective_date,
@@ -618,7 +624,7 @@ impl Sources {
             .map(|e| {
                 let mut detail = format!("{:?}: {} {}", e.expense_type, e.amount, e.currency);
                 if let Some(desc) = &e.description {
-                    detail.push_str(&format!(" — {desc}"));
+                    write!(detail, " — {desc}").expect("writing to a String cannot fail");
                 }
                 let amount_aud =
                     self.fx
@@ -857,7 +863,8 @@ fn describe_action(
                 ticker(*scrip_listing_id)
             );
             if let (Some(cash), Some(cur)) = (scrip_cash_per_unit, scrip_cash_currency) {
-                detail.push_str(&format!(" plus {cash} {cur} cash per unit"));
+                write!(detail, " plus {cash} {cur} cash per unit")
+                    .expect("writing to a String cannot fail");
             }
             ("Scrip-for-scrip takeover".to_string(), detail, None)
         }

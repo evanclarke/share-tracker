@@ -161,7 +161,8 @@ item below is closed by enabling a lint, the CI clippy gate (`-D warnings`) is i
   that decision in a `rustfmt.toml` comment rather than adopting them silently
   - 2026-10-23: `unwrap_used` and `allow-unwrap-in-tests = true` are done (with the
     `exchange_holiday.rs` clean-up below); `cast_possible_truncation` is done too (with the
-    `as`-cast clean-up below, test code included); the remaining lints are still open
+    `as`-cast clean-up below, test code included); `format_push_string` is done too (with the
+    string-building clean-up below, test code included); the remaining lints are still open
 
 ## Google Rust style guide pass (2026-10-23) — mechanical clean-ups
 Each closed by the lint named in the section above once it is enabled and clean.
@@ -183,11 +184,20 @@ Each closed by the lint named in the section above once it is enabled and clean.
     decode error instead of truncating. The lint also flagged seven test-code casts, rewritten
     rather than exempted. Test: `clippy::cast_possible_truncation = "warn"` in `Cargo.toml`,
     enforced by CI's `cargo clippy --all-targets -- -D warnings` (mutation-checked)
-- [ ] String building: 15 `s += &format!(…)` (`infra/email.rs` 7, `reports/activity.rs` 6,
+- [x] String building: 15 `s += &format!(…)` (`infra/email.rs` 7, `reports/activity.rs` 6,
   `api_spec.rs` 2) → `write!`; the `+` concatenation at `api_spec.rs:278`; and the chained
   `.replace("{{X}}", …)` templating in `web.rs:137` / `infra/auth.rs:1189` — at minimum a comment
   noting the order dependence (a substituted `{{ERROR}}` body containing `{{THEME}}` would be
   expanded by the next replace), or a single-pass substitution
+  - Done 2026-10-23: all 15 `push_str(&format!(…))` are `write!`/`writeln!` into the `String`,
+    plus the two test-code ones the lint also found (`test_support.rs`, `rba_fx_rate.rs`); the
+    `api_spec.rs` PascalCase `+` is a `chain`/`collect`. Both templates now go through
+    `web::fill_template`, a single left-to-right pass that never re-scans a substituted value
+    (escaping unchanged: the login page's `{{ERROR}}` is still one of its own fixed strings).
+    Tests: `web::tests::fill_template_never_rescans_a_substituted_value` and
+    `fill_template_fills_every_occurrence_and_leaves_unknown_names`; the lint is
+    `clippy::format_push_string = "warn"` in `Cargo.toml`, enforced by CI's
+    `cargo clippy --all-targets -- -D warnings` (mutation-checked)
 - [ ] `Iterator::for_each` → `for` loops at `api_spec.rs:395`, `:1846`, `:1848`, `:2514`
 - [ ] 22 `.to_string()` calls on `&str` → `to_owned()` (`clippy::str_to_string`, auto-fixable)
 - [ ] Nine by-value arguments never consumed (e.g. `config.rs:232`, `decimal.rs:286` → `&str`;

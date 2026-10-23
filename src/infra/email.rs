@@ -28,6 +28,7 @@
 //! it (see REQUIREMENTS, "Emailed portfolio reports").
 
 use rust_decimal::Decimal;
+use std::fmt::Write as _;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 // ---------------------------------------------------------------------------
@@ -392,12 +393,8 @@ impl Document {
                     .max()
                     .unwrap_or(0);
                 for (label, value) in &section.stats {
-                    out.push_str(&format!(
-                        "  {label:<width$}  {value}\n",
-                        label = label,
-                        width = width,
-                        value = value
-                    ));
+                    writeln!(out, "  {label:<width$}  {value}")
+                        .expect("writing to a String cannot fail");
                 }
             }
             if let Some(table) = &section.table {
@@ -417,34 +414,42 @@ impl Document {
             "<div style=\"font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;\
              font-size:14px;color:#1a1a1a;max-width:900px\">",
         );
-        out.push_str(&format!(
+        write!(
+            out,
             "<h1 style=\"font-size:18px;margin:0 0 16px\">{}</h1>",
             escape(&self.title)
-        ));
+        )
+        .expect("writing to a String cannot fail");
         for section in &self.sections {
-            out.push_str(&format!(
+            write!(
+                out,
                 "<h2 style=\"font-size:15px;margin:24px 0 8px\">{}</h2>",
                 escape(&section.heading)
-            ));
+            )
+            .expect("writing to a String cannot fail");
             for note in &section.notes {
-                out.push_str(&format!(
+                write!(
+                    out,
                     "<p style=\"margin:0 0 8px;padding:8px;background:#fff6e0;\
                      border-left:3px solid #d08700\">{}</p>",
                     escape(note)
-                ));
+                )
+                .expect("writing to a String cannot fail");
             }
             if !section.stats.is_empty() {
                 out.push_str(
                     "<table cellpadding=\"0\" cellspacing=\"0\" style=\"margin:0 0 8px\">",
                 );
                 for (label, value) in &section.stats {
-                    out.push_str(&format!(
+                    write!(
+                        out,
                         "<tr><td style=\"padding:2px 16px 2px 0;color:#555\">{}</td>\
                          <td style=\"padding:2px 0;text-align:right;font-variant-numeric:\
                          tabular-nums\">{}</td></tr>",
                         escape(label),
                         escape(value)
-                    ));
+                    )
+                    .expect("writing to a String cannot fail");
                 }
                 out.push_str("</table>");
             }
@@ -507,23 +512,27 @@ fn render_html_table(table: &Table) -> String {
          style=\"border-collapse:collapse;width:100%;margin:0 0 8px\"><tr>",
     );
     for (i, header) in table.headers.iter().enumerate() {
-        out.push_str(&format!(
+        write!(
+            out,
             "<th style=\"padding:4px 8px;border-bottom:1px solid #999;text-align:{};\
              font-weight:600\">{}</th>",
             align(table.numeric[i]),
             escape(header)
-        ));
+        )
+        .expect("writing to a String cannot fail");
     }
     out.push_str("</tr>");
     for row in &table.rows {
         out.push_str("<tr>");
         for (i, cell) in row.iter().enumerate() {
-            out.push_str(&format!(
+            write!(
+                out,
                 "<td style=\"padding:4px 8px;border-bottom:1px solid #eee;text-align:{};\
                  font-variant-numeric:tabular-nums\">{}</td>",
                 align(table.numeric[i]),
                 escape(cell)
-            ));
+            )
+            .expect("writing to a String cannot fail");
         }
         out.push_str("</tr>");
     }

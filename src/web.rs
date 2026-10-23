@@ -138,11 +138,51 @@ fn index_html(base_path: &BasePath, mode: AuthMode) -> String {
         AuthMode::Required => "1",
         AuthMode::Open => "",
     };
-    INDEX_HTML
-        .replace("{{VERSION}}", env!("CARGO_PKG_VERSION"))
-        .replace("{{BASE}}", base_path.as_str())
-        .replace("{{AUTH}}", auth)
-        .replace("{{THEME}}", THEME_BOOT_SCRIPT)
+    fill_template(
+        INDEX_HTML,
+        &[
+            ("VERSION", env!("CARGO_PKG_VERSION")),
+            ("BASE", base_path.as_str()),
+            ("AUTH", auth),
+            ("THEME", THEME_BOOT_SCRIPT),
+        ],
+    )
+}
+
+/// `template` with every `{{NAME}}` placeholder that `values` names replaced
+/// by its value, in one left-to-right pass: a substituted value is copied out
+/// verbatim and never scanned again, so a value that itself contains
+/// `{{OTHER}}` stays literal — which a chain of `.replace` calls would not
+/// promise, since each later replace re-scans the text the earlier ones
+/// inserted. A `{{…}}` that `values` does not name is left as it is. Values are
+/// inserted as given: escaping, where one is needed, is the caller's.
+pub(crate) fn fill_template(template: &str, values: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let at = &rest[open..];
+        let found = values.iter().find_map(|(name, value)| {
+            at.strip_prefix("{{")?
+                .strip_prefix(name)?
+                .strip_prefix("}}")
+                .map(|after| (*value, after))
+        });
+        match found {
+            Some((value, after)) => {
+                out.push_str(value);
+                rest = after;
+            }
+            // Not a placeholder this call fills: keep its first brace and
+            // resume scanning after it, so `{{{BASE}}` still fills `{{BASE}}`.
+            None => {
+                out.push('{');
+                rest = &at[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
@@ -172,6 +212,29 @@ mod tests {
     use super::*;
     use crate::test_support::{ApiClient, ApiResponse, test_pool};
     use axum::http::StatusCode;
+
+    #[test]
+    fn fill_template_never_rescans_a_substituted_value() {
+        // A value carrying another placeholder's name stays literal, whatever
+        // order the placeholders are listed in.
+        let template = "<p>{{ERROR}}</p>{{THEME}}";
+        let values = [("ERROR", "{{THEME}} {{BASE}}"), ("THEME", "<script/>")];
+        let expected = "<p>{{THEME}} {{BASE}}</p><script/>";
+        assert_eq!(fill_template(template, &values), expected);
+        let reversed = [values[1], values[0]];
+        assert_eq!(fill_template(template, &reversed), expected);
+    }
+
+    #[test]
+    fn fill_template_fills_every_occurrence_and_leaves_unknown_names() {
+        let values = [("BASE", "/app")];
+        assert_eq!(
+            fill_template("{{BASE}}/a {{BASE}}/b {{OTHER}} {{{BASE}}} {{BAS", &values),
+            "/app/a /app/b {{OTHER}} {/app} {{BAS"
+        );
+        assert_eq!(fill_template("", &values), "");
+        assert_eq!(fill_template("no placeholders", &[]), "no placeholders");
+    }
 
     async fn get(uri: &str) -> ApiResponse {
         get_based("", uri).await

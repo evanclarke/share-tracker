@@ -982,6 +982,7 @@ mod tests {
     mod properties {
         use super::*;
         use proptest::prelude::*;
+        use std::fmt::Write as _;
 
         /// A feed cell: usually a plausible rate, sometimes blank, zero,
         /// negative, or not a number at all.
@@ -1028,11 +1029,8 @@ mod tests {
                     out.push_str("\nUnits,AUD\n");
                     for (d, m, y, cells) in rows {
                         let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
-                        out.push_str(&format!(
-                            "{},{}\n",
-                            date.format("%d-%b-%Y"),
-                            cells.join(",")
-                        ));
+                        writeln!(out, "{},{}", date.format("%d-%b-%Y"), cells.join(","))
+                            .expect("writing to a String cannot fail");
                     }
                     out
                 })

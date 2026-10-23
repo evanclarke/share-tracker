@@ -1238,14 +1238,21 @@ fn render_login(base_path: &BasePath, error: Option<&str>) -> Html<String> {
         None => String::new(),
     };
     Html(
-        LOGIN_HTML
-            .replace("{{BASE}}", base_path.as_str())
-            .replace("{{ERROR}}", &error_html)
-            // The same pre-paint colour-scheme script the SPA shell carries —
-            // one const, so the login page can never disagree with the app it
-            // leads to about which scheme is in force. It is also the only
-            // JavaScript this page has: it loads no modules.
-            .replace("{{THEME}}", crate::web::THEME_BOOT_SCRIPT),
+        // One pass (`fill_template`), so nothing substituted — the error
+        // paragraph included — is ever re-scanned for another placeholder.
+        crate::web::fill_template(
+            LOGIN_HTML,
+            &[
+                ("BASE", base_path.as_str()),
+                ("ERROR", &error_html),
+                // The same pre-paint colour-scheme script the SPA shell
+                // carries — one const, so the login page can never disagree
+                // with the app it leads to about which scheme is in force. It
+                // is also the only JavaScript this page has: it loads no
+                // modules.
+                ("THEME", crate::web::THEME_BOOT_SCRIPT),
+            ],
+        ),
     )
 }
 
