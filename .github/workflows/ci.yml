@@ -42,7 +42,7 @@ jobs:
         with:
           toolchain: stable
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # The frontend's pure JS helpers (money-adjacent decimal arithmetic in
       # src/web/util.js) are unit-tested with Node's built-in runner — no npm
       # install, no build step. Node 22+ (the glob needs >=21).
@@ -56,7 +56,7 @@ jobs:
       # than cargo-deny-action, which builds a Docker image on every run; the
       # command is the local equivalent verbatim
       # (cargo install cargo-deny --locked).
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
         with:
           tool: cargo-deny
       - run: cargo deny check advisories
@@ -74,7 +74,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test
 
   ui-smoke:
@@ -85,7 +85,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # Headless UI smoke check on the runner's preinstalled Chrome: the SPA
       # boots and key routes render seeded data end-to-end — catches a broken
       # module route or load-time JS exception that the served-bundle string
