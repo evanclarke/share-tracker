@@ -89,3 +89,77 @@ falls under the existing rules.
 - [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
+
+## Unit granularity and registry rounding of fractional entitlements (design review 2026-10-24)
+Every rounding defect the 2026-10-11 and 2026-10-24 passes found has one root: a ratio-driven
+action (`ShareSplit`, `BonusIssue`, `ScripForScrip`, `Demerger`) whose ratio does not divide a
+holding produces a count no register holds (200 post-split units of a 3-for-1 split are 66.666…
+as-acquired units), and every later re-base, sum and read-back has to keep it exact —
+`AcquiredUnits` as an exact fraction, `as_acquired_quantity`'s shortest-count read-back,
+`sold_in_acquired_units`' remainder matching, `parcel_optimiser`'s `adding_up_to` residue. The
+model is also unfaithful: `docs/API.md`'s [Fractional entitlements](docs/API.md#fractional-entitlements)
+says registry rounding and cash in lieu are "not modelled". What registries actually do:
+- **The rounding rule is the action's.** ASX Listing Rule 7.20 has the issuer disclose its
+  treatment of fractional entitlements, and it varies: rounded up (Wesfarmers' 0.9827
+  consolidation, 2014), rounded down with no cash (Stellar Resources' 10-for-1, 2026), or
+  aggregated, sold and paid out as cash in lieu
+- **It is applied once per holding** (per HIN/SRN), not per parcel — parcels are the taxpayer's
+  record, the register holds one number. Two 50-unit parcels after a 1-for-3 consolidation are 33
+  or 34 units, never 16.67 + 16.67
+- **No CGT event** (TD 2000/10, s112-25): the original cost base spreads over the resulting units
+  and the acquisition date carries; cash in lieu disposes of the fraction (already documented as a
+  Sell). A round-up is left to each company's class ruling
+- **The unit grid belongs to the custody, not the exchange:** XNYS is whole units at SelfWealth
+  (CHESS) and 3 dp at the Morgan Stanley share plan (DRP); a custodial broker sets its own cap
+  (Questrade 4 dp); crypto has no exchange, and Binance's `LOT_SIZE` `stepSize` bounds *orders*
+  only — fee dust leaves balances finer than it, and ETH is natively 18 dp. So the key is the
+  holding account, with a per-listing override, not (account, exchange)
+
+The live portfolio's only ratio-driven action is a 1-for-1 demerger, so no stored figure is wrong
+today; this is a model-correctness change. DRP's `residual_handling` (`CarryForward | PayOut`) is
+the precedent: the rule is on the plan, the grid on the holding.
+
+- [ ] **Account unit precision.** Add `unit_scale` to `holding_accounts` (INTEGER, nullable: the
+  number of decimal places a quantity held there may carry; NULL = unconstrained, for crypto
+  wallets), plus an optional per-(account, listing) override table for the odd holding that
+  differs. A Buy/Sell/DRP/transfer/allocation quantity finer than its holding's scale is refused
+  `422` naming the scale. Migration seeds the scale from the finest quantity each account already
+  holds (never below it — no existing row may become invalid) and leaves crypto accounts NULL.
+  `docs/SCHEMA.md`, `docs/API.md`, `config.js` (holding-account form), the audited-table trigger
+  pair for `holding_accounts` (new column), and a staleness-trigger classification for the
+  override table. Useful on its own (it catches mistyped quantities) but does not by itself stop
+  the defect class
+- [ ] **A fraction rule on every ratio-driven action.** Add `fraction_rule` to `corporate_actions`
+  (`Exact | Down | Up | Nearest | CashInLieu`, CHECK-constrained, typed enum in `model.rs`; required
+  for the four ratio-driven types, absent for the rest). Existing rows migrate to `Exact`, so no
+  history moves; `Exact` stays available for a registry that genuinely holds fractions. A
+  `CashInLieu` action also takes the cash amount per holding (or total, apportioned) and writes the
+  fraction's disposal as a Sell with its own provenance variant (`sell::SellProvenance`), dated the
+  payment date. `docs/API.md` (corporate actions + rewrite *Fractional entitlements*), the
+  `config.js` `fieldGroups`, and the `sel()` pin in `select_option_lists_are_pinned_to_their_server_side_source`
+- [ ] **Compute per holding, store per parcel.** For a non-`Exact` action, the post-action count of
+  each holding account is `round(ratio × units on the register at the record date, unit_scale,
+  fraction_rule)` — register by **settlement** date, per Financial correctness — with an optional
+  per-account "units received" override for a statement that disagrees. The rounded total is
+  distributed across that holding's open parcels by largest remainder on the scale's grid (ties by
+  acquisition date, then trade id, so it is deterministic), and each parcel's post-action count is
+  **stored** (a new child table of `corporate_actions`, keyed by action + parcel), written inside
+  the action's `write_tx`, rather than re-derived by multiplying each parcel by the ratio at read
+  time. Each parcel keeps its whole cost base; scrip/demerger legs still split it through
+  `infra::decimal::apportion`. Needs: `domain::adjustments`' `split_adjusted_quantity`/`rebased` to
+  read the stored count for a non-`Exact` action; the action's undo and `?dry_run=true` preview to
+  cover the child table (the operation properties in `ca5bcc0` extended to it); staleness triggers
+  on it (snapshotted reports read it); audit triggers + `AUDITED_TABLES` + `config.js` picker if it
+  is a financial fact table; and a re-computation (or refusal, `422`) when a trade the stored
+  result depended on — a parcel settled on or before the record date — is edited or deleted
+  afterwards. Property: for every non-`Exact` action, the stored parcel counts sum to the rounded
+  holding total, every count is on the grid, and each parcel's count differs from its exact share
+  by less than one grid step
+- [ ] **Retire the exact-fraction machinery where it is no longer reached.** Once every ratio-driven
+  action a holding can carry rounds onto a grid, a quantity is a terminating decimal on it
+  everywhere. Decide (owner) whether `Exact` stays a permitted rule; if not, migrate existing
+  `Exact` rows only where their stored results already lie on the account's grid, and simplify
+  `AcquiredUnits` back to a `Decimal`, `as_acquired_quantity`'s shortest-count read-back,
+  `sold_in_acquired_units`' remainder matching and `adding_up_to`'s residue — each removal with the
+  property that found its defect still passing. If `Exact` stays, this item is N/A and the
+  machinery remains for it alone
