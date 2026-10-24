@@ -2188,6 +2188,9 @@ mod tests {
         div.franking_credits = Decimal::from(60);
         div.foreign_tax_paid = Decimal::from(0);
         div.tfn_withholding_tax = Decimal::from(5);
+        // A LIC's dividend: the attributable part is the company route's alone
+        // — a trust holding LIC shares deducts it itself.
+        div.lic_capital_gain_amount = Decimal::from(5);
         income::db_upsert(&pool, &div).await.unwrap();
 
         // Trust distribution FY2024 whose unfranked amount includes a
@@ -2202,7 +2205,6 @@ mod tests {
         trust.foreign_tax_paid = Decimal::from(9);
         trust.unfranked_amount = Decimal::from(40);
         trust.conduit_foreign_income = Decimal::from(10); // 10 of the 40 above
-        trust.lic_capital_gain_amount = Decimal::from(5);
         trust.trust_income = true;
         income::db_upsert(&pool, &trust).await.unwrap();
 

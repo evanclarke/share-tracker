@@ -1541,10 +1541,11 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
     let gains: Vec<RealisedGainLoss> = api_get(&pool, "/portfolio/realised_gains").await;
     assert_eq!(gains.len(), 1);
     // 56 × $5 = $280 proceeds − $126.575 cost base = $153.425, all
-    // discount-eligible.
-    assert_eq!(gains[0].cost_base, dec("126.575"));
-    assert_eq!(gains[0].capital_gain_loss, dec("153.425"));
-    assert_eq!(gains[0].discount_eligible_gain, dec("153.425"));
+    // discount-eligible — served at the cent, as every surface prints a
+    // disposal (`RealisedGainLoss::at_the_cent`): $280.00 − $126.58.
+    assert_eq!(gains[0].cost_base, dec("126.58"));
+    assert_eq!(gains[0].capital_gain_loss, dec("153.42"));
+    assert_eq!(gains[0].discount_eligible_gain, dec("153.42"));
     assert_eq!(gains[0].non_discountable_gain, Decimal::ZERO);
 }
 
@@ -3433,8 +3434,10 @@ async fn personal_investors_guide_example_13_andrew_discount_beats_indexation() 
     assert_eq!(row.cpi, dec("68.1"), "the June 1999 quarter");
     assert_eq!(row.indexation_factor, dec("1.009"));
     assert_eq!(row.proceeds, dec("1595"));
-    assert_eq!(row.indexed_cost_base, dec("1286.475"), "the ATO's $1,286");
-    assert_eq!(row.indexation_method_gain, dec("308.525"), "the ATO's $309");
+    // $1,275 × 1.009 = $1,286.475, compared at the cent the worksheet nets
+    // the disposal at (`RealisedGainLoss::at_the_cent`).
+    assert_eq!(row.indexed_cost_base, dec("1286.48"), "the ATO's $1,286");
+    assert_eq!(row.indexation_method_gain, dec("308.52"), "the ATO's $309");
     assert_eq!(row.discount_method_gain, dec("160"), "$320 halved");
     assert_eq!(row.better_method, "Discount");
 

@@ -1005,23 +1005,19 @@ mod tests {
                         .iter()
                         .map(|t| (t.deemed_acquisition_date.unwrap(), t.brokerage))
                         .collect();
-                    let realised: serde_json::Value = api.get_json("/portfolio/realised_gains").await;
-                    let closing = realised
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|r| r["source"] == "Sell" && r["disposal_id"] == ex.sell.id.0)
+                    // The exact pipeline: the split is exact, while the
+                    // Realised Gains screen prints each share at the cent.
+                    let realised = realised_gains::db_realised_gains(&pool)
+                        .await
                         .unwrap();
-                    let cash_side: BTreeMap<NaiveDate, Decimal> = closing["parcels"]
-                        .as_array()
-                        .unwrap()
+                    let closing = realised
                         .iter()
-                        .map(|p| {
-                            (
-                                p["acquisition_date"].as_str().unwrap().parse().unwrap(),
-                                dec(p["cost_base"].as_str().unwrap()),
-                            )
-                        })
+                        .find(|r| r.disposal.sell() == Some(ex.sell.id))
+                        .unwrap();
+                    let cash_side: BTreeMap<NaiveDate, Decimal> = closing
+                        .parcels
+                        .iter()
+                        .map(|p| (p.acquisition_date, p.cost_base))
                         .collect();
 
                     prop_assert_eq!(carried.len(), costs.len());

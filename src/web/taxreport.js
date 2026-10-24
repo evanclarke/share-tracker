@@ -385,11 +385,11 @@ function incomeSection(inc, summaryLines) {
   return el('div', { class: 'doc-section' }, [
     el('h3', null, 'Income'),
     el('h4', null, 'Trust income'),
-    genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'franking_status', 'tax_deferred_amount']),
+    genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'tfn_withholding_tax_aud', 'franking_status', 'tax_deferred_amount']),
     inc.amma_statements.length ? el('p', { class: 'hint' }, 'AMMA statement components for the year:') : null,
     ammaStatementsTable(inc.amma_statements),
     el('h4', null, 'Dividend income'),
-    genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'franking_status']),
+    genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'tfn_withholding_tax_aud', 'franking_status']),
     cfiFootnote(inc),
     inc.employment_income && inc.employment_income.length
       ? el('h4', null, 'Employment income (not investment income)') : null,

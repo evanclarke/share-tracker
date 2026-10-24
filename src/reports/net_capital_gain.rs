@@ -767,14 +767,14 @@ pub(crate) async fn db_net_capital_gain_on(
     // Group the already-fetched disposals by tax year so each year row can
     // carry the disposals (and, within them, the parcels) that its gross
     // gains were summed from — the drilldown data `gross_buckets` only reads
-    // aggregated totals from.
+    // aggregated totals from — at the cent, as those totals are.
     let mut disposals_by_year: HashMap<i32, Vec<super::realised_gains::RealisedGainLoss>> =
         HashMap::new();
-    for r in realised {
+    for r in &realised {
         disposals_by_year
             .entry(tax_year_for(r.sale_date))
             .or_default()
-            .push(r);
+            .push(r.at_the_cent());
     }
 
     let mut years = net_years(buckets, opening, current_tax_year());
@@ -803,8 +803,12 @@ async fn gross_buckets(
 ) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
-    // Realised parcel gains (already AUD), bucketed by the sale's tax year.
-    for r in realised {
+    // Realised parcel gains (already AUD), bucketed by the sale's tax year —
+    // each disposal at the cent, rounded per parcel exactly as the Realised
+    // Gains screen and the annual tax report's disposal schedule print it
+    // (`RealisedGainLoss::at_the_cent`), so the worksheet's gains are the
+    // schedule's to the cent rather than its exact total rounded once.
+    for r in realised.iter().map(|r| r.at_the_cent()) {
         let b = buckets.entry(tax_year_for(r.sale_date)).or_default();
         b.discount_eligible += r.discount_eligible_gain;
         b.other += r.non_discountable_gain;
@@ -1453,9 +1457,21 @@ async fn what_if_handler(
     without.entry(tax_year).or_default();
     let mut with = buckets;
     let b = with.entry(tax_year).or_default();
-    b.discount_eligible += totals.discount_eligible_gain;
-    b.other += totals.non_discountable_gain;
-    b.losses += totals.capital_loss;
+    // At the cent per parcel, as the recorded Sell's own gains will be netted
+    // (`realised_gains::parcels_at_the_cent`) — so the preview is the figure
+    // the worksheet shows once the sale is entered, not a cent away from it.
+    // In the recorded disposal's parcel order (acquisition date, then trade
+    // id), which is the order its proceeds round in.
+    let mut in_parcel_order: Vec<_> = allocations.iter().collect();
+    in_parcel_order.sort_by_key(|a| (a.acquisition_date, a.purchase_trade_id));
+    let (_, cents) = super::realised_gains::parcels_at_the_cent(
+        in_parcel_order
+            .iter()
+            .map(|a| (a.proceeds, a.cost_base, a.discount_eligible)),
+    );
+    b.discount_eligible += cents.discount_eligible_gain;
+    b.other += cents.non_discountable_gain;
+    b.losses += cents.capital_loss;
 
     let year_row = |rows: Vec<NetCapitalGainYear>, scenario: &str| {
         rows.into_iter()

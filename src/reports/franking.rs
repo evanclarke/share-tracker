@@ -1110,4 +1110,145 @@ mod tests {
         };
         assert_eq!(t.denied(Decimal::from(100)), Decimal::ZERO);
     }
+
+    mod properties {
+        use super::*;
+        use chrono::{Datelike, Weekday};
+        use proptest::prelude::*;
+
+        /// The Wednesdays of 2024 clear of Christmas Day — ASX trading days.
+        fn trading_days() -> Vec<NaiveDate> {
+            d("2024-01-01")
+                .iter_days()
+                .take_while(|day| day.year() == 2024)
+                .filter(|day| day.weekday() == Weekday::Wed && *day != d("2024-12-25"))
+                .collect()
+        }
+
+        /// A trade: the week it is made in (the first eighteen of 2024, so a
+        /// 45-day window usually holds some of them), whether it sells, and
+        /// the quantity — a buy's units, or a sell's percentage of what is held.
+        fn trades() -> impl Strategy<Value = Vec<(usize, bool, i64)>> {
+            prop::collection::vec((0usize..18, any::<bool>(), 1i64..=100), 1..=10)
+        }
+
+        /// Records the trades — every one dated on or after `split`'s date in
+        /// its post-split units — and runs the walk for a dividend going ex on
+        /// `ex_date`. Answers the walk's result and what the history held at
+        /// the end of the day before the ex-date, in pre-split units.
+        async fn walk(
+            trades: &[(usize, bool, i64)],
+            split: Option<(NaiveDate, i64)>,
+            ex_date: NaiveDate,
+        ) -> (HoldingPeriodTest, Decimal) {
+            let pool = test_pool().await;
+            insert_listing(&pool, 1, false).await;
+            if let Some((date, factor)) = split {
+                corporate_action::db_upsert(
+                    &pool,
+                    &CorporateAction {
+                        id: 1,
+                        listing_id: ListingId(1),
+                        date,
+                        kind: ActionKind::ShareSplit {
+                            split_new_units: Decimal::from(factor),
+                            split_old_units: Decimal::ONE,
+                        },
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            let days = trading_days();
+            let mut dated: Vec<_> = trades.iter().map(|(w, s, q)| (days[*w], *s, *q)).collect();
+            dated.sort_by_key(|(date, _, _)| *date);
+            let mut held = 0i64; // pre-split units
+            let mut held_before_ex = 0i64;
+            for (i, (date, sells, qty)) in dated.iter().enumerate() {
+                let units = if *sells { held * qty / 100 } else { *qty };
+                if units == 0 {
+                    continue;
+                }
+                held += if *sells { -units } else { units };
+                if *date < ex_date {
+                    held_before_ex = held;
+                }
+                let factor = split.filter(|(on, _)| date >= on).map_or(1, |(_, f)| f);
+                let kind = if *sells {
+                    trade::TradeType::Sell
+                } else {
+                    trade::TradeType::Buy
+                };
+                insert_trade(
+                    &pool,
+                    i as i64 + 1,
+                    ListingId(1),
+                    kind,
+                    *date,
+                    units * factor,
+                )
+                .await;
+            }
+            (
+                walks(&pool).await.test(ListingId(1), ex_date),
+                Decimal::from(held_before_ex),
+            )
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// For any history of buys and sells and any ex-date: the units
+            /// entitled are exactly those held at the end of the day before
+            /// the shares went ex; no more units are disqualified than were
+            /// entitled, or than were sold inside the qualification window;
+            /// and a share split anywhere in the history — before the
+            /// trades, among them, inside the window or after it — changes
+            /// the unit counts by its ratio and the denied fraction not at all.
+            #[test]
+            fn the_walk_counts_what_was_held_and_a_split_changes_nothing(
+                trades in trades(),
+                ex_week in 0i64..18,
+                ex_weekday in 0i64..7,
+                split_day in 0i64..200,
+                factor in 2i64..=5,
+            ) {
+                let ex_date = d("2024-01-01") + Duration::days(ex_week * 7 + ex_weekday);
+                let split_date = d("2023-12-01") + Duration::days(split_day);
+                test_support::block_on(async move {
+                    let (plain, held_before_ex) = walk(&trades, None, ex_date).await;
+                    prop_assert_eq!(plain.entitled_units, held_before_ex);
+                    prop_assert!(plain.disqualified_units >= Decimal::ZERO);
+                    prop_assert!(plain.disqualified_units <= plain.entitled_units);
+                    let window_end = ex_date + Duration::days(45);
+                    let days = trading_days();
+                    let sold_in_window: Decimal = {
+                        // Re-derive each sale's units as `walk` recorded them.
+                        let mut dated: Vec<_> = trades.iter().map(|(w, s, q)| (days[*w], *s, *q)).collect();
+                        dated.sort_by_key(|(date, _, _)| *date);
+                        let (mut held, mut sold) = (0i64, 0i64);
+                        for (date, sells, qty) in dated {
+                            let units = if sells { held * qty / 100 } else { qty };
+                            held += if sells { -units } else { units };
+                            if sells && date >= ex_date && date <= window_end {
+                                sold += units;
+                            }
+                        }
+                        Decimal::from(sold)
+                    };
+                    prop_assert!(plain.disqualified_units <= sold_in_window,
+                        "{} disqualified, {} sold in the window", plain.disqualified_units, sold_in_window);
+
+                    let (split, _) = walk(&trades, Some((split_date, factor)), ex_date).await;
+                    // The walk reads every count in the basis at the window's end.
+                    let ratio = if split_date <= window_end { Decimal::from(factor) } else { Decimal::ONE };
+                    prop_assert_eq!(split.entitled_units, plain.entitled_units * ratio,
+                        "entitled units across a {}-for-1 split on {}", factor, split_date);
+                    prop_assert_eq!(split.disqualified_units, plain.disqualified_units * ratio,
+                        "disqualified units across a {}-for-1 split on {}", factor, split_date);
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }

@@ -3168,7 +3168,13 @@ mod tests {
         // prints — a denied credit is visible on the row, never merely absent
         // from a year total.
         assert!(js.contains(
-            "genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'franking_status', 'tax_deferred_amount'])"
+            "genericTable(inc.trust_income, ['date_paid', 'ticker', 'entitlement_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'foreign_source_income_aud', 'franking_credits_aud', 'tfn_withholding_tax_aud', 'franking_status', 'tax_deferred_amount'])"
+        ));
+        // Both distribution tables print the TFN amount withheld, so the tax
+        // summary's combined TFN line (11V/13R/10M) is accounted for row by
+        // row — a trust's withholding was in that line with no row behind it.
+        assert!(js.contains(
+            "genericTable(inc.dividends, ['date_paid', 'ticker', 'ex_date', 'franked_amount_aud', 'unfranked_amount_aud', 'conduit_foreign_income_aud', 'franking_credits_aud', 'lic_capital_gain_deduction_aud', 'tfn_withholding_tax_aud', 'franking_status'])"
         ));
         // The Deductions table names the holding the expense was attributed to
         // (SCENARIOS H-07): without the column the archived PDF carries no

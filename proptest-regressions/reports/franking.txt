@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c68ff9bea37f1225adffea3085fb8cde88175154305b69c5d06b72dffa923f3b # shrinks to trades = [(21, true, 2), (15, false, 50)], ex_week = 15, ex_weekday = 3, split_day = 0, factor = 2

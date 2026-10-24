@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2a9d090c8d041e9852b198e47c2d18a16ba090cd36d7f515ae17bf67e0c9bea1 # shrinks to events = [(0, 1, 0, 1)], checkpoints = {0, 1, 2}, prices = [1, 1, 1, 1, 276, 697222], rates = [5923, 7371, 7699, 6882, 5552, 6167, 6148, 6039, 7741, 5634, 6820, 7710, 7530, 5320]
+cc fc34f8bbf0aeb81568707d73d1cef9b0803d7b41061c6988083cabaeec19920a # shrinks to events = [(0, 2, 0, 28), (0, 1, 0, 1), (0, 1, 0, 18), (0, 2, 0, 28)], checkpoints = {0, 1, 244}, prices = [1, 247, 914097, 158247, 367321, 849044], rates = [6594, 5747, 6538, 5119, 6991, 5531, 7187, 7629, 7041, 6245, 6579, 6897, 6621, 7305]

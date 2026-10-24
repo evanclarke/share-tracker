@@ -1126,4 +1126,154 @@ mod tests {
         assert!(body.contains("2026-05"), "{body}");
         assert!(body.contains("/rba_fx_rates/import"), "{body}");
     }
+
+    mod properties {
+        use super::*;
+        use crate::entities::income::IncomeType;
+        use chrono::{Duration, Months};
+        use proptest::prelude::*;
+
+        /// One recorded event in 2024, by day of the year: a buy of `n` units
+        /// of listing 1 (AUD) or 2 (USD), a sell of `n`% of what is held, or
+        /// a staking reward of `n` dollars.
+        fn events() -> impl Strategy<Value = Vec<(i64, i64, u8, i64)>> {
+            prop::collection::vec((0i64..366, 1i64..=2, 0u8..3, 1i64..=100), 1..=12)
+        }
+
+        /// Two sums of the same 28-significant-digit AUD figures taken in a
+        /// different order can differ in their last digit; anything coarser
+        /// than that is a real disagreement.
+        fn same(a: Decimal, b: Decimal) -> bool {
+            (a - b).abs() < Decimal::new(1, 18)
+        }
+
+        /// The checkpoint figures a window's printed columns must close on.
+        fn closes(p: &PeriodPerformance) -> Decimal {
+            p.closing_market_value + p.sale_proceeds + p.income
+                - p.opening_market_value
+                - p.purchases
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// After any history of buys, sells and income in an AUD and a
+            /// USD holding, at any three dates: each holding's period return
+            /// (which differences the cumulative performance report) is what
+            /// its own printed columns close on — closing value plus proceeds
+            /// plus income less opening value less purchases — the portfolio
+            /// row is the sum of its holdings, and two adjacent windows add up
+            /// to the window spanning both.
+            #[test]
+            fn a_period_return_is_what_its_columns_close_on_and_windows_add_up(
+                events in events(),
+                checkpoints in prop::collection::btree_set(0i64..366, 3),
+                prices in prop::collection::vec(1i64..=1_000_000, 6),
+                rates in prop::collection::vec(5_000i64..=8_000, 14),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    insert_listing(&pool, 1, "BTC", "AUD").await;
+                    insert_listing(&pool, 2, "ETH", "USD").await;
+                    for (m, rate) in (0u32..).zip(&rates) {
+                        let month = ymd(2023, 12, 1).checked_add_months(Months::new(m)).unwrap();
+                        insert_fx_rate(&pool, "USD", &month.format("%Y-%m").to_string(), &Decimal::new(*rate, 4).to_string()).await;
+                    }
+                    let day = |n: i64| ymd(2024, 1, 1) + Duration::days(n);
+                    let currency = |l: i64| if l == 1 { "AUD" } else { "USD" };
+                    // Open parcels per listing, oldest first: (trade id, units left).
+                    let mut parcels: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+                    let mut sorted = events.clone();
+                    sorted.sort_by_key(|e| e.0);
+                    for (id, (n, listing, kind, amount)) in (1..).zip(sorted) {
+                        match kind {
+                            0 => {
+                                test_support::buy(id, listing)
+                                    .date(day(n))
+                                    .qty(Decimal::from(amount))
+                                    .price(Decimal::new(amount * 37 + 1, 2))
+                                    .currency(currency(listing))
+                                    .insert(&pool)
+                                    .await;
+                                parcels.entry(listing).or_default().push((id, amount));
+                            }
+                            1 => {
+                                let open = parcels.entry(listing).or_default();
+                                let held: i64 = open.iter().map(|(_, u)| u).sum();
+                                let mut units = held * amount / 100;
+                                if units == 0 {
+                                    continue;
+                                }
+                                test_support::sell(id, listing)
+                                    .date(day(n))
+                                    .qty(Decimal::from(units))
+                                    .price(Decimal::new(amount * 41 + 3, 2))
+                                    .currency(currency(listing))
+                                    .insert(&pool)
+                                    .await;
+                                for (parcel, left) in open.iter_mut() {
+                                    let take = units.min(*left);
+                                    if take > 0 {
+                                        test_support::allocate(&pool, id, id, *parcel, Decimal::from(take)).await;
+                                        *left -= take;
+                                        units -= take;
+                                    }
+                                }
+                                open.retain(|(_, left)| *left > 0);
+                            }
+                            _ => {
+                                test_support::income(id, listing, day(n))
+                                    .with(|i| {
+                                        // A token's income is a staking reward.
+                                        i.income_type = IncomeType::OtherIncome;
+                                        i.unfranked_amount = Decimal::from(amount);
+                                        i.currency = currency(listing).into();
+                                    })
+                                    .insert(&pool)
+                                    .await;
+                            }
+                        }
+                    }
+                    let dates: Vec<NaiveDate> = checkpoints.iter().map(|n| day(*n)).collect();
+                    for (i, date) in dates.iter().enumerate() {
+                        for (j, listing) in [1i64, 2].into_iter().enumerate() {
+                            let cents = prices[i * 2 + j];
+                            store_price(&pool, ListingId(listing), *date, &Decimal::new(cents, 2).to_string()).await;
+                        }
+                    }
+                    let (a, b, c) = (dates[0], dates[1], dates[2]);
+                    let now = now_after(c);
+                    let whole = compute(&pool, a, c, now).await.unwrap();
+                    let first = compute(&pool, a, b, now).await.unwrap();
+                    let second = compute(&pool, b, c, now).await.unwrap();
+
+                    for p in [&whole, &first, &second] {
+                        prop_assert!(same(p.total_return, closes(p)), "{} to {}: portfolio return {} against its columns {}", p.from, p.to, p.total_return, closes(p));
+                        for h in &p.holdings {
+                            let printed = h.closing_market_value + h.sale_proceeds + h.income
+                                - h.opening_market_value
+                                - h.purchases;
+                            prop_assert!(same(h.total_return, printed),
+                                "{} to {}: listing {} return {} against its columns {}", p.from, p.to, h.listing_id.0, h.total_return, printed);
+                        }
+                        let sum = |f: fn(&HoldingPeriod) -> Decimal| p.holdings.iter().map(f).sum::<Decimal>();
+                        prop_assert!(same(p.total_return, sum(|h| h.total_return)), "{} to {}: total_return {} against its holdings", p.from, p.to, p.total_return);
+                        prop_assert!(same(p.income, sum(|h| h.income)), "{} to {}: income {} against its holdings", p.from, p.to, p.income);
+                        prop_assert!(same(p.fx_movement, sum(|h| h.fx_movement)), "{} to {}: fx_movement {} against its holdings", p.from, p.to, p.fx_movement);
+                        prop_assert!(same(p.capital_growth, sum(|h| h.capital_growth)), "{} to {}: capital_growth {} against its holdings", p.from, p.to, p.capital_growth);
+                    }
+                    prop_assert!(same(first.closing_market_value, second.opening_market_value));
+                    for (name, w, f, s) in [
+                        ("total_return", whole.total_return, first.total_return, second.total_return),
+                        ("purchases", whole.purchases, first.purchases, second.purchases),
+                        ("sale_proceeds", whole.sale_proceeds, first.sale_proceeds, second.sale_proceeds),
+                        ("income", whole.income, first.income, second.income),
+                    ] {
+                        prop_assert!(same(w, f + s), "{}: {} from {} to {} against {} + {} split at {}", name, w, a, c, f, s, b);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }

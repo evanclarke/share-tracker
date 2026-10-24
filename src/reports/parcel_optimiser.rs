@@ -716,7 +716,7 @@ mod tests {
     use crate::entities::{corporate_action, sell};
     use crate::infra::date;
     use crate::reports::net_capital_gain::WhatIfResponse;
-    use crate::reports::realised_gains::{DisposalId, RealisedGainLoss};
+    use crate::reports::realised_gains::{self, DisposalId, RealisedGainLoss};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
     use std::collections::BTreeSet;
@@ -1814,7 +1814,10 @@ mod tests {
             .await;
         }
 
-        let realised: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised_gains").await;
+        // The exact pipeline the optimiser rehearses — the Realised Gains
+        // screen prints the same disposal at the cent.
+        let realised: Vec<RealisedGainLoss> =
+            realised_gains::db_realised_gains(&pool).await.unwrap();
         let recorded = realised
             .iter()
             .find(|row| row.disposal == DisposalId::Sell(TradeId::from(SELL_ID)))

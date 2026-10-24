@@ -1122,7 +1122,8 @@ mod tests {
         let parcel = &realised[0]["parcels"][0];
         assert_eq!(parcel["cost_base"], "10000");
         assert_eq!(parcel["indexation_eligible"], serde_json::json!(true));
-        assert_eq!(parcel["indexed_cost_base"], "17300.000");
+        // At the cent, as the screen prints the disposal it rides on.
+        assert_eq!(parcel["indexed_cost_base"], "17300.00");
 
         let ncg: serde_json::Value = api.get_json("/portfolio/net_capital_gain").await;
         let year = ncg

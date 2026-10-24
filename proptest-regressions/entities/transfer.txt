@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 41a0732b3b2cf64e80cb0d4d4b1a498d9736fb745008ada03704b681760b3345 # shrinks to buys = [(1, 1, 0)], rocs = [(0, 1, false)], moves = [(1, true, [1, 0, 0, 0, 0, 0, 0, 0])], sale_cents = 1
+cc a62cd32daf51adf50287777803c528342b94eb2732a13daf9ec0e41fde09ad8c # shrinks to buys = [(514, 746, 1481)], rocs = [(0, 237, false)], moves = [(0, true, [33, 0, 0, 0, 0, 0, 0, 0]), (0, false, [30, 0, 13, 32, 81, 8, 26, 14])], sale_cents = 6489

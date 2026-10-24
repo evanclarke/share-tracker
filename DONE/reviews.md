@@ -8063,3 +8063,64 @@ Checked and left as designed: a transfer-in parcel's `return_of_capital_reductio
 `amit_cost_base_reduction` omit what was paid before the move, because the transfer-in carries
 the reduced cost base as its own original figure (`docs/API.md`, Open parcels) — the property
 compares units and remaining cost base, which agree (2828 tests).
+
+## Property tests, fourth pass: the tax documents against their own records (2026-10-24)
+The first three passes covered cost base, allocation, netting, scheduling and the cross-report
+holdings views; none had touched the income side of the tax documents, the printed disposal
+schedule's own arithmetic, the 45-day holding-period walk or period performance. New properties,
+all of which now hold and stay as regression guards: `tax_report`'s
+`the_report_income_rows_add_up_to_the_summary_lines` (after any mix of company dividends, trust
+distributions assessed by an entitlement date, an AMIT conversion, a USD payer, employment and
+other income, interest, and round-trip trades that deny franking credits past the A\$5,000
+threshold, every year's tax-summary lines are exactly the records assessed in it, and the annual
+tax report's per-record income rows add up to those lines — the drilldown `docs/API.md` promises)
+and `every_printed_disposal_row_subtracts_and_every_surface_agrees` (parcels sold piecemeal at
+sub-cent prices around returns of capital: every printed row subtracts, its itemised adjustments
+reach its adjusted cost base, and each year's schedule total is the CGT summary's and the Realised
+Gains screen's); `franking`'s `the_walk_counts_what_was_held_and_a_split_changes_nothing` (entitled
+units are those held the day before ex, disqualified units are bounded by entitled units and by
+units sold in the window, and a split anywhere scales both by its ratio); and `period_performance`'s
+`a_period_return_is_what_its_columns_close_on_and_windows_add_up` (each holding's return, which
+differences the cumulative performance report, is what its printed columns close on; the portfolio
+is the sum of its holdings; adjacent windows add up). Each income/denial and walk property was
+sabotage-checked to confirm its generator reaches the branch it guards. Five defects found, each
+fixed with a focused regression test:
+- [x] **A trust distribution's LIC capital gain amount was deducted at D8.** Where a trust holds
+  LIC shares, the trust deducts the attributable part in working out its net income and an
+  individual beneficiary has no share of it (`docs/ato/lic-capital-gain-deduction.md`, *Trust or
+  partnership*), so the summary took the deduction a second time — and the report's trust table
+  had no column for it, which is how the property saw it. `lic_capital_gain_amount` on a
+  `trust_income` row is now refused `422` (`db_lic_capital_gain_amount_on_trust_row_rejected`,
+  `api_lic_capital_gain_amount_on_trust_row_returns_422_with_detail`); the AMIT branch's own LIC
+  check, now unreachable, is gone, and `docs/API.md`'s Income section and `422` list say so
+- [x] **A trust distribution's TFN amount withheld had no row behind the summary's TFN line.**
+  `TrustIncomeRow` now carries `tfn_withholding_tax_aud`, and both printed distribution tables show
+  it (the dividend table's JSON had it, the page did not) — `annual_tax_report_ui_present`
+- [x] **A printed disposal row did not subtract.** Proceeds, cost base and gain were each rounded
+  to the cent on their own, so the W-d BHP fixture itself printed `10283.33 − 9227.54` beside a
+  gain of `1055.80`; the gain, notional discount and discounted gain are now struck from the
+  printed facts (`api_a_disposal_columns_rows_add_up_to_its_printed_subtotal`, re-pinned)
+- [x] **A row's itemised adjustments did not reach its adjusted cost base.** A parcel with one
+  return of capital printed `initial − adjustment` a cent away from the adjusted figure under it;
+  the adjustment rows now telescope from the initial cost base onto the adjusted one (each within a
+  cent of its exact amount), except where a row runs the balance past nil
+- [x] **The schedule, the CGT summary and the Realised Gains screen rounded one disposal three
+  ways.** The worksheet rounded each year's exact bucket once, the schedule each parcel row, and
+  the screen each cell, so the same document printed a schedule total of 3,304.33 beside a
+  long-term gain of 3,304.34, and Z-a's two-screen agreement held only for fixtures where the
+  sub-cent parts happened to cancel. The owner chose rounding at the parcel everywhere:
+  `RealisedGainLoss::at_the_cent` (over `parcels_at_the_cent`, which the net-capital-gain what-if
+  shares) rounds each parcel's cost base on its own and its proceeds cumulatively, so they add up
+  to the contract note; the Realised Gains response, the schedule and the worksheet's realised
+  gains all read it, while the pipeline stays exact. 18H/18A can move by a cent from the earlier
+  rule; Z-a's fixture now reads 30,981.87 on both screens. `docs/API.md` (Realised gains, Net
+  capital gain, Annual tax report) states the rule. Tests that pinned an exact sub-cent figure
+  through a printed surface were moved to the exact pipeline where the invariant is about it
+  (`parcel_optimiser`'s agreement test, `scrip_exchange`'s cost-base split) or re-pinned to the
+  cents (two ATO examples — the ATO's own stated whole-dollar figures unchanged — the indexation
+  cross-check, Z-a); and `transfer`'s property now bounds its gain comparison by the half cent per
+  rounded figure that two genuinely separate disposals (one Sell per account) can part by
+
+Checked and left as designed: the period-performance attribution (`capital + FX + income = R`)
+is a residual by construction, so the property checks the independent identity instead — the
+return against its own printed columns — which holds (2834 tests).

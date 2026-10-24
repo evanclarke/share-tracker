@@ -8,7 +8,7 @@ use crate::entities::corporate_action;
 use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
-use crate::infra::decimal::{Money, OptMoney, apportion, mul_div};
+use crate::infra::decimal::{Money, OptMoney, apportion, mul_div, to_cents};
 use crate::infra::extract::Json;
 use crate::infra::fx::{FxOverride, FxRates};
 use crate::infra::http::ApiError;
@@ -145,6 +145,110 @@ pub struct ParcelDetail {
 
 // Per-sale identity: capital_gain_loss == discount_eligible_gain
 //                                       + non_discountable_gain − capital_loss.
+
+impl RealisedGainLoss {
+    /// The disposal **as it is printed**: every money figure at the cent,
+    /// rounded once per parcel, so each surface that shows a disposal — the
+    /// Realised Gains response, the annual tax report's disposal schedule and
+    /// the net-capital-gain worksheet's gains — reads the same cents and
+    /// every printed row's working reaches the figure beside it. The pipeline
+    /// itself ([`db_realised_gains_on`]) stays exact; this is the one place a
+    /// disposal is rounded.
+    ///
+    /// - A parcel's **cost base** is its own fact and rounds on its own, so
+    ///   the itemised adjustments the tax report prints under it can reach it.
+    /// - Its **proceeds** are a share of the one contract-note figure, so they
+    ///   round cumulatively in parcel order (each parcel takes the rounded
+    ///   running total less the rounded total before it): the shares add up to
+    ///   the disposal's own rounded proceeds, never a cent away from the note.
+    /// - Its **gain** is that rounded proceeds less that rounded cost base,
+    ///   and the disposal's gain and its three CGT buckets are the sums of the
+    ///   parcels' — classified by each parcel's own rounded gain.
+    ///
+    /// Rounding the year's exact buckets once instead (the worksheet's rule
+    /// before 2026-10-24) printed a CGT summary a cent away from the disposal
+    /// schedule beside it: three BHP parcels' schedule total of 3,304.33
+    /// against a long-term gain of 3,304.34. A disposal with no parcel detail
+    /// rounds its own figures.
+    pub fn at_the_cent(&self) -> Self {
+        let mut out = self.clone();
+        if out.parcels.is_empty() {
+            out.proceeds = to_cents(self.proceeds);
+            out.cost_base = to_cents(self.cost_base);
+            out.capital_gain_loss = out.proceeds - out.cost_base;
+            out.discount_eligible_gain = to_cents(self.discount_eligible_gain);
+            out.non_discountable_gain = to_cents(self.non_discountable_gain);
+            out.capital_loss = to_cents(self.capital_loss);
+            return out;
+        }
+        let (rounded, totals) = parcels_at_the_cent(
+            self.parcels
+                .iter()
+                .map(|p| (p.proceeds, p.cost_base, p.discount_eligible)),
+        );
+        for (parcel, (proceeds, cost_base)) in out.parcels.iter_mut().zip(rounded) {
+            parcel.proceeds = proceeds;
+            parcel.cost_base = cost_base;
+            parcel.capital_gain_loss = proceeds - cost_base;
+            parcel.indexed_cost_base = parcel.indexed_cost_base.map(to_cents);
+        }
+        out.proceeds = totals.proceeds;
+        out.cost_base = totals.cost_base;
+        out.capital_gain_loss = totals.proceeds - totals.cost_base;
+        out.discount_eligible_gain = totals.discount_eligible_gain;
+        out.non_discountable_gain = totals.non_discountable_gain;
+        out.capital_loss = totals.capital_loss;
+        out
+    }
+}
+
+/// A disposal's totals at the cent — what [`parcels_at_the_cent`] sums its
+/// rounded parcels to.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub(crate) struct DisposalCents {
+    pub proceeds: Decimal,
+    pub cost_base: Decimal,
+    pub discount_eligible_gain: Decimal,
+    pub non_discountable_gain: Decimal,
+    pub capital_loss: Decimal,
+}
+
+/// *The* per-parcel cent rule behind [`RealisedGainLoss::at_the_cent`], over
+/// each parcel's exact `(proceeds, cost base, discount-eligible)`: the cost
+/// base rounds on its own, the proceeds round cumulatively in the order
+/// given, and each parcel's gain — that rounded proceeds less that rounded
+/// cost base — lands in one bucket by its own sign and eligibility. Answers
+/// each parcel's rounded `(proceeds, cost base)` and the disposal's totals.
+/// `pub(crate)` so the net-capital-gain what-if previews a contemplated sale
+/// by exactly the rule its recorded Sell will be netted by.
+pub(crate) fn parcels_at_the_cent(
+    parcels: impl IntoIterator<Item = (Decimal, Decimal, bool)>,
+) -> (Vec<(Decimal, Decimal)>, DisposalCents) {
+    let mut totals = DisposalCents::default();
+    let (mut running, mut rounded_before) = (Decimal::ZERO, Decimal::ZERO);
+    let rounded = parcels
+        .into_iter()
+        .map(|(proceeds, cost_base, discount_eligible)| {
+            running += proceeds;
+            let rounded_running = to_cents(running);
+            let proceeds = rounded_running - rounded_before;
+            rounded_before = rounded_running;
+            let cost_base = to_cents(cost_base);
+            let gain = proceeds - cost_base;
+            if gain > Decimal::ZERO && discount_eligible {
+                totals.discount_eligible_gain += gain;
+            } else if gain > Decimal::ZERO {
+                totals.non_discountable_gain += gain;
+            } else {
+                totals.capital_loss -= gain;
+            }
+            totals.proceeds += proceeds;
+            totals.cost_base += cost_base;
+            (proceeds, cost_base)
+        })
+        .collect();
+    (rounded, totals)
+}
 
 pub fn router() -> OpenApiRouter<SqlitePool> {
     OpenApiRouter::new().routes(routes!(realised_gains_handler))
@@ -794,10 +898,11 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
 async fn realised_gains_handler(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<Vec<RealisedGainLoss>>, ApiError> {
-    db_realised_gains(&pool)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
+    // Served at the cent, as the tax report prints and the worksheet nets it.
+    let rows = db_realised_gains(&pool).await?;
+    Ok(Json(
+        rows.iter().map(RealisedGainLoss::at_the_cent).collect(),
+    ))
 }
 
 #[cfg(test)]
@@ -1264,9 +1369,13 @@ mod tests {
     /// 1,551 units at $45.00 less $9.95 brokerage over three parcels is
     /// exactly $69,785.05; against a $38,803.175 cost base the gain is
     /// exactly $30,981.875 — a half cent, which is what makes a drift of
-    /// 1e-24 visible at the cent. Both screens print $30,981.88 now; before
-    /// the fix the exact figure was 30,981.874999999999999999999999 and
-    /// Realised Gains printed $30,981.87.
+    /// 1e-24 visible at the cent. The pipeline's exact figure is now
+    /// 30,981.875 (before the Z-a fix, 30,981.874999999999999999999999).
+    /// Since 2026-10-24 both screens print the disposal at the cent, from
+    /// one rule (`RealisedGainLoss::at_the_cent`): the cost base rounds per
+    /// parcel to $38,803.18 and the gain is struck from the printed figures,
+    /// $30,981.87 on both — where rounding the exact gain on its own printed
+    /// $30,981.88 beside proceeds and a cost base that subtract to .87.
     #[tokio::test]
     async fn api_one_disposal_reports_one_rounded_gain_on_both_screens() {
         use crate::infra::decimal::to_cents;
@@ -1303,12 +1412,20 @@ mod tests {
             allocate(&pool, id, 4, id, Decimal::from(qty)).await;
         }
 
+        // The pipeline is exact: a half-cent cost base and gain.
+        let exact = db_realised_gains(&pool).await.unwrap();
+        assert_eq!(exact[0].proceeds, dec("69785.05"));
+        assert_eq!(exact[0].cost_base, dec("38803.175"));
+        assert_eq!(exact[0].capital_gain_loss, dec("30981.875"));
+
+        // The screen prints it at the cent, the cost base rounded per parcel
+        // and the gain struck from the printed figures, so the row subtracts.
         let client = ApiClient::full(&pool);
         let rows: Vec<RealisedGainLoss> = client.get_json("/portfolio/realised_gains").await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].proceeds, dec("69785.05"));
-        assert_eq!(rows[0].cost_base, dec("38803.175"));
-        assert_eq!(rows[0].capital_gain_loss, dec("30981.875"));
+        assert_eq!(rows[0].cost_base, dec("38803.18"));
+        assert_eq!(rows[0].capital_gain_loss, dec("30981.87"));
 
         let report: serde_json::Value = client.get_json("/reports/tax_report?tax_year=2026").await;
         let subtotal = &report["disposals"]["listings"][0]["subtotal"];
@@ -1326,7 +1443,7 @@ mod tests {
                 "{column} must read the same on both screens"
             );
         }
-        assert_eq!(subtotal["gain_loss_aud"], serde_json::json!("30981.88"));
+        assert_eq!(subtotal["gain_loss_aud"], serde_json::json!("30981.87"));
     }
 
     // DB-level tests

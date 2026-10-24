@@ -622,6 +622,14 @@ pub enum UpsertError {
     /// to `422`.
     #[error("tax_deferred_amount only applies to trust distributions")]
     TaxDeferredOnNonTrust,
+    /// A `lic_capital_gain_amount` was supplied on a trust row. Where a trust
+    /// holds the LIC shares, the **trust** deducts 50% of the attributable
+    /// part in working out its net income, and an individual beneficiary has
+    /// no share of it (`docs/ato/lic-capital-gain-deduction.md`, *Trust or
+    /// partnership*): the distribution is already net of the deduction, so a
+    /// D8 claim on it would take the deduction twice. Mapped to `422`.
+    #[error("lic_capital_gain_amount does not apply to a trust distribution")]
+    LicAmountOnTrust,
     /// A negative `tax_deferred_amount` — the statement figure is a payment
     /// received, never below zero. Mapped to `422`.
     #[error("tax_deferred_amount cannot be negative")]
@@ -632,9 +640,10 @@ pub enum UpsertError {
     /// statement is the assessable record). Mapped to `422`.
     #[error("this listing is an AMIT — its distributions are trust income")]
     AmitNonTrust,
-    /// A non-zero notional tax component (`franking_credits`,
-    /// `lic_capital_gain_amount`, or `conduit_foreign_income`) on an AMIT
-    /// listing's row. An AMIT cash advice is not a tax document — the fund's
+    /// A non-zero notional tax component (`franking_credits` or
+    /// `conduit_foreign_income`) on an AMIT listing's row — its
+    /// `lic_capital_gain_amount` is refused earlier, as on every trust row
+    /// ([`Self::LicAmountOnTrust`]). An AMIT cash advice is not a tax document — the fund's
     /// attribution (credits, LIC deduction, CFI) is reported by its AMMA
     /// statement, and the tax summary reads it from there alone; a value here
     /// would be stored but never used. Carries the offending field name.
@@ -848,6 +857,9 @@ async fn write(
     if income.entitlement_date.is_some() && !income.trust_income {
         return Err(UpsertError::EntitlementDateOnNonTrust);
     }
+    if income.trust_income && !income.lic_capital_gain_amount.is_zero() {
+        return Err(UpsertError::LicAmountOnTrust);
+    }
     if let Some(td) = income.tax_deferred_amount {
         if !income.trust_income {
             return Err(UpsertError::TaxDeferredOnNonTrust);
@@ -978,9 +990,9 @@ async fn write(
         if !income.trust_income {
             return Err(UpsertError::AmitNonTrust);
         }
+        // `lic_capital_gain_amount` is refused on every trust row above.
         for (field, value) in [
             ("franking_credits", income.franking_credits),
-            ("lic_capital_gain_amount", income.lic_capital_gain_amount),
             ("conduit_foreign_income", income.conduit_foreign_income),
         ] {
             if value != Decimal::ZERO {
@@ -1246,6 +1258,11 @@ impl From<UpsertError> for ApiError {
                 "tax_deferred_amount only applies to trust distributions — a company's \
                  non-assessable payment is entered as a ReturnOfCapital corporate action \
                  instead; tick trust income or clear the tax-deferred amount",
+            ),
+            UpsertError::LicAmountOnTrust => ApiError::unprocessable(
+                "lic_capital_gain_amount does not apply to a trust distribution — a \
+                 trust holding LIC shares deducts the attributable part itself, so the \
+                 distribution is already net of it and there is nothing to claim at D8",
             ),
             UpsertError::TaxDeferredNegative => ApiError::unprocessable(
                 "tax_deferred_amount cannot be negative — it is a payment received per \
@@ -1795,7 +1812,6 @@ mod tests {
                 i.unfranked_amount = Decimal::from(50);
                 i.foreign_source_income = Decimal::from(10);
                 i.foreign_tax_paid = "1.5".parse().unwrap();
-                i.lic_capital_gain_amount = Decimal::from(5);
                 i.conduit_foreign_income = Decimal::from(3);
                 i.trust_income = true;
             })
@@ -1805,7 +1821,6 @@ mod tests {
         assert!(got.trust_income);
         assert_eq!(got.foreign_source_income, Decimal::from(10));
         assert_eq!(got.conduit_foreign_income, Decimal::from(3));
-        assert_eq!(got.lic_capital_gain_amount, Decimal::from(5));
     }
 
     #[tokio::test]
@@ -2696,6 +2711,42 @@ mod tests {
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 
+    /// A trust that holds LIC shares takes the 50% deduction itself; its
+    /// beneficiary claims nothing at D8 (`docs/ato/lic-capital-gain-deduction.md`).
+    /// Accepting the amount double-counted the deduction in the tax summary.
+    #[tokio::test]
+    async fn db_lic_capital_gain_amount_on_trust_row_rejected() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let mut dist = dividend_income();
+        dist.trust_income = true;
+        dist.lic_capital_gain_amount = "87.38".parse().unwrap();
+        let err = db_upsert(&pool, &dist).await.unwrap_err();
+        assert!(matches!(err, UpsertError::LicAmountOnTrust), "{err:?}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_lic_capital_gain_amount_on_trust_row_returns_422_with_detail() {
+        let pool = test_pool().await;
+        insert_test_listing(&pool).await;
+        let (status, detail) = put_income(
+            &pool,
+            1,
+            serde_json::json!({
+                "listing_id": 1,
+                "date_paid": "2026-07-15",
+                "unfranked_amount": "100",
+                "trust_income": true,
+                "lic_capital_gain_amount": "87.38"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(detail.contains("already net of it"), "detail: {detail}");
+        assert!(db_get(&pool, 1).await.unwrap().is_none());
+    }
+
     // Tax-deferred amount (CGT event E4 cross-check,
     // docs/ato/cgt-non-assessable-payments.md): trust rows only, ≥ 0.
 
@@ -3054,7 +3105,6 @@ mod tests {
         with_cfi.conduit_foreign_income = Decimal::from(3);
         let cases = [
             ("franking_credits", with_credits),
-            ("lic_capital_gain_amount", with_lic),
             ("conduit_foreign_income", with_cfi),
         ];
         for (field, dist) in cases {
@@ -3064,6 +3114,10 @@ mod tests {
                 "expected AmitNotionalComponent({field}), got {err:?}"
             );
         }
+        // An AMIT row is a trust row, so its LIC amount is refused by the rule
+        // every trust row carries.
+        let err = db_upsert(&pool, &with_lic).await.unwrap_err();
+        assert!(matches!(err, UpsertError::LicAmountOnTrust), "{err:?}");
         assert!(db_get(&pool, 1).await.unwrap().is_none());
     }
 

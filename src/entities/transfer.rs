@@ -2851,7 +2851,8 @@ mod tests {
             /// a move), the holding summed across accounts carries the same
             /// units, cost base and return-of-capital reduction on every
             /// date, and selling all of it reports the same capital gains in
-            /// every year — G1 and C2 included — as never having moved it.
+            /// every year — G1 and C2 included — as never having moved it, to
+            /// within the cents its separately rounded disposals can part by.
             #[test]
             fn transfers_change_no_holding_or_capital_gain(
                 buys in prop::collection::vec((1i64..=1_000, 1i64..=10_000, 0i64..=2_000), 1..=3),
@@ -2878,6 +2879,18 @@ mod tests {
                     prop_assert_eq!(still_years.len(), moved_years.len(), "years reported");
                     for (s, m) in still_years.iter().zip(&moved_years) {
                         prop_assert_eq!(s.tax_year, m.tax_year);
+                        // A disposal's gains are netted as it is printed, at the
+                        // cent (`RealisedGainLoss::at_the_cent`): its proceeds
+                        // within half a cent of exact, and each parcel's cost
+                        // base within half a cent of its own. Selling a moved
+                        // holding is one Sell per account over the pieces the
+                        // moves split its parcels into — genuinely different
+                        // disposals, each rounded — so the two worlds may part
+                        // by at most half a cent per figure either rounded.
+                        let rounded = |y: &NetCapitalGainYear| {
+                            y.disposals.iter().map(|d| 1 + d.parcels.len()).sum::<usize>()
+                        };
+                        let cents = Decimal::new(5, 3) * Decimal::from(rounded(s) + rounded(m));
                         for (name, a, b) in [
                             ("discount-eligible gains", s.discount_eligible_gains, m.discount_eligible_gains),
                             ("other gains", s.other_gains, m.other_gains),
@@ -2886,8 +2899,8 @@ mod tests {
                             ("C2 gain", s.cgt_event_c2_gain, m.cgt_event_c2_gain),
                         ] {
                             prop_assert!(
-                                (a - b).abs() <= Decimal::new(1, 12),
-                                "FY{} {}: {} unmoved, {} moved", s.tax_year, name, a, b
+                                (a - b).abs() <= cents + Decimal::new(1, 12),
+                                "FY{} {}: {} unmoved, {} moved (bound {})", s.tax_year, name, a, b, cents
                             );
                         }
                     }

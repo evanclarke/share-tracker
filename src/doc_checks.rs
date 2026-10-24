@@ -635,11 +635,15 @@ fn cent_rounded_tax_report_disposals_documented() {
          the proceeds, the gain/loss, and the discount amount and discounted gain"
     ));
     assert!(API_MD.contains("Left verbatim, none of them a derived AUD amount"));
-    // Rounding here changes no calculation: the source reports stay exact.
+    // One disposal, one set of cents (2026-10-24): the schedule rounds by the
+    // rule Realised Gains serves and the worksheet nets, so the three agree.
     assert!(API_MD.contains(
-        "the figures come from [realised gains](#realised-gains), which still answers the exact \
-         decimal"
+        "The proceeds and cost-base cents are the disposal's own, from the one rule \
+         [Realised Gains](#realised-gains) serves and the [net capital gain](#net-capital-gain) \
+         worksheet nets (rounded once per parcel)"
     ));
+    assert!(API_MD.contains("**Served at the cent, rounded once per parcel.**"));
+    assert!(API_MD.contains("The itemised adjustments **telescope** from the initial cost base"));
     // The display-rules paragraph's old exclusivity claim is gone, replaced by
     // one that names this report alongside the exports.
     assert!(!API_MD.contains("they are the one place outside the browser that rounds"));

@@ -590,20 +590,57 @@ impl DisposalParcelRow {
     ///   misreport the source document;
     /// - `units`, `days_held`, the two FX rates and `currency` — quantities,
     ///   counts and rates, never money.
+    ///
+    /// **Derived, not re-rounded:** the proceeds and adjusted cost base are
+    /// the disposal's own printed cents
+    /// ([`realised_gains::RealisedGainLoss::at_the_cent`], shared with the
+    /// Realised Gains screen and the CGT worksheet's gains); the gain is the
+    /// one less the other, the notional discount halves that gain (rounding
+    /// once, half away from zero, as the worksheet's concession does), and the
+    /// itemised adjustments telescope from the initial cost base onto the
+    /// adjusted one. So every row's working reaches the figure beside it:
+    /// rounding each figure independently printed `10283.33 − 9227.54` beside
+    /// a gain of `1055.80`, and an initial cost base less its one return of
+    /// capital a cent away from the adjusted figure under it. A row whose
+    /// working runs the balance past nil (`capped` — the excess is an E10/G1
+    /// gain, not a cost-base movement) rounds its adjustment rows on their own.
     fn round_money_to_cents(&mut self) {
-        for figure in [
-            &mut self.initial_cost_base_aud,
-            &mut self.adjusted_cost_base_aud,
-            &mut self.proceeds_aud,
-            &mut self.gain_loss_aud,
-            &mut self.cgt_discount_amount_aud,
-            &mut self.gain_after_discount_aud,
-        ] {
-            *figure = to_cents(*figure);
+        // `proceeds_aud` and `adjusted_cost_base_aud` arrive at the cent
+        // already — the disposal's own printed figures. Unless an adjustment
+        // ran the balance past nil, the itemised rows telescope onto the
+        // latter: the exact running balance is rounded after each row and the
+        // row prints the step between the two rounded balances (the last
+        // closing onto the adjusted figure itself), so the initial cost base
+        // less the printed rows *is* the printed adjusted cost base, and each
+        // row is within a cent of its own exact amount.
+        if self.adjustments.iter().any(|a| a.capped) {
+            for adjustment in &mut self.adjustments {
+                adjustment.amount = to_cents(adjustment.amount);
+            }
+        } else {
+            let mut balance = self.initial_cost_base_aud;
+            let mut printed_before = to_cents(balance);
+            let last = self.adjustments.len().saturating_sub(1);
+            for (i, adjustment) in self.adjustments.iter_mut().enumerate() {
+                balance -= adjustment.amount;
+                let printed_after = if i == last {
+                    self.adjusted_cost_base_aud
+                } else {
+                    to_cents(balance)
+                };
+                adjustment.amount = printed_before - printed_after;
+                printed_before = printed_after;
+            }
         }
-        for adjustment in &mut self.adjustments {
-            adjustment.amount = to_cents(adjustment.amount);
-        }
+        self.initial_cost_base_aud = to_cents(self.initial_cost_base_aud);
+        self.gain_loss_aud = self.proceeds_aud - self.adjusted_cost_base_aud;
+        self.cgt_discount_amount_aud =
+            if self.discount_eligible && self.gain_loss_aud > Decimal::ZERO {
+                to_cents(self.gain_loss_aud / Decimal::TWO)
+            } else {
+                Decimal::ZERO
+            };
+        self.gain_after_discount_aud = self.gain_loss_aud - self.cgt_discount_amount_aud;
         // The advisory indexed cost base prints beside the one used, so it
         // rounds with it — a figure at 28 digits next to a cent-rounded
         // neighbour is exactly what SCENARIOS W-c/W-d were about.
@@ -775,10 +812,17 @@ fn disposal_parcel_rows(
     disposal: &realised_gains::RealisedGainLoss,
     inputs: &DisposalInputs,
 ) -> Result<Vec<DisposalParcelRow>, sqlx::Error> {
+    // The disposal as every surface prints it — each parcel's proceeds and
+    // cost base at the cent (`RealisedGainLoss::at_the_cent`), so this
+    // schedule, the CGT summary beside it and the Realised Gains screen read
+    // the same cents. The exact parcel stays the source of the per-unit
+    // figures and of the pipeline inputs the adjustments are itemised from.
+    let printed = disposal.at_the_cent();
     disposal
         .parcels
         .iter()
-        .map(|p| {
+        .zip(&printed.parcels)
+        .map(|(p, cents)| {
             let buy = inputs.buys.get(&p.purchase_trade_id);
             let buy_trade = inputs.trades.get(&p.purchase_trade_id);
             let sale_trade = disposal
@@ -908,11 +952,6 @@ fn disposal_parcel_rows(
                 .map(|t| t.date)
                 .filter(|d| *d != p.acquisition_date);
 
-            let discount_amount = if p.discount_eligible && p.capital_gain_loss > Decimal::ZERO {
-                p.capital_gain_loss / Decimal::from(2)
-            } else {
-                Decimal::ZERO
-            };
             // The rate the *proceeds* were actually converted at, not the
             // month's published rate: `realised_gains` converts a Sell's
             // proceeds at the sale's own override (its deliberate spot rate
@@ -977,22 +1016,23 @@ fn disposal_parcel_rows(
                     Decimal::ZERO
                 },
                 adjustments,
-                adjusted_cost_base_aud: p.cost_base,
+                adjusted_cost_base_aud: cents.cost_base,
                 sale_date: disposal.sale_date,
                 sale_price: sale_trade.map(|t| t.average_price),
-                proceeds_aud: p.proceeds,
+                proceeds_aud: cents.proceeds,
                 proceeds_per_unit_aud: if p.units > Decimal::ZERO {
                     p.proceeds / p.units
                 } else {
                     Decimal::ZERO
                 },
-                gain_loss_aud: p.capital_gain_loss,
+                gain_loss_aud: cents.capital_gain_loss,
                 days_held: (disposal.sale_date - p.acquisition_date).num_days(),
                 discount_eligible: p.discount_eligible,
                 indexation_eligible: p.indexation_eligible,
                 indexed_cost_base_aud: p.indexed_cost_base,
-                cgt_discount_amount_aud: discount_amount,
-                gain_after_discount_aud: p.capital_gain_loss - discount_amount,
+                // Both struck from the printed gain by `round_money_to_cents`.
+                cgt_discount_amount_aud: Decimal::ZERO,
+                gain_after_discount_aud: Decimal::ZERO,
                 currency: currency.clone(),
                 buy_month_fx_rate: if currency.is_aud() { None } else { buy_rate },
                 sell_month_fx_rate: if currency.is_aud() { None } else { sell_rate },
@@ -1113,6 +1153,10 @@ pub struct TrustIncomeRow {
     pub conduit_foreign_income_aud: Decimal,
     pub foreign_source_income_aud: Decimal,
     pub tax_deferred_amount: Option<Decimal>,
+    /// TFN amount withheld from the distribution (13R, on the tax summary's
+    /// combined `tfn_withholding_tax` line), in AUD — printed so that line's
+    /// drilldown accounts for a trust's withholding as it does a dividend's.
+    pub tfn_withholding_tax_aud: Decimal,
     /// The row's **claimable** franking credits — the `franking_credits`
     /// (11U / 13Q) offset line, reduced by the at-risk walk's denial exactly
     /// as the tax summary reduces it. 13C, by contrast, is
@@ -1558,6 +1602,7 @@ async fn push_income_rows(
                 conduit_foreign_income_aud: cfi,
                 foreign_source_income_aud: foreign,
                 tax_deferred_amount: income.tax_deferred_amount,
+                tfn_withholding_tax_aud: tfn,
                 franking_credits_aud: fc - alert.map_or(Decimal::ZERO, |a| a.credits_denied),
                 franking_status: alert.map_or("entitled", |a| a.status.as_str()).to_owned(),
                 franking_credits_denied_aud: alert.map_or(Decimal::ZERO, |a| a.credits_denied),
@@ -4696,25 +4741,34 @@ mod tests {
         assert_eq!(
             printed,
             vec![
-                vec!["4991.52", "5118.61", "127.09", "63.55", "63.55"],
-                vec!["9227.54", "10283.33", "1055.80", "527.90", "527.90"],
-                vec!["13234.38", "15355.83", "2121.45", "1060.73", "1060.73"],
+                vec!["4991.52", "5118.61", "127.09", "63.55", "63.54"],
+                vec!["9227.54", "10283.33", "1055.79", "527.90", "527.89"],
+                vec!["13234.38", "15355.83", "2121.45", "1060.73", "1060.72"],
             ]
         );
+        // Each row's working reaches the figure beside it: the gain is the
+        // printed proceeds less the printed cost base (10283.33 − 9227.54 is
+        // 1055.79, which this row once printed as 1055.80), and the figure
+        // after the notional discount is that gain less the printed discount.
+        for row in &printed {
+            let [cost, proceeds, gain, discount, after] = [0, 1, 2, 3, 4].map(|i| dec(row[i]));
+            assert_eq!(proceeds - cost, gain, "{row:?}");
+            assert_eq!(gain - discount, after, "{row:?}");
+        }
 
         // 63.55 + 527.90 + 1060.73 = 1652.18 — what the page adds up to, where
         // the subtotal used to print the exact sum rounded (1652.17).
         let subtotal = &group["subtotal"];
         assert_eq!(subtotal["cost_base_aud"], serde_json::json!("27453.44"));
         assert_eq!(subtotal["proceeds_aud"], serde_json::json!("30757.77"));
-        assert_eq!(subtotal["gain_loss_aud"], serde_json::json!("3304.34"));
+        assert_eq!(subtotal["gain_loss_aud"], serde_json::json!("3304.33"));
         assert_eq!(
             subtotal["cgt_discount_amount_aud"],
             serde_json::json!("1652.18")
         );
         assert_eq!(
             subtotal["gain_after_discount_aud"],
-            serde_json::json!("1652.18")
+            serde_json::json!("1652.15")
         );
         // One listing, so the grand total is the same figure again — and the
         // document's two levels of total have to agree with each other too.
@@ -5644,5 +5698,522 @@ mod tests {
 
         let err = disposal_parcel_rows(&disposal, &inputs).unwrap_err();
         assert!(matches!(err, sqlx::Error::Decode(_)), "{err:?}");
+    }
+
+    mod properties {
+        use super::*;
+        use crate::entities::income::IncomeType;
+        use crate::entities::interest_income::InterestIncome;
+        use chrono::{Datelike, Duration};
+        use proptest::option;
+        use proptest::prelude::*;
+
+        /// The first and last financial years the generated records are paid in.
+        const FIRST_YEAR: i32 = 2022;
+        const LAST_YEAR: i32 = 2025;
+
+        /// One generated income record. `listing` picks the payer: 1 an
+        /// Australian company, 2 an ordinary trust, 3 a trust that became an
+        /// AMIT on 1 July 2024 (FY2025), 4 a US company paying in USD.
+        #[derive(Clone, Debug)]
+        struct Record {
+            listing: i64,
+            paid_day: i64,
+            kind: u8,
+            franked_cents: i64,
+            franking_pct: i64,
+            unfranked_cents: i64,
+            cfi_pct: i64,
+            foreign_cents: i64,
+            foreign_tax_cents: i64,
+            tfn_cents: i64,
+            lic_cents: i64,
+            ex_days_before: Option<i64>,
+            entitlement_days_before: Option<i64>,
+        }
+
+        fn records() -> impl Strategy<Value = Vec<Record>> {
+            let record = (
+                (1i64..=4, 0i64..1461, 0u8..10),
+                (0i64..=2_000_000, 0i64..=100, 0i64..=500_000, 0i64..=100),
+                (0i64..=300_000, 0i64..=50_000, 0i64..=20_000, 0i64..=200_000),
+                (option::of(0i64..=40), option::of(0i64..=60)),
+            )
+                .prop_map(
+                    |(
+                        (listing, paid_day, kind),
+                        (fr, fp, un, cp),
+                        (fo, ft, tfn, lic),
+                        (ex, ent),
+                    )| Record {
+                        listing,
+                        paid_day,
+                        kind,
+                        franked_cents: fr,
+                        franking_pct: fp,
+                        unfranked_cents: un,
+                        cfi_pct: cp,
+                        foreign_cents: fo,
+                        foreign_tax_cents: ft,
+                        tfn_cents: tfn,
+                        lic_cents: lic,
+                        ex_days_before: ex,
+                        entitlement_days_before: ent,
+                    },
+                );
+            prop::collection::vec(record, 1..=14)
+        }
+
+        /// One interest record: day paid, cents, whether foreign-sourced (in
+        /// USD, with foreign tax) or Australian (in AUD, with a TFN amount).
+        fn interest() -> impl Strategy<Value = Vec<(i64, i64, bool, i64)>> {
+            prop::collection::vec(
+                (0i64..1461, 1i64..=500_000, any::<bool>(), 0i64..=20_000),
+                0..=4,
+            )
+        }
+
+        /// The income row a [`Record`] describes, made valid for its payer:
+        /// only cash on an employment/other row, trust-only fields on trust
+        /// rows, nothing notional on an AMIT's own years.
+        fn income_row(id: i64, r: &Record) -> Income {
+            let paid = ymd(2021, 7, 1) + Duration::days(r.paid_day);
+            let trust = matches!(r.listing, 2 | 3);
+            let kind = match r.kind {
+                0 if !trust => IncomeType::EmploymentIncome,
+                1 if !trust => IncomeType::OtherIncome,
+                _ => IncomeType::Dividend,
+            };
+            let mut row = test_support::income(id, r.listing, paid).build();
+            row.currency = if r.listing == 4 { "USD" } else { "AUD" }.into();
+            row.unfranked_amount = Decimal::new(r.unfranked_cents, 2);
+            if kind != IncomeType::Dividend {
+                row.income_type = kind;
+                return row;
+            }
+            row.trust_income = trust;
+            if trust {
+                row.entitlement_date = r.entitlement_days_before.map(|d| paid - Duration::days(d));
+            }
+            row.ex_date = r.ex_days_before.map(|d| paid - Duration::days(d));
+            let amit_year = r.listing == 3 && tax_year_for(row.assessment_date()) >= 2025;
+            row.franked_amount = Decimal::new(r.franked_cents, 2);
+            row.foreign_source_income = Decimal::new(r.foreign_cents, 2);
+            row.foreign_tax_paid = Decimal::new(r.foreign_tax_cents, 2);
+            row.tfn_withholding_tax = Decimal::new(r.tfn_cents, 2);
+            if !amit_year {
+                // At most the 30% gross-up the franked amount can carry.
+                row.franking_credits =
+                    (row.franked_amount * Decimal::new(r.franking_pct, 2) * Decimal::from(3)
+                        / Decimal::from(7))
+                    .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
+                row.conduit_foreign_income = (row.unfranked_amount * Decimal::new(r.cfi_pct, 2))
+                    .round_dp_with_strategy(2, rust_decimal::RoundingStrategy::ToZero);
+                // A trust deducts its LIC attributable part itself.
+                if !trust {
+                    row.lic_capital_gain_amount = Decimal::new(r.lic_cents, 2);
+                }
+            }
+            row
+        }
+
+        /// Every figure one financial year's records add to, in AUD.
+        #[derive(Debug, Default, PartialEq)]
+        struct Totals {
+            dividends: Decimal,
+            trust_unfranked: Decimal,
+            trust_franked: Decimal,
+            employment: Decimal,
+            other: Decimal,
+            attached_credits: Decimal,
+            lic_deduction: Decimal,
+            tfn: Decimal,
+            foreign_income: Decimal,
+            foreign_interest: Decimal,
+            australian_interest: Decimal,
+            foreign_tax: Decimal,
+        }
+
+        /// Two sums of the same 28-significant-digit AUD figures taken in a
+        /// different order can differ in their last digit; anything coarser
+        /// than that is a real disagreement.
+        fn same(a: Decimal, b: Decimal) -> bool {
+            (a - b).abs() < Decimal::new(1, 18)
+        }
+
+        /// A parcel bought between 2021 and 2023: units, price to four
+        /// decimal places, brokerage to the tenth of a cent (GST of 99.5c on
+        /// $9.95 is genuinely sub-cent).
+        fn parcels() -> impl Strategy<Value = Vec<(i64, i64, i64)>> {
+            prop::collection::vec((1i64..=5_000, 1i64..=2_000_000, 0i64..=30_000), 1..=4)
+        }
+
+        /// A sale: the day after 1 July 2023 it is made, its price to four
+        /// decimal places, and per parcel the percentage of what remains of
+        /// it to sell.
+        fn sales() -> impl Strategy<Value = Vec<(i64, i64, Vec<u32>)>> {
+            prop::collection::vec(
+                (
+                    0i64..1000,
+                    1i64..=3_000_000,
+                    prop::collection::vec(0u32..=100, 4),
+                ),
+                1..=4,
+            )
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// After any mix of company dividends, trust distributions (some
+            /// assessed by an entitlement date in the year before payment),
+            /// an AMIT conversion, a USD payer, employment and other income
+            /// and interest, every year's tax-summary lines are exactly the
+            /// records assessed in that year — and the annual tax report's
+            /// per-record income rows add up to those same lines, which is
+            /// what `docs/API.md` promises of the drilldown.
+            #[test]
+            fn the_report_income_rows_add_up_to_the_summary_lines(
+                records in records(),
+                interest_rows in interest(),
+                trips in prop::collection::vec((1i64..=2, 0i64..1400, 1i64..=900, 1i64..=8), 0..=3),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_support::test_pool().await;
+                    test_support::listing(1).ticker("CO").insert(&pool).await;
+                    test_support::listing(2).ticker("TR").insert(&pool).await;
+                    test_support::listing(3)
+                        .ticker("AM")
+                        .amit_from(ymd(2024, 7, 1))
+                        .insert(&pool)
+                        .await;
+                    test_support::listing(4).ticker("US").currency("USD").insert(&pool).await;
+                    // A rate for every month a record can be assessed or paid in.
+                    let mut month = ymd(2021, 5, 1);
+                    let mut n = 0i64;
+                    while month <= ymd(2025, 7, 1) {
+                        let rate = Decimal::new(6_100 + (n * 37) % 900, 4);
+                        rba_fx_rate::db_import_rate(&pool, "USD", &month.format("%Y-%m").to_string(), rate)
+                            .await
+                            .unwrap();
+                        month = month.checked_add_months(chrono::Months::new(1)).unwrap();
+                        n += 1;
+                    }
+                    let fx = {
+                        let mut conn = pool.acquire().await.unwrap();
+                        FxRates::load(&mut *conn).await.unwrap()
+                    };
+
+                    // 1,000 units of each cash payer, held from before the first
+                    // record, and up to three round trips: a parcel bought and
+                    // sold a few weeks later, which LIFO identifies as the units
+                    // sold — inside a dividend's 45-day window that denies its
+                    // credits once the year's attached credits reach the
+                    // A$5,000 threshold.
+                    for (id, listing) in [(1001i64, 1i64), (1002, 2), (1004, 4)] {
+                        let buy = test_support::buy(id, listing)
+                            .date(ymd(2021, 6, 2))
+                            .qty(Decimal::from(1000))
+                            .price(Decimal::from(10));
+                        let buy = if listing == 4 { buy.currency("USD") } else { buy };
+                        buy.insert(&pool).await;
+                    }
+                    // The first Wednesday on or after `date` clear of the summer
+                    // public holidays.
+                    let trading_day = |mut date: NaiveDate| {
+                        while date.weekday() != chrono::Weekday::Wed
+                            || (date.month() == 12 && date.day() >= 25)
+                            || (date.month() == 1 && matches!(date.day(), 1 | 26))
+                        {
+                            date += Duration::days(1);
+                        }
+                        date
+                    };
+                    for (i, (listing, day, units, weeks)) in trips.iter().enumerate() {
+                        let bought = trading_day(ymd(2021, 7, 1) + Duration::days(*day));
+                        let sold = trading_day(bought + Duration::weeks(*weeks));
+                        let (buy_id, sell_id) = (3001 + 2 * i as i64, 3002 + 2 * i as i64);
+                        test_support::buy(buy_id, *listing)
+                            .date(bought)
+                            .qty(Decimal::from(*units))
+                            .price(Decimal::from(10))
+                            .insert(&pool)
+                            .await;
+                        test_support::sell(sell_id, *listing)
+                            .date(sold)
+                            .qty(Decimal::from(*units))
+                            .price(Decimal::from(11))
+                            .insert(&pool)
+                            .await;
+                        test_support::allocate(&pool, sell_id, sell_id, buy_id, Decimal::from(*units)).await;
+                    }
+
+                    let mut expected: HashMap<i32, Totals> = HashMap::new();
+                    for (i, r) in records.iter().enumerate() {
+                        let row = income_row(i as i64 + 1, r);
+                        income::db_upsert(&pool, &row).await.unwrap();
+                        let assessed = row.assessment_date();
+                        let year = tax_year_for(assessed);
+                        if r.listing == 3 && year >= 2025 {
+                            continue; // an AMIT year's cash rows are not assessable
+                        }
+                        let aud = |x: Decimal| fx.to_aud(x, &row.currency, assessed, FxOverride::None).unwrap();
+                        let t = expected.entry(year).or_default();
+                        match row.income_type {
+                            IncomeType::EmploymentIncome => t.employment += aud(row.unfranked_amount),
+                            IncomeType::OtherIncome => t.other += aud(row.unfranked_amount),
+                            IncomeType::Dividend => {
+                                if row.trust_income {
+                                    t.trust_unfranked += aud(row.unfranked_amount);
+                                    t.trust_franked += aud(row.franked_amount);
+                                } else {
+                                    t.dividends += aud(row.franked_amount) + aud(row.unfranked_amount);
+                                }
+                                t.attached_credits += aud(row.franking_credits);
+                                t.lic_deduction += aud(row.lic_capital_gain_deduction());
+                                t.tfn += aud(row.tfn_withholding_tax);
+                                t.foreign_income += aud(row.foreign_source_income);
+                                t.foreign_tax += aud(row.foreign_tax_paid);
+                            }
+                        }
+                    }
+                    for (i, (day, cents, foreign, withheld)) in interest_rows.iter().enumerate() {
+                        let paid = ymd(2021, 7, 1) + Duration::days(*day);
+                        let row = InterestIncome {
+                            id: i as i64 + 1,
+                            date_paid: paid,
+                            amount: Decimal::new(*cents, 2),
+                            tfn_withholding_tax: if *foreign { Decimal::ZERO } else { Decimal::new(*withheld, 2) },
+                            foreign_source: *foreign,
+                            foreign_tax_paid: if *foreign { Decimal::new(*withheld, 2) } else { Decimal::ZERO },
+                            currency: if *foreign { "USD" } else { "AUD" }.into(),
+                            source: None,
+                            holding_account_id: None,
+                        };
+                        interest_income::db_upsert(&pool, &row).await.unwrap();
+                        let aud = |x: Decimal| fx.to_aud(x, &row.currency, paid, FxOverride::None).unwrap();
+                        let t = expected.entry(tax_year_for(paid)).or_default();
+                        if *foreign {
+                            t.foreign_interest += aud(row.amount);
+                            t.foreign_tax += aud(row.foreign_tax_paid);
+                        } else {
+                            t.australian_interest += aud(row.amount);
+                            t.tfn += aud(row.tfn_withholding_tax);
+                        }
+                    }
+
+                    let summaries = tax_summary::db_tax_summary(&pool).await.unwrap();
+                    for year in FIRST_YEAR - 1..=LAST_YEAR {
+                        let want = expected.remove(&year).unwrap_or_default();
+                        let s = summaries.iter().find(|s| s.tax_year == year);
+                        let line = |f: fn(&tax_summary::TaxYearSummary) -> Decimal| s.map_or(Decimal::ZERO, f);
+                        // A denied credit leaves the offset line for its own.
+                        let from_summary = Totals {
+                            dividends: line(|s| s.dividends_assessable),
+                            trust_unfranked: line(|s| s.trust_income_unfranked),
+                            trust_franked: line(|s| s.trust_franked_distributions),
+                            employment: line(|s| s.employment_income),
+                            other: line(|s| s.other_income),
+                            attached_credits: line(|s| s.franking_credits + s.franking_credits_denied),
+                            lic_deduction: line(|s| s.lic_capital_gain_deduction),
+                            tfn: line(|s| s.tfn_withholding_tax),
+                            foreign_income: line(|s| s.foreign_source_income),
+                            foreign_interest: line(|s| s.foreign_interest_income),
+                            australian_interest: line(|s| s.interest_income),
+                            foreign_tax: line(|s| s.foreign_tax_offsets + s.foreign_tax_offset_excess),
+                        };
+
+                        let report = db_tax_report(&pool, year).await.unwrap();
+                        let inc = &report.income;
+                        let sum = |it: &mut dyn Iterator<Item = Decimal>| it.sum::<Decimal>();
+                        let foreign_of = |k: ForeignIncomeKind, tax: bool| {
+                            inc.foreign_income
+                                .iter()
+                                .filter(|r| r.kind == k)
+                                .map(|r| if tax { r.foreign_tax_paid_aud } else { r.amount_aud })
+                                .sum::<Decimal>()
+                        };
+                        let from_report = Totals {
+                            dividends: sum(&mut inc.dividends.iter().map(|r| r.franked_amount_aud + r.unfranked_amount_aud)),
+                            trust_unfranked: sum(&mut inc.trust_income.iter().map(|r| r.unfranked_amount_aud)),
+                            trust_franked: sum(&mut inc.trust_income.iter().map(|r| r.franked_amount_aud)),
+                            employment: sum(&mut inc.employment_income.iter().map(|r| r.amount_aud)),
+                            other: sum(&mut inc.other_income.iter().map(|r| r.amount_aud)),
+                            attached_credits: sum(&mut inc.dividends.iter().map(|r| r.franking_credits_aud + r.franking_credits_denied_aud))
+                                + sum(&mut inc.trust_income.iter().map(|r| r.franking_credits_aud + r.franking_credits_denied_aud)),
+                            lic_deduction: sum(&mut inc.dividends.iter().map(|r| r.lic_capital_gain_deduction_aud))
+                                ,
+                            tfn: sum(&mut inc.dividends.iter().map(|r| r.tfn_withholding_tax_aud))
+                                + sum(&mut inc.trust_income.iter().map(|r| r.tfn_withholding_tax_aud))
+                                + sum(&mut inc.interest.iter().map(|r| r.tfn_withholding_tax_aud)),
+                            foreign_income: foreign_of(ForeignIncomeKind::DividendOrTrust, false),
+                            foreign_interest: foreign_of(ForeignIncomeKind::Interest, false),
+                            australian_interest: sum(&mut inc.interest.iter().filter(|r| !r.foreign_source).map(|r| r.amount_aud)),
+                            foreign_tax: foreign_of(ForeignIncomeKind::DividendOrTrust, true)
+                                + foreign_of(ForeignIncomeKind::Interest, true),
+                        };
+
+                        for (name, w, s, r) in [
+                            ("dividends", want.dividends, from_summary.dividends, from_report.dividends),
+                            ("trust_unfranked", want.trust_unfranked, from_summary.trust_unfranked, from_report.trust_unfranked),
+                            ("trust_franked", want.trust_franked, from_summary.trust_franked, from_report.trust_franked),
+                            ("employment", want.employment, from_summary.employment, from_report.employment),
+                            ("other", want.other, from_summary.other, from_report.other),
+                            ("credits", want.attached_credits, from_summary.attached_credits, from_report.attached_credits),
+                            ("lic_deduction", want.lic_deduction, from_summary.lic_deduction, from_report.lic_deduction),
+                            ("tfn", want.tfn, from_summary.tfn, from_report.tfn),
+                            ("foreign_income", want.foreign_income, from_summary.foreign_income, from_report.foreign_income),
+                            ("foreign_interest", want.foreign_interest, from_summary.foreign_interest, from_report.foreign_interest),
+                            ("australian_interest", want.australian_interest, from_summary.australian_interest, from_report.australian_interest),
+                            ("foreign_tax", want.foreign_tax, from_summary.foreign_tax, from_report.foreign_tax),
+                        ] {
+                            prop_assert!(same(w, s), "FY{} {}: records {} against summary {}", year, name, w, s);
+                            prop_assert!(same(s, r), "FY{} {}: summary {} against report rows {}", year, name, s, r);
+                        }
+                        let denied_rows = sum(&mut inc.dividends.iter().map(|r| r.franking_credits_denied_aud))
+                            + sum(&mut inc.trust_income.iter().map(|r| r.franking_credits_denied_aud));
+                        let denied = line(|s| s.franking_credits_denied);
+                        prop_assert!(same(denied, denied_rows), "FY{} denied credits: summary {} against report rows {}", year, denied, denied_rows);
+                    }
+                    prop_assert!(expected.is_empty(), "records assessed outside the years checked: {:?}", expected.keys());
+                    Ok(())
+                })?;
+            }
+
+            /// After any history of parcels sold piecemeal across several
+            /// years at prices that rarely land on a cent, every printed
+            /// disposal row subtracts — proceeds less cost base is the gain
+            /// beside it, to the cent, and the initial cost base less its
+            /// itemised adjustments is the adjusted cost base (wherever no
+            /// adjustment ran it past nil) — and each year's schedule total is
+            /// both the CGT summary's realised gains less losses and the sum
+            /// of the Realised Gains screen's disposals: one disposal, one set
+            /// of cents, wherever it is printed.
+            #[test]
+            fn every_printed_disposal_row_subtracts_and_every_surface_agrees(
+                parcels in parcels(),
+                sales in sales(),
+                rocs in prop::collection::vec((0i64..=500, 1i64..=50_000), 0..=2),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_support::test_pool().await;
+                    test_support::listing(1).insert(&pool).await;
+                    let mut remaining = Vec::new();
+                    for (i, (units, price, brokerage)) in parcels.iter().enumerate() {
+                        test_support::buy(i as i64 + 1, 1)
+                            .date(ymd(2021, 3, 3) + Duration::weeks(30 * i as i64))
+                            .qty(Decimal::from(*units))
+                            .price(Decimal::new(*price, 4))
+                            .brokerage(Decimal::new(*brokerage, 3))
+                            .gst_on_brokerage(Decimal::new(*brokerage, 4))
+                            .insert(&pool)
+                            .await;
+                        remaining.push(*units);
+                    }
+                    // Returns of capital paid before the first sale, per unit to
+                    // four decimal places — an itemised adjustment row on every
+                    // parcel held, and past its cost base a G1 gain.
+                    for (i, (day, per_unit)) in rocs.iter().enumerate() {
+                        corporate_action::db_upsert(
+                            &pool,
+                            &CorporateAction {
+                                id: i as i64 + 1,
+                                listing_id: ListingId(1),
+                                date: ymd(2022, 1, 5) + Duration::days(*day),
+                                kind: ActionKind::ReturnOfCapital {
+                                    amount_per_unit: Decimal::new(*per_unit, 4),
+                                    currency: "AUD".into(),
+                                    record_date: None,
+                                },
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    let mut days: Vec<_> = sales.iter().map(|(d, _, _)| *d).collect();
+                    days.sort_unstable();
+                    let mut alloc_id = 0;
+                    for (i, ((_, price, pcts), day)) in sales.iter().zip(days).enumerate() {
+                        let mut date = ymd(2023, 7, 5) + Duration::days(day);
+                        while date.weekday() != chrono::Weekday::Wed
+                            || (date.month() == 12 && date.day() >= 25)
+                            || (date.month() == 1 && matches!(date.day(), 1 | 26))
+                        {
+                            date += Duration::days(1);
+                        }
+                        let take: Vec<i64> = remaining
+                            .iter()
+                            .zip(pcts)
+                            .map(|(left, pct)| left * i64::from(*pct) / 100)
+                            .collect();
+                        let qty: i64 = take.iter().sum();
+                        if qty == 0 {
+                            continue;
+                        }
+                        let sell_id = 100 + i as i64;
+                        test_support::sell(sell_id, 1)
+                            .date(date)
+                            .qty(Decimal::from(qty))
+                            .price(Decimal::new(*price, 4))
+                            .brokerage(Decimal::new(1995, 2))
+                            .insert(&pool)
+                            .await;
+                        for (p, units) in take.iter().enumerate() {
+                            if *units > 0 {
+                                alloc_id += 1;
+                                test_support::allocate(&pool, alloc_id, sell_id, p as i64 + 1, Decimal::from(*units)).await;
+                                remaining[p] -= units;
+                            }
+                        }
+                    }
+
+                    let screen: Vec<realised_gains::RealisedGainLoss> =
+                        ApiClient::full(&pool).get_json("/portfolio/realised_gains").await;
+                    for year in 2024..=2027 {
+                        let report = db_tax_report(&pool, year).await.unwrap();
+                        for group in &report.disposals.listings {
+                            for row in &group.parcels {
+                                prop_assert_eq!(
+                                    row.proceeds_aud - row.adjusted_cost_base_aud,
+                                    row.gain_loss_aud,
+                                    "FY{} parcel {} sold {}: printed proceeds less cost base",
+                                    year, row.purchase_trade_id.0, row.sale_date
+                                );
+                                if row.adjustments.iter().all(|a| !a.capped) {
+                                    let adjusted: Decimal = row.initial_cost_base_aud
+                                        - row.adjustments.iter().map(|a| a.amount).sum::<Decimal>();
+                                    prop_assert_eq!(
+                                        adjusted,
+                                        row.adjusted_cost_base_aud,
+                                        "FY{} parcel {} sold {}: printed initial cost base less its adjustments",
+                                        year, row.purchase_trade_id.0, row.sale_date
+                                    );
+                                }
+                            }
+                        }
+                        let totals = &report.disposals.totals;
+                        let (gains, losses) = report.cgt_summary.as_ref().map_or(
+                            (Decimal::ZERO, Decimal::ZERO),
+                            // A G1 gain is the CGT summary's, with no disposal row.
+                            |c| (c.short_term_gains + c.long_term_gains - c.cgt_event_g1_gain, c.capital_losses_this_year),
+                        );
+                        prop_assert_eq!(totals.gain_loss_aud, gains - losses,
+                            "FY{}: schedule total against the CGT summary's gains {} less losses {}", year, gains, losses);
+                        let on_screen: Decimal = screen
+                            .iter()
+                            .filter(|r| tax_year_for(r.sale_date) == year)
+                            .map(|r| r.capital_gain_loss)
+                            .sum();
+                        prop_assert_eq!(totals.gain_loss_aud, on_screen,
+                            "FY{}: schedule total against the Realised Gains screen", year);
+                        for r in screen.iter().filter(|r| tax_year_for(r.sale_date) == year) {
+                            prop_assert_eq!(r.proceeds - r.cost_base, r.capital_gain_loss,
+                                "the Realised Gains row for sale {:?} subtracts", r.disposal);
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 }

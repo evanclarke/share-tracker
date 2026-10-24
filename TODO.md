@@ -48,6 +48,11 @@ and its imports, module layout and docs section.
 The 2026-10-23 third property-test pass (cross-report and snapshot-staleness invariants, and the
 three defects it found) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
 
+The 2026-10-24 fourth property-test pass (the tax documents against their own records — the
+income drilldown, the disposal schedule's arithmetic, the 45-day walk, period performance — and
+the five defects it found, including the parcel-level rounding rule every printed disposal now
+shares) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
+
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
 since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal
