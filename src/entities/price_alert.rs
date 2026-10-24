@@ -421,7 +421,7 @@ fn note(skipped: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::entities::parcel_allocation::ParcelAllocation;
     use crate::entities::{corporate_action, parcel_allocation};
     use crate::infra::email::test_support::Outbox;
@@ -571,6 +571,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2026, 3, 3),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("1"),
                     split_old_units: dec("2"),
                 },

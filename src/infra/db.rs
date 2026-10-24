@@ -2774,7 +2774,12 @@ mod tests {
         );
 
         // And the row reads back through the model as a renounceable offer, so
-        // an action entered before the column behaves exactly as it did.
+        // an action entered before the column behaves exactly as it did. The
+        // model reads today's columns, so the later migrations are applied
+        // first (0054's `fraction_rule` among them).
+        for later in sqlx::migrate!().iter().filter(|m| m.version > 47) {
+            apply_migration(&pool, later.version).await;
+        }
         let action = corporate_action::db_get(&pool, 1).await.unwrap().unwrap();
         assert!(matches!(
             action.kind,
@@ -3345,6 +3350,138 @@ mod tests {
                 "{bad} must be refused"
             );
         }
+    }
+
+    /// 0054 adds `corporate_actions.fraction_rule`. What needs pinning is that
+    /// no history moves: every ratio-driven action recorded before it
+    /// (`ShareSplit`, `BonusIssue`, `ScripForScrip`, `Demerger`) is backfilled
+    /// to `Exact` — what the arithmetic has always done with it — while every
+    /// other type stays NULL. The column's CHECK keeps that shape, and the
+    /// audited table's two triggers come back naming the new column without
+    /// the backfill itself writing a trail entry.
+    #[tokio::test]
+    async fn migration_0054_backfills_ratio_driven_actions_as_exact() {
+        let pool = pool_migrated_below(54).await;
+        for (id, ticker) in [(1, "AAA"), (2, "BBB")] {
+            sqlx::query(
+                "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+                 VALUES (?, 'XASX', ?, ?, 'Share', 'AUD')",
+            )
+            .bind(id)
+            .bind(ticker)
+            .bind(ticker)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for insert in [
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, split_new_units, \
+             split_old_units) VALUES (1, 'ShareSplit', 1, '2024-01-01', '1', '3')",
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, bonus_units, \
+             bonus_held_units) VALUES (2, 'BonusIssue', 1, '2024-02-01', '1', '10')",
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, scrip_listing_id, \
+             scrip_new_units, scrip_old_units) VALUES (3, 'ScripForScrip', 1, '2024-03-01', 2, \
+             '1', '3')",
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, \
+             demerger_listing_id, demerger_new_units, demerger_held_units, \
+             demerger_cost_base_pct) VALUES (4, 'Demerger', 1, '2024-04-01', 2, '1', '5', '10')",
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, amount_per_unit, \
+             currency) VALUES (5, 'ReturnOfCapital', 1, '2024-05-01', '0.5', 'AUD')",
+            "INSERT INTO corporate_actions (id, action_type, listing_id, date, worthless_event) \
+             VALUES (6, 'WorthlessShares', 1, '2024-06-01', 'C2Cancellation')",
+        ] {
+            sqlx::query(insert).execute(&pool).await.unwrap();
+        }
+        let before: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, action_type FROM corporate_actions ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        apply_migration(&pool, 54).await;
+
+        let rules: Vec<(i64, Option<String>)> =
+            sqlx::query_as("SELECT id, fraction_rule FROM corporate_actions ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let exact = || Some("Exact".to_owned());
+        assert_eq!(
+            rules,
+            [
+                (1, exact()),
+                (2, exact()),
+                (3, exact()),
+                (4, exact()),
+                (5, None),
+                (6, None)
+            ],
+            "ratio-driven actions are Exact, every other type carries no rule"
+        );
+        let after: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, action_type FROM corporate_actions ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after, "no row lost");
+        let trail: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM row_history WHERE table_name = 'corporate_actions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            trail, 0,
+            "the backfill is a value the column gains, not an edit"
+        );
+
+        // The rows read back through the model as `Exact` actions.
+        let split = corporate_action::db_get(&pool, 1).await.unwrap().unwrap();
+        assert!(matches!(
+            split.kind,
+            ActionKind::ShareSplit {
+                fraction_rule: corporate_action::FractionRule::Exact,
+                ..
+            }
+        ));
+
+        // The CHECK holds the shape: a rule only on a ratio-driven type, and
+        // only one of the five names.
+        for bad in [
+            "UPDATE corporate_actions SET fraction_rule = 'Exact' WHERE id = 5",
+            "UPDATE corporate_actions SET fraction_rule = 'Truncate' WHERE id = 1",
+        ] {
+            assert!(
+                sqlx::query(bad).execute(&pool).await.is_err(),
+                "the CHECK must refuse: {bad}"
+            );
+        }
+
+        // The audit trail is live again and records the new column.
+        sqlx::query("UPDATE corporate_actions SET fraction_rule = 'Down' WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_row: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'corporate_actions' AND row_id = 2",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(old_row.contains("\"fraction_rule\":\"Exact\""), "{old_row}");
+        sqlx::query("DELETE FROM corporate_actions WHERE id = 6")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let deleted: String = sqlx::query_scalar(
+            "SELECT old_row FROM row_history \
+             WHERE table_name = 'corporate_actions' AND row_id = 6 AND operation = 'DELETE'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(deleted.contains("\"fraction_rule\":null"), "{deleted}");
     }
 
     #[test]

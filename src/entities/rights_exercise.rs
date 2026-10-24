@@ -548,7 +548,7 @@ async fn exercise(
 mod tests {
     use super::*;
     use crate::entities;
-    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::corporate_action::{CorporateAction, FractionRule};
     use crate::entities::{listing, rba_fx_rate, sell};
     use crate::reports::realised_gains::DisposalId;
     use crate::reports::{open_parcels, realised_gains};
@@ -889,6 +889,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 4, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -924,6 +925,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 7, 15),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -990,6 +992,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -1636,6 +1639,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },

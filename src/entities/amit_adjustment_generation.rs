@@ -611,7 +611,7 @@ impl From<GenerateError> for ApiError {
 mod tests {
     use super::*;
     use crate::domain::cost_base;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::entities::scrip_exchange;
     use crate::infra::http;
     use crate::reports::amit_adjustment_cross_check;
@@ -1065,6 +1065,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 8, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: Decimal::ONE,
                 },
@@ -1124,6 +1125,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 1, 15),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: Decimal::ONE,
                 },
@@ -1222,6 +1224,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 6, 30),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::ONE,
                     split_old_units: dec("3"),
                 },
@@ -1498,6 +1501,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2025, 8, 1),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,

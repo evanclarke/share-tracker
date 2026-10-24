@@ -2,6 +2,7 @@
 //! that refuse a malformed payload, and the per-listing event loads.
 
 use super::*;
+use crate::entities::corporate_action::FractionRule;
 
 /// A `Demerger` carrying the stated pre-demerger close (and its
 /// provenance) that the price re-base derives its factor from.
@@ -87,6 +88,7 @@ async fn db_insert_and_retrieve_share_split_preserves_ratio() {
     assert_eq!(
         got.kind,
         ActionKind::ShareSplit {
+            fraction_rule: FractionRule::Exact,
             split_new_units: Decimal::from(7),
             split_old_units: Decimal::from(2),
         }
@@ -106,6 +108,7 @@ async fn db_insert_and_retrieve_bonus_issue_preserves_ratio() {
     assert_eq!(
         got.kind,
         ActionKind::BonusIssue {
+            fraction_rule: FractionRule::Exact,
             bonus_units: Decimal::from(3),
             bonus_held_units: Decimal::from(7),
         }
@@ -205,6 +208,7 @@ async fn db_insert_and_retrieve_scrip_for_scrip_preserves_terms() {
     assert_eq!(
         got.kind,
         ActionKind::ScripForScrip {
+            fraction_rule: FractionRule::Exact,
             scrip_listing_id: ListingId(2),
             scrip_new_units: Decimal::from(3),
             scrip_old_units: Decimal::from(7),
@@ -242,6 +246,7 @@ async fn db_insert_and_retrieve_demerger_preserves_terms() {
     assert_eq!(
         got.kind,
         ActionKind::Demerger {
+            fraction_rule: FractionRule::Exact,
             demerger_listing_id: ListingId(2),
             demerger_new_units: Decimal::ONE,
             demerger_held_units: Decimal::from(5),

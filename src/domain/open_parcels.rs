@@ -390,7 +390,7 @@ fn sale_of(row: &SqliteRow) -> Result<UnitsAt, sqlx::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{self, ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{self, ActionKind, CorporateAction, FractionRule};
     use crate::entities::rba_fx_rate;
     use crate::infra::date;
     use crate::test_support::{self, allocate, dec, test_pool, ymd};
@@ -416,6 +416,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec(ratio),
                     split_old_units: Decimal::ONE,
                 },

@@ -329,7 +329,7 @@ impl From<RecogniseError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{CorporateAction, WorthlessEvent};
+    use crate::entities::corporate_action::{CorporateAction, FractionRule, WorthlessEvent};
     use crate::entities::listing;
     use crate::entities::trade::TradeType;
     use crate::infra::date;
@@ -670,6 +670,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2025, 3, 31),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },

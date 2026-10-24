@@ -32,7 +32,8 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        scrip_cash_currency, demerger_listing_id, demerger_new_units, \
                        demerger_held_units, demerger_cost_base_pct, worthless_event, \
                        record_date, demerger_close_date, demerger_close_price, \
-                       demerger_close_sourced_from, demerger_close_reason, renounceable";
+                       demerger_close_sourced_from, demerger_close_reason, renounceable, \
+                       fraction_rule";
 
 /// The `/corporate_actions` list filters: the listing and the action
 /// `date` range, inclusive at both ends. A corporate action belongs to
@@ -534,6 +535,7 @@ async fn write(
         demerger_close_sourced_from: Option<String>,
         demerger_close_reason: Option<String>,
         worthless_event: Option<&'static str>,
+        fraction_rule: Option<&'static str>,
     }
     let mut c = Cols::default();
     match &action.kind {
@@ -549,16 +551,20 @@ async fn write(
         ActionKind::ShareSplit {
             split_new_units,
             split_old_units,
+            fraction_rule,
         } => {
             c.split_new_units = OptMoney(Some(*split_new_units));
             c.split_old_units = OptMoney(Some(*split_old_units));
+            c.fraction_rule = Some(fraction_rule.as_str());
         }
         ActionKind::BonusIssue {
             bonus_units,
             bonus_held_units,
+            fraction_rule,
         } => {
             c.bonus_units = OptMoney(Some(*bonus_units));
             c.bonus_held_units = OptMoney(Some(*bonus_held_units));
+            c.fraction_rule = Some(fraction_rule.as_str());
         }
         ActionKind::RightsIssue {
             rights_units,
@@ -593,7 +599,9 @@ async fn write(
             scrip_cash_per_unit,
             scrip_market_value,
             scrip_cash_currency,
+            fraction_rule,
         } => {
+            c.fraction_rule = Some(fraction_rule.as_str());
             c.scrip_listing_id = Some(*scrip_listing_id);
             c.scrip_new_units = OptMoney(Some(*scrip_new_units));
             c.scrip_old_units = OptMoney(Some(*scrip_old_units));
@@ -610,7 +618,9 @@ async fn write(
             demerger_close_price,
             demerger_close_sourced_from,
             demerger_close_reason,
+            fraction_rule,
         } => {
+            c.fraction_rule = Some(fraction_rule.as_str());
             c.demerger_listing_id = Some(*demerger_listing_id);
             c.demerger_new_units = OptMoney(Some(*demerger_new_units));
             c.demerger_held_units = OptMoney(Some(*demerger_held_units));
@@ -749,9 +759,9 @@ async fn write(
           demerger_listing_id, demerger_new_units, demerger_held_units, \
           demerger_cost_base_pct, worthless_event, record_date, \
           demerger_close_date, demerger_close_price, demerger_close_sourced_from, \
-          demerger_close_reason, renounceable) \
+          demerger_close_reason, renounceable, fraction_rule) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                 ?, ?, ?, ?, ?, ?) \
+                 ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -785,7 +795,8 @@ async fn write(
              demerger_close_price        = excluded.demerger_close_price, \
              demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
              demerger_close_reason       = excluded.demerger_close_reason, \
-             renounceable                = excluded.renounceable",
+             renounceable                = excluded.renounceable, \
+             fraction_rule               = excluded.fraction_rule",
         id,
     );
     let result = query
@@ -822,6 +833,7 @@ async fn write(
         .bind(c.demerger_close_sourced_from)
         .bind(c.demerger_close_reason)
         .bind(c.renounceable)
+        .bind(c.fraction_rule)
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the

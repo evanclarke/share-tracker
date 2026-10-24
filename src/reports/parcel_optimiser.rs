@@ -741,7 +741,7 @@ async fn optimiser_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::entities::{corporate_action, sell};
     use crate::infra::date;
     use crate::reports::net_capital_gain::WhatIfResponse;
@@ -1367,6 +1367,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2025, 1, 2),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -2130,6 +2131,7 @@ mod tests {
                     listing_id: ListingId(1),
                     date: ymd(2025, 1, 2),
                     kind: ActionKind::ShareSplit {
+                        fraction_rule: FractionRule::Exact,
                         split_new_units: dec("3"),
                         split_old_units: Decimal::ONE,
                     },
@@ -2398,6 +2400,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 4, 10),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::ONE,
                     split_old_units: dec("3"),
                 },

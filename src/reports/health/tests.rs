@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::entities::closing_price::{self, NonTradingReason, PriceSource};
+use crate::entities::corporate_action::FractionRule;
 use crate::entities::exchange::Exchange;
 use crate::entities::inheritance::{CostBaseRule, Inheritance};
 use crate::entities::interest_income::InterestIncome;
@@ -867,6 +868,7 @@ async fn insert_split(pool: &SqlitePool, id: i64, listing_id: ListingId, date: N
         listing_id,
         date,
         corporate_action::ActionKind::ShareSplit {
+            fraction_rule: FractionRule::Exact,
             split_new_units: dec("2"),
             split_old_units: dec("1"),
         },
@@ -1603,6 +1605,7 @@ async fn insert_demerger(
             listing_id,
             date,
             kind: corporate_action::ActionKind::Demerger {
+                fraction_rule: FractionRule::Exact,
                 demerger_listing_id: ListingId(demerged_id),
                 demerger_new_units: dec("1"),
                 demerger_held_units: dec("1"),
@@ -2855,6 +2858,7 @@ async fn a_scrip_exchange_closing_sell_is_flagged_as_a_takeover_or_restructure()
             listing_id: ListingId(1),
             date: ymd(2024, 3, 11),
             kind: corporate_action::ActionKind::ScripForScrip {
+                fraction_rule: FractionRule::Exact,
                 scrip_listing_id: ListingId(2),
                 scrip_new_units: Decimal::ONE,
                 scrip_old_units: Decimal::ONE,
@@ -3773,6 +3777,7 @@ async fn a_split_between_the_ex_date_and_the_fetch_does_not_skew_the_expected_am
         ListingId(1),
         ymd(2025, 1, 15),
         corporate_action::ActionKind::ShareSplit {
+            fraction_rule: FractionRule::Exact,
             split_new_units: dec("10"),
             split_old_units: dec("1"),
         },

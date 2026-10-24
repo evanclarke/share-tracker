@@ -411,6 +411,7 @@ export const ENTITIES = [
       dec('demerger_close_price', 'Demerger: actual close that day', { optional: true, default: '', hint: 'What the security really traded at, in the listing’s quote currency — the price provider restates its whole pre-demerger series for the spin-off, and this is what re-bases it back.' }),
       txt('demerger_close_sourced_from', 'Demerger: close sourced from', { optional: true, hint: 'Where the figure came from, e.g. “nyse.com daily close, retrieved 2026-08-20”.' }),
       txt('demerger_close_reason', 'Demerger: why it is stated', { optional: true, hint: 'Why the close had to be stated, e.g. “Yahoo adjusts the pre-demerger series by the spin-off factor”.' }),
+      sel('fraction_rule', 'Fractional entitlements', ['Exact', 'Down', 'Up', 'Nearest', 'CashInLieu'], { optional: true, default: '', hint: 'How the registry treats a fractional entitlement where the ratio does not divide a holding, as the issuer announced it (ASX Listing Rule 7.20): Exact = the exact fraction is held; Down / Up / Nearest = rounded onto the holding’s unit precision; CashInLieu = rounded down, the fraction sold and paid out. Recorded now; every rule is currently computed as Exact.' }),
       sel('worthless_event', 'Worthless: CGT event', ['G3Declaration', 'C2Cancellation'], { optional: true, default: '', hint: 'G3 = liquidator/administrator declaration; C2 = deregistration/cancellation.' }),
     ],
     // The form renders only the selected action_type's field group (plus the
@@ -420,12 +421,12 @@ export const ENTITIES = [
     typeField: 'action_type',
     fieldGroups: {
       ReturnOfCapital: ['amount_per_unit', 'currency', 'record_date'],
-      ShareSplit: ['split_new_units', 'split_old_units'],
-      BonusIssue: ['bonus_units', 'bonus_held_units'],
+      ShareSplit: ['split_new_units', 'split_old_units', 'fraction_rule'],
+      BonusIssue: ['bonus_units', 'bonus_held_units', 'fraction_rule'],
       RightsIssue: ['rights_units', 'rights_held_units', 'exercise_price', 'currency', 'renounceable'],
       BuyBack: ['buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'currency'],
-      ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency'],
-      Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason'],
+      ScripForScrip: ['scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'fraction_rule'],
+      Demerger: ['demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason', 'fraction_rule'],
       WorthlessShares: ['worthless_event'],
     },
     typeDescs: {
@@ -452,7 +453,7 @@ export const ENTITIES = [
         WorthlessShares: 'Event date',
       },
     },
-    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'record_date', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason', 'worthless_event', 'renounceable'],
+    columns: ['id', 'action_type', 'listing_id', 'date', 'amount_per_unit', 'currency', 'record_date', 'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units', 'rights_units', 'rights_held_units', 'exercise_price', 'buyback_price', 'buyback_dividend', 'buyback_franking_credit', 'buyback_market_value', 'scrip_listing_id', 'scrip_new_units', 'scrip_old_units', 'scrip_cash_per_unit', 'scrip_market_value', 'scrip_cash_currency', 'demerger_listing_id', 'demerger_new_units', 'demerger_held_units', 'demerger_cost_base_pct', 'demerger_close_date', 'demerger_close_price', 'demerger_close_sourced_from', 'demerger_close_reason', 'worthless_event', 'renounceable', 'fraction_rule'],
     rowActions: function (row) {
       if (row.action_type === 'RightsIssue') {
         return [

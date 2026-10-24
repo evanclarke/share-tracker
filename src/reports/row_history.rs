@@ -886,7 +886,7 @@ mod tests {
             .put_ok(
                 "/corporate_actions/7",
                 &serde_json::json!({
-                    "listing_id": 1, "date": ymd(2024, 6, 1), "action_type": "Demerger",
+                    "listing_id": 1, "date": ymd(2024, 6, 1), "action_type": "Demerger", "fraction_rule": "Exact",
                     "demerger_listing_id": 2, "demerger_new_units": "1",
                     "demerger_held_units": "5", "demerger_cost_base_pct": "20",
                 }),
@@ -1246,7 +1246,7 @@ mod tests {
             .put_ok(
                 "/corporate_actions/7",
                 &serde_json::json!({
-                    "listing_id": 1, "date": ymd(2024, 6, 1), "action_type": "Demerger",
+                    "listing_id": 1, "date": ymd(2024, 6, 1), "action_type": "Demerger", "fraction_rule": "Exact",
                     "demerger_listing_id": 2, "demerger_new_units": "1",
                     "demerger_held_units": "5", "demerger_cost_base_pct": "20",
                 }),

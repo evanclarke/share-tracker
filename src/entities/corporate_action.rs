@@ -147,6 +147,10 @@ pub use crate::domain::adjustments::{
 /// what axum decodes rather than from prose.
 pub use db::{CorporateActionListQuery, db_get_tx, rebased_quantity_beyond_range};
 pub use http::router;
+/// Constructed by name only in tests (production code reads it off a stored
+/// row or a request body), so the re-export is test-gated like `db_upsert`'s.
+#[cfg(test)]
+pub use model::FractionRule;
 pub use model::{
     ActionKind, CorporateAction, CorporateActionBody, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS,
     WorthlessEvent,

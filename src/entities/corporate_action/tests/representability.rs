@@ -16,13 +16,13 @@ async fn api_a_split_that_rebases_a_parcel_beyond_the_decimal_range_is_refused()
         // every 1 held is the same 1000-for-1 re-base).
         (
             split(10, ListingId(1), d(2024, 7, 1), "1000", "1"),
-            serde_json::json!({"action_type": "ShareSplit", "listing_id": 1,
+            serde_json::json!({"action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1,
                                "date": "2024-07-01", "split_new_units": "1000",
                                "split_old_units": "1"}),
         ),
         (
             bonus(10, ListingId(1), d(2024, 7, 1), "999", "1"),
-            serde_json::json!({"action_type": "BonusIssue", "listing_id": 1,
+            serde_json::json!({"action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1,
                                "date": "2024-07-01", "bonus_units": "999",
                                "bonus_held_units": "1"}),
         ),
@@ -132,7 +132,7 @@ async fn api_a_consolidation_that_rebases_an_allocation_beyond_the_range_is_refu
     let response = client(&pool)
         .put(
             "/corporate_actions/10",
-            &serde_json::json!({"action_type": "ShareSplit", "listing_id": 1,
+            &serde_json::json!({"action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1,
                                 "date": "2021-01-01", "split_new_units": "1",
                                 "split_old_units": "1000"}),
         )

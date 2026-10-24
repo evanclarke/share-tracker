@@ -2,6 +2,7 @@
 //! malformed payload answers.
 
 use super::*;
+use crate::entities::corporate_action::FractionRule;
 
 #[tokio::test]
 async fn api_put_get_list_delete_round_trip() {
@@ -40,6 +41,7 @@ async fn api_share_split_round_trip() {
         &pool,
         serde_json::json!({
             "action_type": "ShareSplit",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2024-11-30",
             "split_new_units": "2",
@@ -52,6 +54,7 @@ async fn api_share_split_round_trip() {
     assert_eq!(
         got.kind,
         ActionKind::ShareSplit {
+            fraction_rule: FractionRule::Exact,
             split_new_units: Decimal::from(2),
             split_old_units: Decimal::ONE,
         }
@@ -66,6 +69,7 @@ async fn api_bonus_issue_round_trip() {
         &pool,
         serde_json::json!({
             "action_type": "BonusIssue",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2024-11-30",
             "bonus_units": "1",
@@ -78,6 +82,7 @@ async fn api_bonus_issue_round_trip() {
     assert_eq!(
         got.kind,
         ActionKind::BonusIssue {
+            fraction_rule: FractionRule::Exact,
             bonus_units: Decimal::ONE,
             bonus_held_units: Decimal::from(10),
         }
@@ -176,11 +181,11 @@ async fn api_a_rights_issue_without_the_renounceable_flag_is_422() {
     .await;
     for stray in [
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1", "renounceable": true,
         }),
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "bonus_units": "1", "bonus_held_units": "10", "renounceable": false,
         }),
         serde_json::json!({
@@ -239,13 +244,13 @@ async fn api_invalid_rights_issue_payloads_return_422() {
             "split_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "rights_units": "1", "rights_held_units": "4", "exercise_price": "1.80",
             "currency": "AUD",
         }),
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "bonus_units": "1", "bonus_held_units": "10", "currency": "AUD",
         }),
     ] {
@@ -365,7 +370,7 @@ async fn api_invalid_buy_back_payloads_return_422() {
             "buyback_price": "9.60", "currency": "AUD", "amount_per_unit": "0.50",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1", "buyback_price": "9.60",
         }),
         serde_json::json!({
@@ -390,28 +395,28 @@ async fn api_invalid_bonus_issue_payloads_return_422() {
     // split ratio — and a ShareSplit carrying a bonus ratio.
     for body in [
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
         }),
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "bonus_units": "0", "bonus_held_units": "10",
         }),
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "bonus_units": "1", "bonus_held_units": "-10",
         }),
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "bonus_units": "1", "bonus_held_units": "10",
             "amount_per_unit": "0.50", "currency": "AUD",
         }),
         serde_json::json!({
-            "action_type": "BonusIssue", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "BonusIssue", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "bonus_units": "1", "bonus_held_units": "10",
             "split_new_units": "2", "split_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "bonus_units": "1", "bonus_held_units": "10",
         }),
@@ -429,6 +434,7 @@ async fn api_scrip_for_scrip_round_trip() {
         &pool,
         serde_json::json!({
             "action_type": "ScripForScrip",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2024-11-30",
             "scrip_listing_id": 2,
@@ -442,6 +448,7 @@ async fn api_scrip_for_scrip_round_trip() {
     assert_eq!(
         got.kind,
         ActionKind::ScripForScrip {
+            fraction_rule: FractionRule::Exact,
             scrip_listing_id: ListingId(2),
             scrip_new_units: Decimal::from(2),
             scrip_old_units: Decimal::ONE,
@@ -462,7 +469,7 @@ async fn api_scrip_for_scrip_cash_component_round_trip() {
     api_put_expecting(
         &pool,
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "1", "scrip_old_units": "1",
             "scrip_cash_per_unit": "10.005", "scrip_market_value": "20.105",
             "scrip_cash_currency": "AUD",
@@ -474,6 +481,7 @@ async fn api_scrip_for_scrip_cash_component_round_trip() {
     assert_eq!(
         got.kind,
         ActionKind::ScripForScrip {
+            fraction_rule: FractionRule::Exact,
             scrip_listing_id: ListingId(2),
             scrip_new_units: Decimal::ONE,
             scrip_old_units: Decimal::ONE,
@@ -493,7 +501,7 @@ async fn api_invalid_scrip_cash_payloads_return_422() {
     insert_listing(&pool, 1, "OLD").await;
     insert_listing(&pool, 2, "NEW").await;
     let scrip_base = serde_json::json!({
-        "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+        "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
         "scrip_listing_id": 2, "scrip_new_units": "1", "scrip_old_units": "1",
     });
     let with = |extra: serde_json::Value| {
@@ -530,7 +538,7 @@ async fn api_invalid_scrip_cash_payloads_return_422() {
         })),
         // Cash fields are stray on another action type.
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "scrip_cash_per_unit": "10", "scrip_market_value": "20",
             "scrip_cash_currency": "AUD",
@@ -550,41 +558,41 @@ async fn api_invalid_scrip_for_scrip_payloads_return_422() {
     // cross-type fields — and the other types carrying scrip fields.
     for body in [
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "0", "scrip_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "-1",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 1, "scrip_new_units": "2", "scrip_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 999, "scrip_new_units": "2", "scrip_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
             "currency": "AUD",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
             "amount_per_unit": "0.50",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
             "split_new_units": "2", "split_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
         }),
@@ -606,6 +614,7 @@ async fn api_demerger_round_trip() {
         &pool,
         serde_json::json!({
             "action_type": "Demerger",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2024-11-30",
             "demerger_listing_id": 2,
@@ -620,6 +629,7 @@ async fn api_demerger_round_trip() {
     assert_eq!(
         got.kind,
         ActionKind::Demerger {
+            fraction_rule: FractionRule::Exact,
             demerger_listing_id: ListingId(2),
             demerger_new_units: Decimal::ONE,
             demerger_held_units: Decimal::from(5),
@@ -643,75 +653,75 @@ async fn api_invalid_demerger_payloads_return_422() {
     // the other types carrying demerger fields.
     for body in [
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "0",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "-5", "demerger_cost_base_pct": "5.063",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "0",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "100",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "-5.063",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 1, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 999, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
             "currency": "AUD",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
             "split_new_units": "2", "split_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "Demerger", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "demerger_listing_id": 2, "demerger_new_units": "1",
             "demerger_held_units": "5", "demerger_cost_base_pct": "5.063",
         }),
         serde_json::json!({
-            "action_type": "ScripForScrip", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ScripForScrip", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
             "demerger_cost_base_pct": "5.063",
         }),
         // A stated close on a type that has no price series to restate.
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "demerger_close_date": "2024-11-29", "demerger_close_price": "24.90",
             "demerger_close_sourced_from": "nyse.com", "demerger_close_reason": "spin-off",
@@ -732,7 +742,7 @@ async fn api_demerger_stated_close_round_trips_and_rejects_a_partial_one() {
     insert_listing(&pool, 1, "LAC").await;
     insert_listing(&pool, 2, "LAR").await;
     let complete = serde_json::json!({
-        "action_type": "Demerger", "listing_id": 1, "date": "2023-10-03",
+        "action_type": "Demerger", "fraction_rule": "Exact", "listing_id": 1, "date": "2023-10-03",
         "demerger_listing_id": 2, "demerger_new_units": "1",
         "demerger_held_units": "1", "demerger_cost_base_pct": "36",
         "demerger_close_date": "2023-10-02", "demerger_close_price": "24.90",
@@ -743,6 +753,7 @@ async fn api_demerger_stated_close_round_trips_and_rejects_a_partial_one() {
     assert_eq!(
         db_get(&pool, 1).await.unwrap().unwrap().kind,
         ActionKind::Demerger {
+            fraction_rule: FractionRule::Exact,
             demerger_listing_id: ListingId(2),
             demerger_new_units: Decimal::ONE,
             demerger_held_units: Decimal::ONE,
@@ -890,7 +901,7 @@ async fn api_invalid_worthless_shares_payloads_return_422() {
             "worthless_event": "G3Declaration", "split_new_units": "2", "split_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2025-03-31",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2025-03-31",
             "split_new_units": "2", "split_old_units": "1",
             "worthless_event": "G3Declaration",
         }),
@@ -967,6 +978,7 @@ async fn api_invalid_record_dates_return_422() {
         }),
         serde_json::json!({
             "action_type": "ShareSplit",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2025-03-01",
             "split_new_units": "2",
@@ -1010,18 +1022,18 @@ async fn api_invalid_share_split_payloads_return_422() {
     // Missing ratio, non-positive ratio, and a stray payment field.
     for body in [
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "0", "split_old_units": "1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "-1",
         }),
         serde_json::json!({
-            "action_type": "ShareSplit", "listing_id": 1, "date": "2024-11-30",
+            "action_type": "ShareSplit", "fraction_rule": "Exact", "listing_id": 1, "date": "2024-11-30",
             "split_new_units": "2", "split_old_units": "1",
             "amount_per_unit": "0.50", "currency": "AUD",
         }),
@@ -1088,4 +1100,141 @@ async fn api_unknown_action_type_rejected() {
         StatusCode::UNPROCESSABLE_ENTITY,
     )
     .await;
+}
+
+/// The four ratio-driven types each require a `fraction_rule`, every other
+/// type refuses one, and a value outside the five names is refused by the
+/// decoder — each a `422` saying which, and none of them stored.
+#[tokio::test]
+async fn api_a_fraction_rule_is_required_exactly_on_the_ratio_driven_types() {
+    let pool = test_pool().await;
+    insert_listing(&pool, 1, "FRA").await;
+    insert_listing(&pool, 2, "NEW").await;
+    let ratio_driven = [
+        serde_json::json!({"action_type": "ShareSplit", "split_new_units": "1",
+                           "split_old_units": "3"}),
+        serde_json::json!({"action_type": "BonusIssue", "bonus_units": "1",
+                           "bonus_held_units": "10"}),
+        serde_json::json!({"action_type": "ScripForScrip", "scrip_listing_id": 2,
+                           "scrip_new_units": "1", "scrip_old_units": "3"}),
+        serde_json::json!({"action_type": "Demerger", "demerger_listing_id": 2,
+                           "demerger_new_units": "1", "demerger_held_units": "5",
+                           "demerger_cost_base_pct": "10"}),
+    ];
+    let with = |payload: &serde_json::Value, rule: Option<&str>| {
+        let mut body = payload.clone();
+        let map = body.as_object_mut().unwrap();
+        map.insert("listing_id".to_owned(), serde_json::json!(1));
+        map.insert("date".to_owned(), serde_json::json!("2024-11-30"));
+        if let Some(rule) = rule {
+            map.insert("fraction_rule".to_owned(), serde_json::json!(rule));
+        }
+        body
+    };
+    for payload in &ratio_driven {
+        let resp = client(&pool)
+            .put("/corporate_actions/1", &with(payload, None))
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{payload}");
+        assert_eq!(body, model::FRACTION_RULE_REQUIRED);
+
+        let resp = client(&pool)
+            .put("/corporate_actions/1", &with(payload, Some("Truncate")))
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{payload}");
+        assert!(body.starts_with("cannot read the request body"), "{body}");
+        assert!(body.contains("Truncate"), "{body}");
+    }
+    assert!(db_get(&pool, 1).await.unwrap().is_none(), "nothing stored");
+
+    // Every rule is accepted on every ratio-driven type and reads back as
+    // stated, on the wire and through the model.
+    for (n, payload) in ratio_driven.iter().enumerate() {
+        for rule in ["Exact", "Down", "Up", "Nearest", "CashInLieu"] {
+            let id = 10 + n;
+            let resp = client(&pool)
+                .put(
+                    format!("/corporate_actions/{id}"),
+                    &with(payload, Some(rule)),
+                )
+                .await;
+            assert!(
+                resp.status.is_success(),
+                "{payload} {rule}: {}",
+                resp.text()
+            );
+            let got = client(&pool)
+                .get_json::<serde_json::Value>(format!("/corporate_actions/{id}"))
+                .await;
+            assert_eq!(got["fraction_rule"], rule, "{got}");
+        }
+    }
+
+    // Every other type refuses one.
+    for payload in [
+        serde_json::json!({"action_type": "ReturnOfCapital", "amount_per_unit": "0.5",
+                           "currency": "AUD"}),
+        serde_json::json!({"action_type": "RightsIssue", "rights_units": "1",
+                           "rights_held_units": "4", "exercise_price": "1.8",
+                           "currency": "AUD", "renounceable": true}),
+        serde_json::json!({"action_type": "BuyBack", "buyback_price": "9.6",
+                           "currency": "AUD"}),
+        serde_json::json!({"action_type": "WorthlessShares",
+                           "worthless_event": "C2Cancellation"}),
+    ] {
+        let resp = client(&pool)
+            .put("/corporate_actions/2", &with(&payload, Some("Exact")))
+            .await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{payload}");
+        assert_eq!(body, model::FRACTION_RULE_NOT_APPLICABLE);
+        // And without it the same payload is a valid action whose JSON
+        // carries no rule at all.
+        let resp = client(&pool)
+            .put("/corporate_actions/2", &with(&payload, None))
+            .await;
+        assert!(resp.status.is_success(), "{payload}: {}", resp.text());
+        let got = client(&pool)
+            .get_json::<serde_json::Value>("/corporate_actions/2")
+            .await;
+        assert!(got.get("fraction_rule").is_none(), "{got}");
+    }
+}
+
+/// `corporate_actions` is audited, so an edit of an action's rule is in the
+/// trail with the rule it replaced.
+#[tokio::test]
+async fn api_editing_a_fraction_rule_is_recorded_in_the_audit_trail() {
+    let pool = test_pool().await;
+    insert_listing(&pool, 1, "AUD").await;
+    let split = |rule: &str| {
+        serde_json::json!({
+            "action_type": "ShareSplit",
+            "fraction_rule": rule,
+            "listing_id": 1,
+            "date": "2024-11-30",
+            "split_new_units": "1",
+            "split_old_units": "3",
+        })
+    };
+    api_put_expecting(&pool, split("Exact"), StatusCode::CREATED).await;
+    api_put_expecting(&pool, split("CashInLieu"), StatusCode::NO_CONTENT).await;
+    let old_row: String = sqlx::query_scalar(
+        "SELECT old_row FROM row_history \
+         WHERE table_name = 'corporate_actions' AND row_id = 1 AND operation = 'UPDATE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let old_row: serde_json::Value = serde_json::from_str(&old_row).unwrap();
+    assert_eq!(old_row["fraction_rule"], "Exact", "{old_row}");
+    assert!(matches!(
+        db_get(&pool, 1).await.unwrap().unwrap().kind,
+        ActionKind::ShareSplit {
+            fraction_rule: FractionRule::CashInLieu,
+            ..
+        }
+    ));
 }

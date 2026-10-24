@@ -363,7 +363,7 @@ mod tests {
     use super::*;
     use crate::domain::open_parcels;
     use crate::entities::amit_adjustment_generation::{self, GenerateBody};
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
@@ -586,6 +586,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 3, 1),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("1"),
                     scrip_old_units: dec("1"),
@@ -673,6 +674,7 @@ mod tests {
                 listing_id: ListingId(2),
                 date: ymd(2025, 4, 1),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(3),
                     demerger_new_units: dec("1"),
                     demerger_held_units: dec("5"),

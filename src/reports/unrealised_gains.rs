@@ -227,6 +227,7 @@ async fn unrealised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::{corporate_action, scrip_exchange};
     use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
     use axum::http::StatusCode;
@@ -502,6 +503,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -776,6 +778,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
@@ -1008,7 +1011,7 @@ mod tests {
                             }
                             Fact::Split { new, old } if !exchanged => {
                                 app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
-                                    "listing_id": 1, "date": on, "action_type": "ShareSplit",
+                                    "listing_id": 1, "date": on, "action_type": "ShareSplit", "fraction_rule": "Exact",
                                     "split_new_units": new.to_string(), "split_old_units": old.to_string(),
                                 }))
                                 .await
@@ -1016,7 +1019,7 @@ mod tests {
                             }
                             Fact::Bonus { units, held } if !exchanged => {
                                 app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
-                                    "listing_id": 1, "date": on, "action_type": "BonusIssue",
+                                    "listing_id": 1, "date": on, "action_type": "BonusIssue", "fraction_rule": "Exact",
                                     "bonus_units": units.to_string(), "bonus_held_units": held.to_string(),
                                 }))
                                 .await
@@ -1065,7 +1068,7 @@ mod tests {
                             Fact::Scrip { new, old } if !exchanged => {
                                 let id = next_id("corporate_actions").await;
                                 app.put(format!("/corporate_actions/{id}"), &json!({
-                                    "listing_id": 1, "date": on, "action_type": "ScripForScrip",
+                                    "listing_id": 1, "date": on, "action_type": "ScripForScrip", "fraction_rule": "Exact",
                                     "scrip_listing_id": 2, "scrip_new_units": new.to_string(),
                                     "scrip_old_units": old.to_string(),
                                 }))

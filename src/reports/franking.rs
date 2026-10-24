@@ -389,7 +389,7 @@ pub async fn db_franked_dividends(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::test_support::holding_account_row;
 
     use crate::entities::sell::AllocationInput;
@@ -631,6 +631,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d("2025-01-10"),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -671,6 +672,7 @@ mod tests {
                 listing_id: ListingId(2),
                 date: d("2025-03-10"),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -959,6 +961,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d("2025-04-01"),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
@@ -1108,6 +1111,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use crate::entities::corporate_action::FractionRule;
         use chrono::{Datelike, Weekday};
         use proptest::prelude::*;
 
@@ -1146,6 +1150,7 @@ mod tests {
                         listing_id: ListingId(1),
                         date,
                         kind: ActionKind::ShareSplit {
+                            fraction_rule: FractionRule::Exact,
                             split_new_units: Decimal::from(factor),
                             split_old_units: Decimal::ONE,
                         },

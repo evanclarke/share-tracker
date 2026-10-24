@@ -4168,6 +4168,7 @@ mod tests {
             ("residual_handling", "drp_enrolments", "residual_handling"),
             ("action_type", "corporate_actions", "action_type"),
             ("worthless_event", "corporate_actions", "worthless_event"),
+            ("fraction_rule", "corporate_actions", "fraction_rule"),
         ] {
             check(field, schema_check_values(&pool, table, column).await);
         }

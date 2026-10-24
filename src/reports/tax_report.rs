@@ -2174,7 +2174,7 @@ mod tests {
     use super::*;
     use crate::domain::adjustments::AcquiredUnits;
     use crate::entities::amit_adjustment_generation::GenerateBody;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::test_support::holding_account_row;
 
     use crate::entities::listing_rename::RenameBody;
@@ -3242,6 +3242,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -4820,6 +4821,7 @@ mod tests {
                 "/corporate_actions/1",
                 &serde_json::json!({
                     "action_type": "BonusIssue",
+                    "fraction_rule": "Exact",
                     "listing_id": 1,
                     "date": "2023-10-01",
                     "bonus_units": "1",
@@ -4833,6 +4835,7 @@ mod tests {
                 "/corporate_actions/2",
                 &serde_json::json!({
                     "action_type": "ShareSplit",
+                    "fraction_rule": "Exact",
                     "listing_id": 1,
                     "date": "2023-11-01",
                     "split_new_units": "1",
@@ -5330,6 +5333,7 @@ mod tests {
                 "/corporate_actions/2",
                 &serde_json::json!({
                     "action_type": "ScripForScrip",
+                    "fraction_rule": "Exact",
                     "listing_id": 1,
                     "date": "2024-07-10",
                     "scrip_listing_id": 2,

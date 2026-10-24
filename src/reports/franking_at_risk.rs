@@ -1222,7 +1222,7 @@ mod tests {
                             }
                             Fact::Split { new, old } => {
                                 app.put(format!("/corporate_actions/{}", 100 + n), &json!({
-                                    "listing_id": 1, "date": on, "action_type": "ShareSplit",
+                                    "listing_id": 1, "date": on, "action_type": "ShareSplit", "fraction_rule": "Exact",
                                     "split_new_units": new.to_string(), "split_old_units": old.to_string(),
                                 }))
                                 .await
@@ -1230,7 +1230,7 @@ mod tests {
                             }
                             Fact::Bonus { units, held } => {
                                 app.put(format!("/corporate_actions/{}", 100 + n), &json!({
-                                    "listing_id": 1, "date": on, "action_type": "BonusIssue",
+                                    "listing_id": 1, "date": on, "action_type": "BonusIssue", "fraction_rule": "Exact",
                                     "bonus_units": units.to_string(), "bonus_held_units": held.to_string(),
                                 }))
                                 .await

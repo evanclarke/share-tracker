@@ -865,6 +865,7 @@ fn describe_action(
         ActionKind::ShareSplit {
             split_new_units,
             split_old_units,
+            ..
         } => {
             let label = if split_new_units < split_old_units {
                 "Share consolidation"
@@ -880,6 +881,7 @@ fn describe_action(
         ActionKind::BonusIssue {
             bonus_units,
             bonus_held_units,
+            ..
         } => (
             "Bonus issue".to_owned(),
             format!("{bonus_units} bonus unit(s) per {bonus_held_units} held"),
@@ -1012,6 +1014,7 @@ async fn activity_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::drp_enrolment::ResidualHandling;
     use crate::entities::exchange::Exchange;
     use crate::test_support::holding_account_row;
@@ -1085,6 +1088,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -1344,6 +1348,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 12, 1),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("2"),
                     scrip_old_units: dec("1"),
@@ -1503,6 +1508,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -1716,6 +1722,7 @@ mod tests {
                 listing_id: ListingId(8),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(9),
                     demerger_new_units: dec("1"),
                     demerger_held_units: dec("1"),
@@ -1759,6 +1766,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("2"),
                     scrip_old_units: dec("1"),
@@ -1800,6 +1808,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: dec("2"),
                     scrip_old_units: dec("1"),
@@ -1820,6 +1829,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 10, 3),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(3),
                     demerger_new_units: dec("1"),
                     demerger_held_units: dec("1"),
@@ -1873,6 +1883,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("1000"),
                     split_old_units: dec("1000000"),
                 },
@@ -1907,6 +1918,7 @@ mod tests {
                 1,
                 ymd(2024, 3, 1),
                 ActionKind::BonusIssue {
+                    fraction_rule: FractionRule::Exact,
                     bonus_units: dec("2"),
                     bonus_held_units: dec("7"),
                 },
@@ -1915,6 +1927,7 @@ mod tests {
                 2,
                 ymd(2024, 5, 1),
                 ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("5"),
                     split_old_units: dec("4"),
                 },
@@ -1942,7 +1955,7 @@ mod tests {
     mod properties {
         use super::*;
         use crate::entities::closing_price::HeldTimeline;
-        use crate::entities::corporate_action::CorporateAction;
+        use crate::entities::corporate_action::{CorporateAction, FractionRule};
         use crate::entities::sell::{self, SellBody};
         use crate::entities::transfer::TransferBody;
         use crate::reports::open_parcels::{self, OpenParcel};
@@ -2126,6 +2139,7 @@ mod tests {
                             listing_id: ListingId(1),
                             date,
                             kind: ActionKind::ShareSplit {
+                                fraction_rule: FractionRule::Exact,
                                 split_new_units: Decimal::from(*new),
                                 split_old_units: Decimal::from(*old),
                             },
@@ -2141,6 +2155,7 @@ mod tests {
                             listing_id: ListingId(1),
                             date,
                             kind: ActionKind::BonusIssue {
+                                fraction_rule: FractionRule::Exact,
                                 bonus_units: Decimal::from(*units),
                                 bonus_held_units: Decimal::from(*held),
                             },

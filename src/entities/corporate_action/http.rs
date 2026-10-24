@@ -46,6 +46,9 @@ fn corporate_action_from_body(
     body: CorporateActionBody,
 ) -> Result<CorporateAction, ApiError> {
     let (listing_id, date) = (body.listing_id, body.date);
+    if let Some(refusal) = body.fraction_rule_refusal() {
+        return Err(ApiError::unprocessable(refusal));
+    }
     let kind = body.kind().ok_or_else(|| {
         ApiError::unprocessable(
             "the corporate-action terms are missing or do not match the action type",

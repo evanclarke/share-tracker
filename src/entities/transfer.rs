@@ -928,7 +928,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::domain::open_parcels;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::entities::holding_account::{self};
     use crate::entities::listing::SecurityType;
     use crate::entities::sell::{SellBody, SellError};
@@ -2199,6 +2199,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2023, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::ONE,
                     split_old_units: Decimal::from(1000),
                 },
@@ -2277,6 +2278,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date,
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec(new),
                     split_old_units: dec(old),
                 },
@@ -2325,6 +2327,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("1000000"),
                     split_old_units: Decimal::ONE,
                 },

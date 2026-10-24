@@ -14,7 +14,7 @@
 
 use super::*;
 use crate::entities::corporate_action;
-use crate::entities::corporate_action::{ActionKind, CorporateAction};
+use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
 use crate::infra::id::ListingId;
 use crate::test_support;
 /// The stored price for a listing, and the figure it was observed as.
@@ -134,6 +134,7 @@ async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
             listing_id: ListingId(1),
             date: ymd(2026, 6, 10),
             kind: ActionKind::BonusIssue {
+                fraction_rule: FractionRule::Exact,
                 bonus_units: Decimal::ONE,
                 bonus_held_units: Decimal::ONE,
             },
@@ -312,6 +313,7 @@ async fn insert_demerger(
             listing_id,
             date,
             kind: ActionKind::Demerger {
+                fraction_rule: FractionRule::Exact,
                 demerger_listing_id: ListingId(demerged_id),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: Decimal::ONE,

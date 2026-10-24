@@ -475,6 +475,7 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<RolloverAlert
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
@@ -573,6 +574,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 7, 1),
                 kind: ca::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -617,6 +619,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 7, 1),
                 kind: ca::ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,
@@ -707,6 +710,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2023, 7, 3),
                 kind: ca::ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,
@@ -760,6 +764,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 6, 10),
                 kind: ca::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -867,6 +872,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 6, 11),
                 kind: ca::ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: dec("5"),

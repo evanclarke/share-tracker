@@ -21,7 +21,7 @@ mod unpriced;
 mod yahoo;
 
 use super::*;
-use crate::entities::corporate_action::{ActionKind, CorporateAction};
+use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
 use crate::entities::listing_rename::RenameBody;
 use crate::entities::{corporate_action, listing_rename};
 use crate::infra::id::{ListingId, TradeId};
@@ -283,6 +283,7 @@ async fn insert_share_split(
             listing_id,
             date,
             kind: ActionKind::ShareSplit {
+                fraction_rule: FractionRule::Exact,
                 split_new_units: new.parse().unwrap(),
                 split_old_units: old.parse().unwrap(),
             },

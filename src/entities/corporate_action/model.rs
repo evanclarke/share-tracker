@@ -53,6 +53,72 @@ impl FromStr for WorthlessEvent {
     }
 }
 
+/// How the registry treats the fractional entitlement a ratio-driven action
+/// (`ShareSplit`, `BonusIssue`, `ScripForScrip`, `Demerger`) produces where
+/// its ratio does not divide a holding. The rule is the **issuer's**: ASX
+/// Listing Rule 7.20 has it disclose its treatment, and it varies — rounded
+/// up, rounded down with no cash, or the fractions aggregated, sold and paid
+/// out as cash in lieu. It is applied once per holding, never per parcel.
+/// TD 2000/10 / s 112-25: rounding is no CGT event (the cost base spreads
+/// over the resulting units); cash in lieu disposes of the fraction.
+/// Serialized as its variant name, the value stored in the `fraction_rule`
+/// TEXT column.
+///
+/// Every rule is stored and validated; the per-holding rounding onto the
+/// holding's unit grid it describes, and the cash-in-lieu disposal, are not
+/// yet applied — every action is computed as [`FractionRule::Exact`] until
+/// they are (TODO.md, "Compute per holding, store per parcel";
+/// `docs/API.md` *Fractional entitlements*).
+#[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FractionRule {
+    /// The registry holds the exact fractional count the ratio produces —
+    /// what every action recorded before the rule existed means.
+    Exact,
+    /// Rounded down to the holding's unit grid; the fraction is forfeited
+    /// with no cash.
+    Down,
+    /// Rounded up to the holding's unit grid.
+    Up,
+    /// Rounded to the nearest point on the holding's unit grid.
+    Nearest,
+    /// Rounded down, with the aggregated fractions sold and the proceeds paid
+    /// out — a disposal of the fraction (a Sell dated the payment date).
+    CashInLieu,
+}
+
+impl FractionRule {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            FractionRule::Exact => "Exact",
+            FractionRule::Down => "Down",
+            FractionRule::Up => "Up",
+            FractionRule::Nearest => "Nearest",
+            FractionRule::CashInLieu => "CashInLieu",
+        }
+    }
+}
+
+/// A `fraction_rule` value naming none of the rules.
+#[derive(thiserror::Error, Debug, PartialEq)]
+#[error("unknown fraction_rule {0}")]
+pub struct UnknownFractionRule(String);
+
+/// The inverse of [`FractionRule::as_str`]: the stored variant name.
+impl FromStr for FractionRule {
+    type Err = UnknownFractionRule;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Exact" => Ok(FractionRule::Exact),
+            "Down" => Ok(FractionRule::Down),
+            "Up" => Ok(FractionRule::Up),
+            "Nearest" => Ok(FractionRule::Nearest),
+            "CashInLieu" => Ok(FractionRule::CashInLieu),
+            other => Err(UnknownFractionRule(other.to_owned())),
+        }
+    }
+}
+
 /// The per-type payload of a corporate action. Each variant carries exactly
 /// the fields its action type needs, so a mixed or partial payload (the
 /// states the table CHECKs reject) is unrepresentable once constructed.
@@ -80,6 +146,9 @@ pub enum ActionKind {
         /// new < old).
         split_new_units: Decimal,
         split_old_units: Decimal,
+        /// How the registry treats a fractional entitlement (see
+        /// [`FractionRule`]).
+        fraction_rule: FractionRule,
     },
     BonusIssue {
         /// Every `bonus_held_units` units held receive `bonus_units`
@@ -87,6 +156,9 @@ pub enum ActionKind {
         /// bonus issue is `bonus_units=1` / `bonus_held_units=10`).
         bonus_units: Decimal,
         bonus_held_units: Decimal,
+        /// How the registry treats a fractional entitlement (see
+        /// [`FractionRule`]).
+        fraction_rule: FractionRule,
     },
     RightsIssue {
         /// Every `rights_held_units` units held at the record date entitle
@@ -157,6 +229,9 @@ pub enum ActionKind {
         /// `currency` column stays NULL for `ScripForScrip`.
         #[serde(default)]
         scrip_cash_currency: Option<CurrencyCode>,
+        /// How the registry treats a fractional entitlement (see
+        /// [`FractionRule`]).
+        fraction_rule: FractionRule,
     },
     Demerger {
         /// The demerged entity's listing (must differ from the action's own
@@ -201,6 +276,9 @@ pub enum ActionKind {
         demerger_close_sourced_from: Option<String>,
         #[serde(default)]
         demerger_close_reason: Option<String>,
+        /// How the registry treats a fractional entitlement (see
+        /// [`FractionRule`]).
+        fraction_rule: FractionRule,
     },
     WorthlessShares {
         /// Which CGT event the loss is recognised under (see [`WorthlessEvent`]).
@@ -265,6 +343,20 @@ pub struct CorporateAction {
     pub kind: ActionKind,
 }
 
+/// A ratio-driven row's `fraction_rule`. No write path can leave it NULL on
+/// one of those types — the PUT body must state it and `db_upsert` always
+/// binds it, and 0054 backfilled every stored row to `Exact` — so the
+/// fallback is only reachable by a row hand-inserted with raw SQL. It reads as
+/// `Exact`: what every row recorded before the column existed meant, and what
+/// 0054 backfilled them to. An unknown value is a decode error naming it.
+fn fraction_rule(row: &SqliteRow) -> Result<FractionRule, sqlx::Error> {
+    row.try_get::<Option<&str>, _>("fraction_rule")?
+        .map_or(Ok(FractionRule::Exact), |rule| {
+            rule.parse::<FractionRule>()
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+        })
+}
+
 /// The one `FromRow` a derive cannot express: which payload columns the row carries
 /// depends on its `action_type` tag, so the variant has to be chosen before the
 /// columns are read. The decimal columns still decode through
@@ -281,10 +373,12 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
             "ShareSplit" => Ok(ActionKind::ShareSplit {
                 split_new_units: row_dec(row, "split_new_units")?,
                 split_old_units: row_dec(row, "split_old_units")?,
+                fraction_rule: fraction_rule(row)?,
             }),
             "BonusIssue" => Ok(ActionKind::BonusIssue {
                 bonus_units: row_dec(row, "bonus_units")?,
                 bonus_held_units: row_dec(row, "bonus_held_units")?,
+                fraction_rule: fraction_rule(row)?,
             }),
             "RightsIssue" => Ok(ActionKind::RightsIssue {
                 rights_units: row_dec(row, "rights_units")?,
@@ -315,6 +409,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
                 scrip_cash_per_unit: row_opt_dec(row, "scrip_cash_per_unit")?,
                 scrip_market_value: row_opt_dec(row, "scrip_market_value")?,
                 scrip_cash_currency: row.try_get("scrip_cash_currency")?,
+                fraction_rule: fraction_rule(row)?,
             }),
             "Demerger" => Ok(ActionKind::Demerger {
                 demerger_listing_id: row.try_get("demerger_listing_id")?,
@@ -325,6 +420,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
                 demerger_close_price: row_opt_dec(row, "demerger_close_price")?,
                 demerger_close_sourced_from: row.try_get("demerger_close_sourced_from")?,
                 demerger_close_reason: row.try_get("demerger_close_reason")?,
+                fraction_rule: fraction_rule(row)?,
             }),
             "WorthlessShares" => Ok(ActionKind::WorthlessShares {
                 worthless_event: row
@@ -353,6 +449,31 @@ enum ActionType {
     Demerger,
     WorthlessShares,
 }
+
+impl ActionType {
+    /// The four ratio-driven types — whose ratio can produce a fractional
+    /// entitlement, and so the only ones that carry a [`FractionRule`].
+    fn is_ratio_driven(self) -> bool {
+        matches!(
+            self,
+            ActionType::ShareSplit
+                | ActionType::BonusIssue
+                | ActionType::ScripForScrip
+                | ActionType::Demerger
+        )
+    }
+}
+
+/// The `422` body for a ratio-driven action submitted without its
+/// `fraction_rule`.
+pub const FRACTION_RULE_REQUIRED: &str = "fraction_rule is required for a ShareSplit, BonusIssue, \
+     ScripForScrip or Demerger — how the registry treats a fractional entitlement: Exact, Down, \
+     Up, Nearest or CashInLieu";
+
+/// The `422` body for a `fraction_rule` on an action that has no ratio to
+/// produce a fraction.
+pub const FRACTION_RULE_NOT_APPLICABLE: &str = "fraction_rule applies only to a ShareSplit, \
+     BonusIssue, ScripForScrip or Demerger — this action type has no ratio to produce a fraction";
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -556,6 +677,14 @@ pub struct CorporateActionBody {
     /// (deregistration).
     #[serde(default)]
     worthless_event: Option<WorthlessEvent>,
+    /// `ShareSplit`, `BonusIssue`, `ScripForScrip` and Demerger only (required): how the
+    /// registry treats a fractional entitlement where the ratio does not divide a holding —
+    /// `Exact` (the exact fractional count is held), `Down`, `Up`, `Nearest` (rounded onto the
+    /// holding's unit grid), or `CashInLieu` (rounded down, the fraction sold and paid out).
+    /// Refused on every other type. Stored and validated; every rule is currently computed as
+    /// `Exact` (see docs/API.md, Fractional entitlements).
+    #[serde(default)]
+    fraction_rule: Option<FractionRule>,
 }
 
 /// Which payload *groups* a submitted row has any column of — one bit per
@@ -583,6 +712,9 @@ impl Presence {
     const DEMERGER: u16 = 1 << 7;
     const WORTHLESS: u16 = 1 << 8;
     const CURRENCY: u16 = 1 << 9;
+    /// Shared by the four ratio-driven types, like `CURRENCY` is by the
+    /// payment types.
+    const FRACTION: u16 = 1 << 10;
 
     /// Every column of the row, gathered into its group. This is the one place
     /// a payload column is assigned to a type, so a column added here is
@@ -642,7 +774,8 @@ impl Presence {
                     Self::DEMERGER,
                 )
                 | bit(body.worthless_event.is_some(), Self::WORTHLESS)
-                | bit(body.currency.is_some(), Self::CURRENCY),
+                | bit(body.currency.is_some(), Self::CURRENCY)
+                | bit(body.fraction_rule.is_some(), Self::FRACTION),
         )
     }
 
@@ -656,6 +789,18 @@ impl Presence {
 }
 
 impl CorporateActionBody {
+    /// The specific refusal for a `fraction_rule` that does not match the
+    /// action type — missing on a ratio-driven type, or present on any other —
+    /// checked ahead of [`Self::kind`] (which refuses the same rows) so the
+    /// `422` says which way it is wrong rather than the generic terms message.
+    pub(crate) fn fraction_rule_refusal(&self) -> Option<&'static str> {
+        match (self.action_type.is_ratio_driven(), self.fraction_rule) {
+            (true, None) => Some(FRACTION_RULE_REQUIRED),
+            (false, Some(_)) => Some(FRACTION_RULE_NOT_APPLICABLE),
+            _ => None,
+        }
+    }
+
     /// Each action type carries exactly its own payload (mirrors the table
     /// CHECKs, plus positivity): `ReturnOfCapital` needs a positive payment and
     /// a currency, and may carry a `record_date` no later than the payment
@@ -686,7 +831,11 @@ impl CorporateActionBody {
     /// strictly between 0 and 100 — 0 or 100 would zero out one side's cost
     /// base entirely, and anything outside would make one side negative.
     /// `WorthlessShares` needs only the `worthless_event` discriminator (the CGT
-    /// event basis), with every numeric/listing payload absent.
+    /// event basis), with every numeric/listing payload absent. The four
+    /// ratio-driven types (`ShareSplit`, `BonusIssue`, `ScripForScrip`,
+    /// Demerger) each also need a `fraction_rule` — the issuer's treatment of
+    /// a fractional entitlement (ASX Listing Rule 7.20), never assumed — and
+    /// every other type refuses one ([`Presence::FRACTION`]).
     pub(crate) fn kind(self) -> Option<ActionKind> {
         // Entitlement can never be fixed after the payment it entitles the
         // holder to, so a record date past the payment date is rejected rather
@@ -714,16 +863,18 @@ impl CorporateActionBody {
                     record_date,
                 })
             }
-            ActionType::ShareSplit if present.only(Presence::SPLIT) => {
+            ActionType::ShareSplit if present.only(Presence::SPLIT | Presence::FRACTION) => {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
                     split_old_units: positive(self.split_old_units)?,
+                    fraction_rule: self.fraction_rule?,
                 })
             }
-            ActionType::BonusIssue if present.only(Presence::BONUS) => {
+            ActionType::BonusIssue if present.only(Presence::BONUS | Presence::FRACTION) => {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
                     bonus_held_units: positive(self.bonus_held_units)?,
+                    fraction_rule: self.fraction_rule?,
                 })
             }
             ActionType::RightsIssue if present.only(Presence::RIGHTS | Presence::CURRENCY) => {
@@ -740,7 +891,7 @@ impl CorporateActionBody {
                     renounceable: self.renounceable?,
                 })
             }
-            ActionType::ScripForScrip if present.only(Presence::SCRIP) => {
+            ActionType::ScripForScrip if present.only(Presence::SCRIP | Presence::FRACTION) => {
                 let scrip_listing_id = self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
                 // The cash component is all-or-none: cash per old unit, the
                 // replacement unit's market value (the apportionment needs
@@ -767,9 +918,10 @@ impl CorporateActionBody {
                     scrip_cash_per_unit,
                     scrip_market_value,
                     scrip_cash_currency,
+                    fraction_rule: self.fraction_rule?,
                 })
             }
-            ActionType::Demerger if present.only(Presence::DEMERGER) => {
+            ActionType::Demerger if present.only(Presence::DEMERGER | Presence::FRACTION) => {
                 let demerger_listing_id =
                     self.demerger_listing_id.filter(|&l| l != self.listing_id)?;
                 let demerger_cost_base_pct = self
@@ -819,6 +971,7 @@ impl CorporateActionBody {
                     demerger_close_price,
                     demerger_close_sourced_from,
                     demerger_close_reason,
+                    fraction_rule: self.fraction_rule?,
                 })
             }
             ActionType::BuyBack if present.only(Presence::BUYBACK | Presence::CURRENCY) => {
@@ -883,7 +1036,7 @@ mod tests {
     /// [`Presence`] bit that group is. Naming a *column* is the point: what
     /// `Presence::only` refuses is a stray column, and a group is present as
     /// soon as any one of its columns is.
-    const GROUP_COLUMNS: [(u16, &str, &str); 10] = [
+    const GROUP_COLUMNS: [(u16, &str, &str); 11] = [
         (Presence::PAYMENT, "amount_per_unit", r#""0.50""#),
         (Presence::RECORD, "record_date", r#""2024-11-01""#),
         (Presence::SPLIT, "split_new_units", r#""2""#),
@@ -894,6 +1047,7 @@ mod tests {
         (Presence::DEMERGER, "demerger_cost_base_pct", r#""40""#),
         (Presence::WORTHLESS, "worthless_event", r#""G3Declaration""#),
         (Presence::CURRENCY, "currency", r#""AUD""#),
+        (Presence::FRACTION, "fraction_rule", r#""Down""#),
     ];
 
     /// A minimal valid payload for each action type, with the groups that type
@@ -909,13 +1063,13 @@ mod tests {
             ),
             (
                 "ShareSplit",
-                Presence::SPLIT,
-                json!({"split_new_units": "2", "split_old_units": "1"}),
+                Presence::SPLIT | Presence::FRACTION,
+                json!({"split_new_units": "2", "split_old_units": "1", "fraction_rule": "Exact"}),
             ),
             (
                 "BonusIssue",
-                Presence::BONUS,
-                json!({"bonus_units": "1", "bonus_held_units": "10"}),
+                Presence::BONUS | Presence::FRACTION,
+                json!({"bonus_units": "1", "bonus_held_units": "10", "fraction_rule": "Down"}),
             ),
             (
                 "RightsIssue",
@@ -930,21 +1084,23 @@ mod tests {
             ),
             (
                 "ScripForScrip",
-                Presence::SCRIP,
+                Presence::SCRIP | Presence::FRACTION,
                 json!({
                     "scrip_listing_id": 2,
                     "scrip_new_units": "2",
                     "scrip_old_units": "1",
+                    "fraction_rule": "CashInLieu",
                 }),
             ),
             (
                 "Demerger",
-                Presence::DEMERGER,
+                Presence::DEMERGER | Presence::FRACTION,
                 json!({
                     "demerger_listing_id": 2,
                     "demerger_new_units": "1",
                     "demerger_held_units": "5",
                     "demerger_cost_base_pct": "40",
+                    "fraction_rule": "Nearest",
                 }),
             ),
             (
@@ -972,9 +1128,10 @@ mod tests {
     /// Every action type carries exactly its own payload: one column of any
     /// group it is not allowed makes the row unrepresentable as an
     /// [`ActionKind`], so it is refused rather than stored with the stray
-    /// column silently dropped. The whole 8 × 10 matrix, not a spot check —
+    /// column silently dropped. The whole 8 × 11 matrix, not a spot check —
     /// this is the rule `Presence::only` exists to state, and the arms differ
-    /// only in the two shared groups (`currency`, `record_date`).
+    /// only in the three shared groups (`currency`, `record_date`,
+    /// `fraction_rule`).
     #[test]
     fn each_action_type_refuses_every_other_types_columns() {
         for (action_type, allowed, payload) in valid_payloads() {
@@ -998,5 +1155,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The four ratio-driven types each require their `fraction_rule`: the
+    /// same payload without it is unrepresentable, and the specific refusal
+    /// names it as required. Every other type refuses one with the other
+    /// message (its stray-column refusal is the matrix above).
+    #[test]
+    fn a_ratio_driven_type_requires_its_fraction_rule_and_no_other_type_takes_one() {
+        for (action_type, allowed, payload) in valid_payloads() {
+            let ratio_driven = allowed & Presence::FRACTION != 0;
+            let mut without = payload.clone();
+            without.as_object_mut().unwrap().remove("fraction_rule");
+            let mut with = payload.clone();
+            with.as_object_mut()
+                .unwrap()
+                .insert("fraction_rule".to_owned(), json!("Up"));
+            if ratio_driven {
+                assert!(
+                    body(action_type, &without).kind().is_none(),
+                    "{action_type}"
+                );
+                assert_eq!(
+                    body(action_type, &without).fraction_rule_refusal(),
+                    Some(FRACTION_RULE_REQUIRED),
+                    "{action_type}"
+                );
+                assert_eq!(body(action_type, &with).fraction_rule_refusal(), None);
+            } else {
+                assert_eq!(body(action_type, &without).fraction_rule_refusal(), None);
+                assert_eq!(
+                    body(action_type, &with).fraction_rule_refusal(),
+                    Some(FRACTION_RULE_NOT_APPLICABLE),
+                    "{action_type}"
+                );
+            }
+        }
+    }
+
+    /// Every rule round-trips through its stored name, and the serde wire
+    /// name is that same string.
+    #[test]
+    fn every_fraction_rule_round_trips_through_its_stored_name() {
+        for rule in [
+            FractionRule::Exact,
+            FractionRule::Down,
+            FractionRule::Up,
+            FractionRule::Nearest,
+            FractionRule::CashInLieu,
+        ] {
+            assert_eq!(rule.as_str().parse::<FractionRule>(), Ok(rule));
+            assert_eq!(serde_json::to_value(rule).unwrap(), json!(rule.as_str()));
+        }
+        assert!("Truncate".parse::<FractionRule>().is_err());
     }
 }

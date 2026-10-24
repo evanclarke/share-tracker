@@ -71,7 +71,7 @@ Record a company's non-assessable payment as a corporate action; the per-unit am
 
 ### Share splits and consolidations (TD 2000/10)
 
-Record a conversion of a listing's shares into a larger or smaller number as a corporate action; no CGT event arises: parcels keep their total cost base and original acquisition date (the 12-month discount clock keeps running) while quantities and per-unit cost bases are re-based across the conversion in every report and in the Sell/trade capacity checks (a post-split sale allocates post-split units against pre-split parcels)
+Record a conversion of a listing's shares into a larger or smaller number as a corporate action; no CGT event arises: parcels keep their total cost base and original acquisition date (the 12-month discount clock keeps running) while quantities and per-unit cost bases are re-based across the conversion in every report and in the Sell/trade capacity checks (a post-split sale allocates post-split units against pre-split parcels). Every ratio-driven action — split, consolidation, bonus issue, scrip-for-scrip exchange, demerger — records the registry's **fraction rule** for an entitlement its ratio does not divide (`Exact`, rounded `Down`/`Up`/`Nearest` onto the holding's unit precision, or `CashInLieu`); the rule is stored and validated, and every rule is currently computed as `Exact` (see [Fractional entitlements](API.md#fractional-entitlements))
 
 ### Bonus issues (non-assessable)
 

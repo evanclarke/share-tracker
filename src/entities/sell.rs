@@ -1089,6 +1089,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::domain::open_parcels;
+    use crate::entities::corporate_action::FractionRule;
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
@@ -1323,6 +1324,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
                 kind: corporate_action::ActionKind::BonusIssue {
+                    fraction_rule: FractionRule::Exact,
                     bonus_units: Decimal::ONE,
                     bonus_held_units: Decimal::from(3),
                 },
@@ -1384,6 +1386,7 @@ mod tests {
             listing_id: ListingId(1),
             date,
             kind: corporate_action::ActionKind::BonusIssue {
+                fraction_rule: FractionRule::Exact,
                 bonus_units: Decimal::from(units),
                 bonus_held_units: Decimal::ONE,
             },
@@ -1879,6 +1882,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },

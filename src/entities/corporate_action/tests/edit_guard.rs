@@ -19,6 +19,7 @@ async fn stored_split_terms(pool: &SqlitePool, id: i64) -> (NaiveDate, Decimal, 
     let ActionKind::ShareSplit {
         split_new_units,
         split_old_units,
+        ..
     } = stored.kind
     else {
         panic!("not a share split");
@@ -167,6 +168,7 @@ async fn api_editing_a_split_into_an_over_consumed_parcel_returns_422() {
             "/corporate_actions/10",
             &serde_json::json!({
                 "action_type": "ShareSplit",
+                "fraction_rule": "Exact",
                 "listing_id": 1,
                 "date": "2023-03-01",
                 "split_new_units": "1",
@@ -187,6 +189,7 @@ async fn api_editing_a_split_into_an_over_consumed_parcel_returns_422() {
             "/corporate_actions/10",
             &serde_json::json!({
                 "action_type": "ShareSplit",
+                "fraction_rule": "Exact",
                 "listing_id": 1,
                 "date": "2023-03-01",
                 "split_new_units": "4",

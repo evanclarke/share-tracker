@@ -1217,6 +1217,7 @@ mod tests {
     use super::*;
     use crate::entities::closing_price::ClearOutcome;
     use crate::entities::closing_price::test_support::QuoteStub;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::listing_rename::RenameBody;
     use crate::entities::{corporate_action, exchange, listing, listing_rename, rba_fx_rate};
     use crate::test_support::{self, ApiClient, ApiResponse, dec, test_pool, ymd};
@@ -3599,6 +3600,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 1),
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: "2".parse().unwrap(),
                     split_old_units: "1".parse().unwrap(),
                 },
@@ -3651,6 +3653,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2026, 6, 10),
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: "10".parse().unwrap(),
                     split_old_units: "1".parse().unwrap(),
                 },
@@ -3858,7 +3861,7 @@ mod tests {
 
     mod properties {
         use super::*;
-        use crate::entities::corporate_action::{ActionKind, CorporateAction};
+        use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
         use crate::entities::exchange_holiday::{self, ExchangeHoliday};
         use crate::entities::holding_account::{self};
         use crate::entities::sell::{self, AllocationInput, SellBody};
@@ -4115,6 +4118,7 @@ mod tests {
                             listing_id: ListingId(1),
                             date: at(day),
                             kind: ActionKind::ShareSplit {
+                                fraction_rule: FractionRule::Exact,
                                 split_new_units: Decimal::from(2),
                                 split_old_units: Decimal::ONE,
                             },

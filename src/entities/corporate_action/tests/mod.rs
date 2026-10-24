@@ -16,6 +16,7 @@ mod storage;
 use super::*;
 use crate::domain::adjustments::{RolloverOrigin, SplitRatio};
 use crate::domain::open_parcels;
+use crate::entities::corporate_action::FractionRule;
 use crate::entities::sell::{AllocationInput, SellBody, SellError};
 use crate::entities::transfer::TransferBody;
 use crate::entities::{holding_account, listing, sell, transfer};
@@ -74,6 +75,7 @@ fn split(id: i64, listing_id: ListingId, date: NaiveDate, new: &str, old: &str) 
         listing_id,
         date,
         kind: ActionKind::ShareSplit {
+            fraction_rule: FractionRule::Exact,
             split_new_units: new.parse().unwrap(),
             split_old_units: old.parse().unwrap(),
         },
@@ -92,6 +94,7 @@ fn bonus(
         listing_id,
         date,
         kind: ActionKind::BonusIssue {
+            fraction_rule: FractionRule::Exact,
             bonus_units: units.parse().unwrap(),
             bonus_held_units: held.parse().unwrap(),
         },
@@ -133,6 +136,7 @@ fn scrip(
         listing_id,
         date,
         kind: ActionKind::ScripForScrip {
+            fraction_rule: FractionRule::Exact,
             scrip_listing_id,
             scrip_new_units: new.parse().unwrap(),
             scrip_old_units: old.parse().unwrap(),
@@ -157,6 +161,7 @@ fn demerger(
         listing_id,
         date,
         kind: ActionKind::Demerger {
+            fraction_rule: FractionRule::Exact,
             demerger_listing_id,
             demerger_new_units: new.parse().unwrap(),
             demerger_held_units: held.parse().unwrap(),

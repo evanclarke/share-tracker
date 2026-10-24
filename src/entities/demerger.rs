@@ -514,7 +514,7 @@ impl From<DemergeError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::corporate_action::{CorporateAction, FractionRule};
     use crate::entities::listing;
     use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
@@ -597,6 +597,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id,
                     demerger_new_units: new.parse().unwrap(),
                     demerger_held_units: held.parse().unwrap(),
@@ -1134,6 +1135,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2022, 1, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("3"),
                     split_old_units: dec("1"),
                 },
@@ -1232,6 +1234,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2021, 1, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -1255,6 +1258,7 @@ mod tests {
                 listing_id: ListingId(2),
                 date: d(2024, 10, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("3"),
                     split_old_units: dec("1"),
                 },
@@ -1305,6 +1309,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -1848,6 +1853,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 6, 11),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
@@ -1885,6 +1891,7 @@ mod tests {
                 listing_id: ListingId(2),
                 date: d(2024, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },

@@ -721,6 +721,7 @@ async fn performance_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::{listing, trade};
     use crate::test_support::{self, ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
@@ -1149,6 +1150,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2023, 7, 1),
                 kind: corporate_action::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,

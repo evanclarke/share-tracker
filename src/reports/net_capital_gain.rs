@@ -1605,6 +1605,7 @@ async fn what_if_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::FractionRule;
     use crate::test_support::holding_account_row;
 
     use crate::entities::sell::AllocationInput;
@@ -3239,6 +3240,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: new.parse().unwrap(),
                     split_old_units: old.parse().unwrap(),
                 },
@@ -5111,6 +5113,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
@@ -5179,6 +5182,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
@@ -6294,7 +6298,7 @@ mod tests {
                     }
                     if let Some((d, new, old)) = split {
                         app.put("/corporate_actions/1", &json!({
-                            "listing_id": 1, "date": on(d), "action_type": "ShareSplit",
+                            "listing_id": 1, "date": on(d), "action_type": "ShareSplit", "fraction_rule": "Exact",
                             "split_new_units": new.to_string(), "split_old_units": old.to_string(),
                         }))
                         .await

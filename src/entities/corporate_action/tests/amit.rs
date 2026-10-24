@@ -183,6 +183,7 @@ async fn api_return_of_capital_is_refused_only_where_the_listing_is_an_amit() {
             "/corporate_actions/2",
             &serde_json::json!({
                 "action_type": "ShareSplit",
+                "fraction_rule": "Exact",
                 "listing_id": 2,
                 "date": "2024-05-01",
                 "split_new_units": "2",

@@ -1,6 +1,7 @@
 //! SCENARIOS V-d: a parcel dated behind a whole-holding operation.
 
 use super::*;
+use crate::entities::corporate_action::FractionRule;
 
 /// An OLD → NEW scrip-for-scrip exchange that has already run, plus the
 /// listings it needs. Returns nothing: the ids are fixed (1 = OLD, 2 = NEW,
@@ -19,6 +20,7 @@ async fn exchanged_listing(pool: &SqlitePool) {
             listing_id: ListingId(1),
             date: ymd(2024, 6, 10),
             kind: ActionKind::ScripForScrip {
+                fraction_rule: FractionRule::Exact,
                 scrip_listing_id: ListingId(2),
                 scrip_new_units: Decimal::ONE,
                 scrip_old_units: Decimal::ONE,
@@ -49,6 +51,7 @@ async fn demerged_listing(pool: &SqlitePool) {
             listing_id: ListingId(1),
             date: ymd(2024, 6, 11),
             kind: ActionKind::Demerger {
+                fraction_rule: FractionRule::Exact,
                 demerger_listing_id: ListingId(2),
                 demerger_new_units: Decimal::ONE,
                 demerger_held_units: dec("5"),

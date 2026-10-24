@@ -150,7 +150,7 @@ the precedent: the rule is on the plan, the grid on the holding.
   transfer/buy-back ones, transfer-ins against the destination, ESS vest, inheritance, rights
   exercise, DRP reinvestment), not to the quantities a scrip exchange/demerger/worthless recognise
   computes — those are this section's later items' to round
-- [ ] **A fraction rule on every ratio-driven action.** Add `fraction_rule` to `corporate_actions`
+- [x] **A fraction rule on every ratio-driven action.** Add `fraction_rule` to `corporate_actions`
   (`Exact | Down | Up | Nearest | CashInLieu`, CHECK-constrained, typed enum in `model.rs`; required
   for the four ratio-driven types, absent for the rest). Existing rows migrate to `Exact`, so no
   history moves; `Exact` stays available for a registry that genuinely holds fractions. A
@@ -158,6 +158,20 @@ the precedent: the rule is on the plan, the grid on the holding.
   fraction's disposal as a Sell with its own provenance variant (`sell::SellProvenance`), dated the
   payment date. `docs/API.md` (corporate actions + rewrite *Fractional entitlements*), the
   `config.js` `fieldGroups`, and the `sel()` pin in `select_option_lists_are_pinned_to_their_server_side_source`
+  *Done 2026-10-24 (migration 0054, `corporate_action::model::FractionRule`).* The rule is stored,
+  CHECK-constrained, required on the four ratio-driven types and refused on the rest (`422` naming
+  which), audited (0054 re-creates the trigger pair; the backfill itself writes no trail entry),
+  on the form and in the docs; existing ratio-driven rows read `Exact`. One part **moved to the next
+  item** rather than built here: the `CashInLieu` Sell. Its quantity is the holding's exact count
+  minus its rounded-down count, which after a 1-for-3 consolidation is a non-terminating figure
+  that only the per-parcel stored counts below make exact, and which parcel(s) give up the fraction
+  is that item's largest-remainder distribution — written now, it would be reworked by it. The
+  cash-input shape is decided: **per holding**, not a total apportioned — the registry pays each
+  holding its own cheque for its own aggregated fraction, which is the figure the holder's
+  statement prints, so it is an operation's input on the action (one call per holding, at
+  payment), not a column on it. Until then every rule is computed as `Exact` (`docs/API.md`
+  *Fractional entitlements* says so), and a received cash-in-lieu payment is entered as an
+  ordinary Sell as before
 - [ ] **Compute per holding, store per parcel.** For a non-`Exact` action, the post-action count of
   each holding account is `round(ratio × units on the register at the record date, unit_scale,
   fraction_rule)` — register by **settlement** date, per Financial correctness — with an optional
@@ -175,7 +189,13 @@ the precedent: the rule is on the plan, the grid on the holding.
   result depended on — a parcel settled on or before the record date — is edited or deleted
   afterwards. Property: for every non-`Exact` action, the stored parcel counts sum to the rounded
   holding total, every count is on the grid, and each parcel's count differs from its exact share
-  by less than one grid step
+  by less than one grid step. Also, moved here from the item above (2026-10-24): a `CashInLieu`
+  action's disposal of the fraction — per holding, an operation on the action (e.g.
+  `POST /corporate_actions/{id}/cash_in_lieu`) taking the holding account and the cash that holding
+  was paid, writing a Sell of the remainder (the exact count minus its rounded-down count on the
+  holding's `unit_scale`) with its own `sell::SellProvenance` variant (a new `trades` provenance
+  column, so the `trades` audit trigger pair is re-created and the action is frozen while it
+  exists), dated the payment date; with undo (delete) and `?dry_run=true`
 - [ ] **Retire the exact-fraction machinery where it is no longer reached.** Once every ratio-driven
   action a holding can carry rounds onto a grid, a quantity is a terminating decimal on it
   everywhere. Decide (owner) whether `Exact` stays a permitted rule; if not, migrate existing

@@ -3,6 +3,7 @@
 //! out of range.
 
 use super::*;
+use crate::entities::corporate_action::FractionRule;
 
 // -----------------------------------------------------------------------
 // A money/quantity figure sent as a JSON number (SCENARIOS W-a)
@@ -262,6 +263,7 @@ async fn insert_split(pool: &SqlitePool, id: i64, date: NaiveDate, new: &str, ol
             listing_id: ListingId(1),
             date,
             kind: ActionKind::ShareSplit {
+                fraction_rule: FractionRule::Exact,
                 split_new_units: dec(new),
                 split_old_units: dec(old),
             },

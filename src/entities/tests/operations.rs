@@ -6,7 +6,9 @@
 
 use super::*;
 use crate::domain::cgt_discount::discount_eligible;
-use crate::entities::corporate_action::{self, ActionKind, CorporateAction, WorthlessEvent};
+use crate::entities::corporate_action::{
+    self, ActionKind, CorporateAction, FractionRule, WorthlessEvent,
+};
 use crate::entities::drp_enrolment::{self, DrpEnrolment, ResidualHandling};
 use crate::infra::id::HoldingAccountId;
 use crate::reports::{net_capital_gain, open_parcels, realised_gains, rollover_consistency};
@@ -284,7 +286,7 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
             method: "PUT",
             path: format!("/corporate_actions/{action_id}"),
             body: Some(json!({
-                "listing_id": 1, "date": on, "action_type": "ShareSplit",
+                "listing_id": 1, "date": on, "action_type": "ShareSplit", "fraction_rule": "Exact",
                 "split_new_units": new.to_string(), "split_old_units": old.to_string(),
             })),
             previewable: false,
@@ -295,7 +297,7 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
             method: "PUT",
             path: format!("/corporate_actions/{action_id}"),
             body: Some(json!({
-                "listing_id": 1, "date": on, "action_type": "BonusIssue",
+                "listing_id": 1, "date": on, "action_type": "BonusIssue", "fraction_rule": "Exact",
                 "bonus_units": units.to_string(), "bonus_held_units": held.to_string(),
             })),
             previewable: false,
@@ -312,6 +314,7 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                 action_id,
                 on,
                 ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: new.into(),
                     scrip_old_units: old.into(),
@@ -336,6 +339,7 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                 action_id,
                 on,
                 ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(3),
                     demerger_new_units: new.into(),
                     demerger_held_units: held.into(),
@@ -806,6 +810,7 @@ async fn chain(
                     100 + n as i64,
                     date,
                     ActionKind::ScripForScrip {
+                        fraction_rule: FractionRule::Exact,
                         scrip_listing_id: ListingId(to),
                         scrip_new_units: new.into(),
                         scrip_old_units: old.into(),
@@ -855,6 +860,7 @@ async fn chain(
                     100 + n as i64,
                     date,
                     ActionKind::Demerger {
+                        fraction_rule: FractionRule::Exact,
                         demerger_listing_id: ListingId(to),
                         demerger_new_units: new.into(),
                         demerger_held_units: per.into(),
@@ -923,11 +929,13 @@ async fn chain(
             } => {
                 let kind = if matches!(l, Link::Split { .. }) {
                     ActionKind::ShareSplit {
+                        fraction_rule: FractionRule::Exact,
                         split_new_units: new.into(),
                         split_old_units: old.into(),
                     }
                 } else {
                     ActionKind::BonusIssue {
+                        fraction_rule: FractionRule::Exact,
                         bonus_units: new.into(),
                         bonus_held_units: old.into(),
                     }

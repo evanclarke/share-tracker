@@ -3,6 +3,7 @@
 //! be deleted, shrunk, or moved out from under it.
 
 use super::*;
+use crate::entities::corporate_action::FractionRule;
 use crate::test_support::holding_account_row;
 
 /// Link an AMIT adjustment covering `qty` units of trade `trade_id`
@@ -201,6 +202,7 @@ async fn db_shrink_check_rebases_post_split_allocations() {
             listing_id: ListingId(1),
             date: NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(),
             kind: ActionKind::ShareSplit {
+                fraction_rule: FractionRule::Exact,
                 split_new_units: Decimal::from(2),
                 split_old_units: Decimal::ONE,
             },

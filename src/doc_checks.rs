@@ -4549,9 +4549,19 @@ fn fractional_entitlements_documented() {
     assert!(API_MD.contains("### Fractional entitlements"));
     assert!(API_MD.contains(
         "Every ratio-driven action — `ShareSplit`, `BonusIssue`, `ScripForScrip`, `Demerger` — \
-         keeps the **exact fractional quantity** its ratio produces"
+         carries a required **`fraction_rule`**"
     ));
-    assert!(API_MD.contains("sell the aggregated fractions on-market and pay **cash in lieu**"));
+    // The rule's five values, and the honest statement of what applies today
+    // (the rounding itself is the section's next TODO item).
+    for rule in ["`Exact`", "`Down`", "`Up`", "`Nearest`", "`CashInLieu`"] {
+        assert!(API_MD.contains(&format!("| {rule} |")), "{rule}");
+    }
+    assert!(API_MD.contains("**What currently applies: every rule is computed as `Exact`.**"));
+    assert!(API_MD.contains(
+        "Until then every ratio-driven action keeps the **exact fractional quantity** its ratio \
+         produces"
+    ));
+    assert!(API_MD.contains("sells the aggregated fractions on-market and pays **cash in lieu**"));
     assert!(API_MD.contains("would silently lose (or invent) part of a parcel"));
     // What to do with the cash: a CGT event on the disposed fraction, entered
     // as an ordinary Sell — not a rounding to be absorbed.

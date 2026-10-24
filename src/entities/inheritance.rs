@@ -1010,7 +1010,7 @@ async fn delete(
 mod tests {
     use super::*;
     use crate::domain;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::test_support::holding_account_row;
 
     use crate::entities::sell::{self, AllocationInput, SellBody};
@@ -1782,7 +1782,7 @@ mod tests {
         api.put_ok(
             "/corporate_actions/1",
             &serde_json::json!({
-                "listing_id": 1, "date": "2022-06-01", "action_type": "ShareSplit",
+                "listing_id": 1, "date": "2022-06-01", "action_type": "ShareSplit", "fraction_rule": "Exact",
                 "split_new_units": "2", "split_old_units": "1",
             }),
         )
@@ -1816,7 +1816,7 @@ mod tests {
         api.put_ok(
             "/corporate_actions/1",
             &serde_json::json!({
-                "listing_id": 1, "date": "2025-09-01", "action_type": "Demerger",
+                "listing_id": 1, "date": "2025-09-01", "action_type": "Demerger", "fraction_rule": "Exact",
                 "demerger_listing_id": 2, "demerger_new_units": "1",
                 "demerger_held_units": "5", "demerger_cost_base_pct": "10",
             }),
@@ -2160,6 +2160,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("1000"),
                     split_old_units: Decimal::ONE,
                 },

@@ -693,6 +693,7 @@ mod tests {
         AmitReductionEvent, Whereabouts, db_cost_base_reduction_events,
     };
     use crate::domain::open_parcels;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
@@ -1243,6 +1244,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 1, 15),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },
@@ -1808,6 +1810,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date,
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -1973,6 +1976,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2025, 3, 15),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,

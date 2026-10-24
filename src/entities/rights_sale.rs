@@ -862,7 +862,7 @@ async fn delete_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::corporate_action::{CorporateAction, FractionRule};
     use crate::entities::{listing, rba_fx_rate, rights_exercise, trade};
     use crate::reports::{open_parcels, realised_gains, tax_summary};
     use crate::test_support::{self, ApiClient, dec, test_pool};
@@ -1246,6 +1246,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
                 },

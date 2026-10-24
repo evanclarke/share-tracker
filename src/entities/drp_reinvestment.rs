@@ -803,7 +803,7 @@ async fn unreinvest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::test_support::holding_account_row;
 
     use crate::entities::sell::{AllocationInput, SellBody};
@@ -1472,6 +1472,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: "2024-05-01".parse().unwrap(),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::TWO,
                     split_old_units: Decimal::ONE,
                 },
@@ -3108,6 +3109,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: "2024-06-01".parse().unwrap(),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },

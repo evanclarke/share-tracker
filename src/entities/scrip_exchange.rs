@@ -373,6 +373,10 @@ impl Terms {
             scrip_cash_per_unit,
             scrip_market_value,
             scrip_cash_currency,
+            // Not yet applied: every rule is computed as `Exact` until the
+            // per-holding rounding lands (TODO.md, "Compute per holding,
+            // store per parcel").
+            fraction_rule: _,
         } = kind
         else {
             return Err(ExchangeError::NotAScripForScrip);
@@ -570,7 +574,7 @@ impl From<ExchangeError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::CorporateAction;
+    use crate::entities::corporate_action::{CorporateAction, FractionRule};
     use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
     use crate::entities::{listing, rba_fx_rate};
@@ -665,6 +669,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id,
                     scrip_new_units: new.parse().unwrap(),
                     scrip_old_units: old.parse().unwrap(),
@@ -1081,6 +1086,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2022, 1, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("3"),
                     split_old_units: dec("1"),
                 },
@@ -1228,6 +1234,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 7, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
                 },
@@ -1611,6 +1618,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: d(2024, 6, 10),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -1808,6 +1816,7 @@ mod tests {
                 listing_id: ListingId(2),
                 date: d(2024, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },
@@ -1955,6 +1964,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date,
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,

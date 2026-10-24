@@ -533,7 +533,7 @@ async fn report(
 mod tests {
     use super::*;
     use crate::entities::amit_adjustment_generation::GenerateBody;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
@@ -637,6 +637,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: dec(ratio),
                     split_old_units: Decimal::ONE,
                 },
@@ -1148,6 +1149,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 1, 15),
                 kind: ActionKind::BonusIssue {
+                    fraction_rule: FractionRule::Exact,
                     bonus_units: Decimal::ONE,
                     bonus_held_units: dec("10"),
                 },
@@ -1247,6 +1249,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 15),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -1293,6 +1296,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 15),
                 kind: ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -1343,6 +1347,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2024, 3, 15),
                 kind: ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(2),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::ONE,

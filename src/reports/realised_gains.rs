@@ -983,6 +983,7 @@ async fn realised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entities::corporate_action::FractionRule;
     use crate::entities::demerger::Demerge;
     use crate::test_support::holding_account_row;
 
@@ -2421,6 +2422,7 @@ mod tests {
                 listing_id,
                 date,
                 kind: corporate_action::ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: new.parse().unwrap(),
                     split_old_units: old.parse().unwrap(),
                 },
@@ -2544,6 +2546,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2025, 5, 1).unwrap(),
                 kind: corporate_action::ActionKind::BonusIssue {
+                    fraction_rule: FractionRule::Exact,
                     bonus_units: Decimal::ONE,
                     bonus_held_units: Decimal::from(10),
                 },
@@ -3012,6 +3015,7 @@ mod tests {
                 listing_id: ListingId(from),
                 date,
                 kind: corporate_action::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(to),
                     scrip_new_units: Decimal::from(2),
                     scrip_old_units: Decimal::ONE,
@@ -3089,6 +3093,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 10).unwrap(),
                 kind: corporate_action::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::ONE,
@@ -3316,6 +3321,7 @@ mod tests {
                 listing_id: ListingId(from),
                 date,
                 kind: corporate_action::ActionKind::Demerger {
+                    fraction_rule: FractionRule::Exact,
                     demerger_listing_id: ListingId(to),
                     demerger_new_units: Decimal::ONE,
                     demerger_held_units: Decimal::from(5),
@@ -4074,6 +4080,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: NaiveDate::from_ymd_opt(2024, 7, 1).unwrap(),
                 kind: corporate_action::ActionKind::ScripForScrip {
+                    fraction_rule: FractionRule::Exact,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: Decimal::ONE,
                     scrip_old_units: Decimal::from(100),
@@ -4230,7 +4237,7 @@ mod tests {
             "PUT",
             "/corporate_actions/1",
             serde_json::json!({
-                "listing_id": 1, "date": "2021-05-26", "action_type": "BonusIssue",
+                "listing_id": 1, "date": "2021-05-26", "action_type": "BonusIssue", "fraction_rule": "Exact",
                 "bonus_units": "2", "bonus_held_units": "7",
             }),
         )
@@ -4293,7 +4300,7 @@ mod tests {
             "PUT",
             "/corporate_actions/1",
             serde_json::json!({
-                "listing_id": 1, "date": "2021-07-05", "action_type": "ShareSplit",
+                "listing_id": 1, "date": "2021-07-05", "action_type": "ShareSplit", "fraction_rule": "Exact",
                 "split_new_units": "2", "split_old_units": "3",
             }),
         )
@@ -4314,7 +4321,7 @@ mod tests {
             "PUT",
             "/corporate_actions/2",
             serde_json::json!({
-                "listing_id": 1, "date": "2021-09-27", "action_type": "ScripForScrip",
+                "listing_id": 1, "date": "2021-09-27", "action_type": "ScripForScrip", "fraction_rule": "Exact",
                 "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
             }),
         )
@@ -4346,6 +4353,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use crate::entities::corporate_action::FractionRule;
         use crate::entities::sell::{self, AllocationInput, SellBody};
         use crate::reports::open_parcels;
         use crate::test_support::ymd;
@@ -4442,6 +4450,7 @@ mod tests {
                                 listing_id: ListingId(1),
                                 date: ymd(2021, 6, 2),
                                 kind: corporate_action::ActionKind::ShareSplit {
+                                    fraction_rule: FractionRule::Exact,
                                     split_new_units: Decimal::from(new),
                                     split_old_units: Decimal::from(old),
                                 },

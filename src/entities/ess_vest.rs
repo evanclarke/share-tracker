@@ -323,7 +323,7 @@ impl From<VestError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::corporate_action::{ActionKind, CorporateAction};
+    use crate::entities::corporate_action::{ActionKind, CorporateAction, FractionRule};
     use crate::test_support::holding_account_row;
 
     use crate::entities::sell::{AllocationInput, SellBody};
@@ -969,6 +969,7 @@ mod tests {
                 listing_id: ListingId(1),
                 date: ymd(2025, 6, 1),
                 kind: ActionKind::ShareSplit {
+                    fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(1000),
                     split_old_units: Decimal::ONE,
                 },

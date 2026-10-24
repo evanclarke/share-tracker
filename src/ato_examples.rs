@@ -982,6 +982,7 @@ async fn td_2000_10_example_1_john_share_split() {
         "/corporate_actions/1",
         json!({
             "action_type": "ShareSplit",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "1992-07-01",
             "split_new_units": "2",
@@ -1035,6 +1036,7 @@ async fn td_2000_10_example_2_john_share_consolidation() {
         "/corporate_actions/1",
         json!({
             "action_type": "ShareSplit",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "1992-07-01",
             "split_new_units": "1",
@@ -1094,6 +1096,7 @@ async fn bonus_shares_example_35_chris_fully_paid_bonus_shares() {
         "/corporate_actions/1",
         json!({
             "action_type": "BonusIssue",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "1986-11-15",
             "bonus_units": "1",
@@ -1474,6 +1477,7 @@ async fn demergers_examples_30_32_anita_bhp_billiton_demerger() {
         "/corporate_actions/1",
         json!({
             "action_type": "Demerger",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2002-07-22",
             "demerger_listing_id": 2,
@@ -1577,6 +1581,7 @@ async fn takeovers_example_27_gunther_partial_scrip_for_scrip_rollover() {
         "/corporate_actions/1",
         json!({
             "action_type": "ScripForScrip",
+            "fraction_rule": "Exact",
             "listing_id": 1,
             "date": "2024-07-10",
             "scrip_listing_id": 2,
