@@ -38,9 +38,11 @@
 //! them and the main transaction could only change whether an advisory note
 //! fires, never a reported dollar figure.
 
+use crate::domain::adjustments::AcquiredUnits;
 use crate::domain::cost_base::{self, CostBaseAdjustment, ParcelRow};
 use crate::domain::deduction_destination::{DeductionDestination, DeductionRouting};
 use crate::domain::listing_identity::RenameHistory;
+use crate::domain::open_parcels;
 use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::closing_price::HeldTimeline;
 use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
@@ -676,6 +678,12 @@ struct DisposalInputs {
     amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     split_events: HashMap<ListingId, Vec<SplitEvent>>,
+    /// Each Sell allocation's units in its parcel's as-acquired basis, by
+    /// `(sale, parcel)` — the walk `realised_gains` costed it through
+    /// (`open_parcels::db_acquired_units_by_allocation`), so the itemised
+    /// adjustments reach the adjusted cost base it reported. `None` where a
+    /// Sell drew on one parcel twice: that pair is re-based on its own.
+    acquired_units: HashMap<(TradeId, TradeId), Option<AcquiredUnits>>,
     /// Each partial-rollover scrip closing Sell's cash-side apportionment
     /// `(numerator, denominator)` — keyed by the **Sell trade id**, and never
     /// looked up for a rights sale (whose `DisposalId::RightsSale` id is a
@@ -757,6 +765,13 @@ async fn load_disposal_inputs(
     let amit_events = cost_base::db_cost_base_reduction_events(&mut *conn, None).await?;
     let roc_events = corporate_action::db_return_of_capital_events(&mut *conn).await?;
     let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
+    let mut acquired_units = HashMap::new();
+    for a in open_parcels::db_acquired_units_by_allocation(&mut *conn).await? {
+        acquired_units
+            .entry((a.sale_trade_id, a.purchase_trade_id))
+            .and_modify(|units| *units = None)
+            .or_insert(Some(a.units));
+    }
 
     // A partial-rollover scrip closing Sell's cash terms, from the same join
     // `realised_gains` reads them off, through the same helper: the worksheet
@@ -791,6 +806,7 @@ async fn load_disposal_inputs(
         amit_events,
         roc_events,
         split_events,
+        acquired_units,
         scrip_cash,
         fee_sale_ids,
         fx,
@@ -850,11 +866,15 @@ fn disposal_parcel_rows(
                         .split_events
                         .get(&buy_row.listing_id)
                         .map_or(&[][..], |v| v);
-                    let units_acquired = corporate_action::as_acquired_quantity(
-                        UnitsAt::new(p.units, disposal.sale_date),
-                        splits,
-                        buy_row.date,
-                    );
+                    let units_acquired =
+                        match inputs.acquired_units.get(&(sale_id, p.purchase_trade_id)) {
+                            Some(Some(units)) => *units,
+                            _ => corporate_action::as_acquired_quantity(
+                                UnitsAt::new(p.units, disposal.sale_date),
+                                splits,
+                                buy_row.date,
+                            ),
+                        };
                     let amit = inputs
                         .amit_events
                         .get(&p.purchase_trade_id)
@@ -5667,6 +5687,7 @@ mod tests {
                 }],
             )]),
             split_events: HashMap::new(),
+            acquired_units: HashMap::new(),
             scrip_cash: HashMap::new(),
             fee_sale_ids: HashSet::new(),
             fx: FxRates::default(),

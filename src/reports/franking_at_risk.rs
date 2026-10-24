@@ -1042,4 +1042,258 @@ mod tests {
             "10000000000".parse::<Decimal>().unwrap()
         );
     }
+
+    mod properties {
+        use super::*;
+        use crate::reports::open_parcels;
+        use chrono::Days;
+        use proptest::prelude::*;
+        use serde_json::{Value, json};
+
+        /// One recorded fact in the listing's history, a week apart.
+        #[derive(Clone, Debug)]
+        enum Fact {
+            Buy { account: i64, units: i64 },
+            Sell { account: i64, pct: i64 },
+            Transfer { to_two: bool, pct: i64 },
+            Split { new: i64, old: i64 },
+            Bonus { units: i64, held: i64 },
+            Dividend { ex_offset: u64, credits: i64 },
+        }
+
+        fn fact() -> impl Strategy<Value = Fact> {
+            prop_oneof![
+                4 => (1i64..=2, 1i64..=900).prop_map(|(account, units)| Fact::Buy { account, units }),
+                3 => (1i64..=2, 1i64..=100).prop_map(|(account, pct)| Fact::Sell { account, pct }),
+                1 => (any::<bool>(), 1i64..=100).prop_map(|(to_two, pct)| Fact::Transfer { to_two, pct }),
+                1 => (1i64..=3, 1i64..=3).prop_map(|(new, old)| Fact::Split { new, old }),
+                1 => (1i64..=3, 1i64..=7).prop_map(|(units, held)| Fact::Bonus { units, held }),
+                3 => (0u64..=6, 1i64..=4_000).prop_map(|(ex_offset, credits)| Fact::Dividend { ex_offset, credits }),
+            ]
+        }
+
+        /// Wednesdays from 2024: one per fact, so a corporate action and the
+        /// trades either side of it never share a day.
+        fn wednesday(n: usize) -> NaiveDate {
+            ymd(2024, 1, 3) + Days::new(7 * n as u64)
+        }
+
+        /// `date`, or the next day XASX trades.
+        async fn trading(pool: &SqlitePool, mut date: NaiveDate) -> NaiveDate {
+            use chrono::{Datelike, Weekday};
+            loop {
+                let holiday: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM exchange_holidays WHERE mic = 'XASX' AND holiday_date = ?)",
+                )
+                .bind(date)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if !holiday && !matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+                    return date;
+                }
+                date = date + Days::new(1);
+            }
+        }
+
+        async fn held(pool: &SqlitePool, date: NaiveDate, account: i64) -> Vec<(i64, Decimal)> {
+            open_parcels::db_open_parcels(pool, Some(date))
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|p| p.holding_account_id == account)
+                .map(|p| (p.trade_id.0, p.remaining_quantity))
+                .collect()
+        }
+
+        /// `pct`% of each parcel to the whole unit (all of it at 100%).
+        fn allocations(parcels: &[(i64, Decimal)], pct: i64) -> Vec<Value> {
+            parcels
+                .iter()
+                .map(|(id, q)| {
+                    let take = if pct == 100 {
+                        *q
+                    } else {
+                        (*q * Decimal::from(pct) / Decimal::ONE_HUNDRED).floor()
+                    };
+                    (id, take)
+                })
+                .filter(|(_, q)| *q > Decimal::ZERO)
+                .map(|(id, q)| json!({ "purchase_trade_id": id, "quantity_allocated": q.to_string() }))
+                .collect()
+        }
+
+        fn total(allocs: &[Value]) -> Decimal {
+            allocs
+                .iter()
+                .map(|a| {
+                    a["quantity_allocated"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<Decimal>()
+                        .unwrap()
+                })
+                .sum()
+        }
+
+        fn sell_body(account: i64, date: NaiveDate, allocs: &[Value]) -> Value {
+            json!({
+                "listing_id": 1, "holding_account_id": account, "date": date,
+                "quantity": total(allocs).to_string(), "average_price": "2.50", "currency": "AUD",
+                "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1", "allocations": allocs,
+            })
+        }
+
+        /// Every dividend's walk outcome, `(disqualified units, credits at
+        /// risk)`, keyed by income id.
+        async fn walked(pool: &SqlitePool) -> HashMap<i64, (Decimal, Decimal)> {
+            db_franking_at_risk(pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|a| (a.income_id, (a.disqualified_units, a.credits_at_risk)))
+                .collect()
+        }
+
+        use std::collections::HashMap;
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// The what-if injects a contemplated Sell into each dividend's
+            /// walk, so recording that very Sell must change each dividend's
+            /// denial by exactly what the what-if said — and leave alone every
+            /// dividend it did not list — whatever buys, sales, transfers
+            /// between accounts, splits and bonus issues came before, on
+            /// whichever account the Sell draws from.
+            #[test]
+            fn a_franking_what_if_is_what_recording_the_sale_then_denies(
+                preference in any::<bool>(),
+                facts in prop::collection::vec(fact(), 1..=14),
+                sale_after in 0usize..=8,
+                account in 1i64..=2,
+                pct in 1i64..=100,
+                same_day_buy in prop::option::of(1i64..=500),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    test_support::listing(1).ticker("FRK").preference(preference).insert(&pool).await;
+                    test_support::listing(2).ticker("OTH").insert(&pool).await;
+                    let app = ApiClient::full(&pool);
+                    app.put_ok("/holding_accounts/2", &json!({ "name": "Second" })).await;
+                    let mut income_id = 0;
+                    let next_trade = || async {
+                        sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(id), 0) + 1 FROM trades")
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap()
+                    };
+                    for (n, fact) in facts.iter().enumerate() {
+                        let on = trading(&pool, wednesday(n)).await;
+                        match fact.clone() {
+                            Fact::Buy { account, units } => {
+                                app.put(format!("/trades/{}", next_trade().await), &json!({
+                                    "listing_id": 1, "holding_account_id": account, "date": on,
+                                    "trade_type": "Buy", "quantity": units.to_string(), "average_price": "2",
+                                    "currency": "AUD", "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1",
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::Sell { account, pct } => {
+                                let allocs = allocations(&held(&pool, on, account).await, pct);
+                                if !allocs.is_empty() {
+                                    app.post("/sells", &sell_body(account, on, &allocs))
+                                        .await
+                                        .expect_status(StatusCode::CREATED);
+                                }
+                            }
+                            Fact::Transfer { to_two, pct } => {
+                                let (from, to) = if to_two { (1, 2) } else { (2, 1) };
+                                let allocs = allocations(&held(&pool, on, from).await, pct);
+                                if !allocs.is_empty() {
+                                    app.post("/transfers", &json!({
+                                        "listing_id": 1, "date": on, "from_account_id": from, "to_account_id": to,
+                                        "allocations": allocs, "fee_allocations": [],
+                                    }))
+                                    .await
+                                    .expect_status(StatusCode::CREATED);
+                                }
+                            }
+                            Fact::Split { new, old } => {
+                                app.put(format!("/corporate_actions/{}", 100 + n), &json!({
+                                    "listing_id": 1, "date": on, "action_type": "ShareSplit",
+                                    "split_new_units": new.to_string(), "split_old_units": old.to_string(),
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::Bonus { units, held } => {
+                                app.put(format!("/corporate_actions/{}", 100 + n), &json!({
+                                    "listing_id": 1, "date": on, "action_type": "BonusIssue",
+                                    "bonus_units": units.to_string(), "bonus_held_units": held.to_string(),
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::Dividend { ex_offset, credits } => {
+                                // Ex-dates run ahead of the history, so the
+                                // contemplated sale lands inside some windows.
+                                income_id += 1;
+                                let ex = on + Days::new(7 * ex_offset);
+                                test_support::income(income_id, 1, ex + Days::new(21))
+                                    .fully_franked_credits(Decimal::from(credits))
+                                    .with(|i| i.ex_date = Some(ex))
+                                    .insert(&pool)
+                                    .await;
+                            }
+                        }
+                    }
+
+                    // After every recorded trade, so a Sell on it can take
+                    // any of the units then held.
+                    let sale_date = trading(&pool, wednesday(facts.len() - 1 + sale_after) + Days::new(1)).await;
+                    if let Some(units) = same_day_buy {
+                        app.put(format!("/trades/{}", next_trade().await), &json!({
+                            "listing_id": 1, "holding_account_id": account, "date": sale_date,
+                            "trade_type": "Buy", "quantity": units.to_string(), "average_price": "2",
+                            "currency": "AUD", "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1",
+                        }))
+                        .await
+                        .expect_status(StatusCode::CREATED);
+                    }
+                    let allocs = allocations(&held(&pool, sale_date, account).await, pct);
+                    if allocs.is_empty() {
+                        return Ok(());
+                    }
+                    let units = total(&allocs);
+                    let what_if: Vec<FrankingWhatIfAlert> = app
+                        .get_json(format!(
+                            "/reports/franking_at_risk/what_if?listing_id=1&sale_date={sale_date}&units={units}"
+                        ))
+                        .await;
+                    let before = walked(&pool).await;
+                    app.post("/sells", &sell_body(account, sale_date, &allocs))
+                        .await
+                        .expect_status(StatusCode::CREATED);
+                    let after = walked(&pool).await;
+
+                    let zero = (Decimal::ZERO, Decimal::ZERO);
+                    for id in 1..=income_id {
+                        let (q0, c0) = before.get(&id).copied().unwrap_or(zero);
+                        let (q1, c1) = after.get(&id).copied().unwrap_or(zero);
+                        match what_if.iter().find(|w| w.income_id == id) {
+                            Some(w) => {
+                                prop_assert_eq!(w.disqualified_units_now, q0, "dividend {} now", id);
+                                prop_assert_eq!(w.disqualified_units_after_sale, q1, "dividend {} after", id);
+                                prop_assert_eq!(w.additional_credits_at_risk, c1 - c0, "dividend {} credits", id);
+                            }
+                            None => prop_assert!(c1 <= c0, "dividend {} lost {} unforeseen", id, c1 - c0),
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }

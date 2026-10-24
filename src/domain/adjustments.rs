@@ -872,8 +872,11 @@ pub fn as_acquired_quantity(
     };
     // Only a figure at `Decimal`'s full precision can be a rounding; a
     // shorter one (an integer sale, a broker's 2-dp quantity) states its units
-    // exactly and keeps the exact fraction they re-base to.
-    if exact.den == Decimal::ONE || qty.quantity.mantissa().unsigned_abs() < FULL_PRECISION {
+    // exactly and keeps the exact fraction they re-base to. That holds even
+    // where reading it back divides by nothing: across a consolidation the
+    // later figure is the rounded one (284 units, 1-for-3, are 94.666…67), and
+    // multiplied back it lies past the parcel (284.000…001).
+    if qty.quantity.mantissa().unsigned_abs() < FULL_PRECISION {
         return exact;
     }
     // A quantity stated in a later basis is itself a rounded figure where
@@ -944,20 +947,48 @@ pub fn sold_in_acquired_units(
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> AcquiredUnits {
-    let mut sales: Vec<UnitsAt> = sales.into_iter().collect();
-    sales.sort_by_key(|sale| sale.basis);
+    let sales: Vec<UnitsAt> = sales.into_iter().collect();
+    acquired_units_of_sales(parcel, &sales, splits, acquired)
+        .into_iter()
+        .sum()
+}
+
+/// Each of `sales` out of `parcel` (acquired at `acquired`) in the parcel's
+/// as-acquired units, in the order given — the per-sale form of
+/// [`sold_in_acquired_units`], which is their sum. Every consumer that costs
+/// or counts one allocation reads it from here, so the sale that empties a
+/// parcel is costed as exactly the remainder the Sell check let it take: read
+/// on its own through [`as_acquired_quantity`], the last sale of 67 units
+/// after a 2-for-7 bonus issue came back a digit off the remainder, and the
+/// cost base it realised a digit off the one the open-parcels schedule
+/// carried for it.
+///
+/// The walk takes the sales in date order (a stable sort, so same-day sales
+/// keep the order given).
+pub fn acquired_units_of_sales(
+    parcel: AcquiredUnits,
+    sales: &[UnitsAt],
+    splits: &[SplitEvent],
+    acquired: NaiveDate,
+) -> Vec<AcquiredUnits> {
+    let mut order: Vec<usize> = (0..sales.len()).collect();
+    order.sort_by_key(|&i| sales[i].basis);
+    let mut out = vec![AcquiredUnits::ZERO; sales.len()];
     let mut sold = AcquiredUnits::ZERO;
-    for sale in sales {
+    for i in order {
+        let sale = sales[i];
         let left = parcel - sold;
-        sold += if left > AcquiredUnits::ZERO
+        let units = if left > AcquiredUnits::ZERO
             && split_adjusted_quantity(left, splits, acquired, sale.basis).quantity == sale.quantity
         {
             left
         } else {
             as_acquired_quantity(sale, splits, acquired)
         };
+        sold += units;
+        out[i] = units;
     }
-    sold
+    out
 }
 
 // ---------------------------------------------------------------------------

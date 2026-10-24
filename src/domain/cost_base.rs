@@ -1297,7 +1297,8 @@ pub async fn db_cost_base_reduction_events(
     let splits = adjustments::db_share_split_events(&mut *conn).await?;
     let rows = sqlx::query(
         "SELECT aa.trade_id, a.id AS amma_statement_id, a.tax_year_end_date, aa.quantity, \
-                a.cost_base_adjustment, t.listing_id, t.date AS trade_date \
+                a.cost_base_adjustment, t.listing_id, t.date AS trade_date, \
+                t.quantity AS trade_quantity \
          FROM amit_adjustments aa \
          JOIN amma_statements a ON a.id = aa.amma_statement_id \
          JOIN trades t ON t.id = aa.trade_id \
@@ -1333,29 +1334,37 @@ pub async fn db_cost_base_reduction_events(
         let splits = splits.get(&listing_id).map_or(&[][..], |v| v);
         // Units of the parcel already disposed of when the statement's year
         // ended, re-based back to the parcel's as-acquired basis (an
-        // allocation is in its own sale date's units).
-        let as_acquired =
-            |c: &UnitsConsumed| adjustments::as_acquired_quantity(c.quantity, splits, trade_date);
+        // allocation is in its own sale date's units) through the
+        // date-ordered walk, so the sale emptying the parcel counts exactly
+        // its remainder.
         let consumed = consumed.get(&trade_id).map_or(&[][..], |v| v);
+        let parcel = AcquiredUnits::new(parse_dec("quantity", row.try_get("trade_quantity")?)?);
+        let units = adjustments::acquired_units_of_sales(
+            parcel,
+            &consumed.iter().map(|c| c.quantity).collect::<Vec<_>>(),
+            splits,
+            trade_date,
+        );
+        let consumed: Vec<(&UnitsConsumed, AcquiredUnits)> = consumed.iter().zip(units).collect();
         let disposed_by_year_end = consumed
             .iter()
-            .filter(|c| c.disposal && c.date <= tax_year_end_date)
-            .map(as_acquired)
+            .filter(|(c, _)| c.disposal && c.date <= tax_year_end_date)
+            .map(|(_, units)| *units)
             .sum();
         // Of those, the units gone before the income year began: the
         // statement's coverage never reaches them.
         let year_start = fy_start(tax_year_end_date);
         let disposed_before_year_start = consumed
             .iter()
-            .filter(|c| c.disposal && c.date < year_start)
-            .map(as_acquired)
+            .filter(|(c, _)| c.disposal && c.date < year_start)
+            .map(|(_, units)| *units)
             .sum();
         // Whenever the move ran, up to the read's own cutoff: a view as at a
         // date before the move still sees those units in this parcel.
         let carried_out = consumed
             .iter()
-            .filter(|c| !c.disposal)
-            .map(as_acquired)
+            .filter(|(c, _)| !c.disposal)
+            .map(|(_, units)| *units)
             .sum();
         map.entry(trade_id).or_default().push(AmitReductionEvent {
             amma_statement_id,

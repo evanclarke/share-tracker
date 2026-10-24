@@ -71,6 +71,9 @@ pub(crate) use settlement::SettlementError;
 /// lives — so the re-export is test-gated.
 #[cfg(test)]
 pub(crate) use settlement::auto_settlement_date;
+/// A contemplated sale's settlement date, on the caller's connection — the
+/// pre-sale what-if asks it for the register date of units not yet sold.
+pub(crate) use settlement::auto_settlement_date_on;
 /// The `settlement-recompute` maintenance job (SCENARIOS S-04), registered in
 /// `infra::scheduler::registry` and deliberately unscheduled.
 pub use settlement::run_recompute;

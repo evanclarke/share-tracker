@@ -805,4 +805,334 @@ mod tests {
             .unwrap();
         assert_eq!(gains[0].cgt_discount_eligible_quantity, Decimal::ZERO);
     }
+
+    mod properties {
+        use super::*;
+        use crate::infra::id::TradeId;
+        use crate::reports::{open_parcels, realised_gains};
+        use chrono::{Datelike, Days, Weekday};
+        use proptest::prelude::*;
+        use serde_json::{Value, json};
+
+        #[derive(Clone, Debug)]
+        enum Fact {
+            Buy {
+                account: i64,
+                units: i64,
+                cents: i64,
+                brokerage: i64,
+            },
+            Sell {
+                account: i64,
+                pct: i64,
+            },
+            Transfer {
+                to_two: bool,
+                pct: i64,
+            },
+            Split {
+                new: i64,
+                old: i64,
+            },
+            Bonus {
+                units: i64,
+                held: i64,
+            },
+            ReturnOfCapital {
+                cents: i64,
+                record: bool,
+            },
+            Amma {
+                cents: i64,
+            },
+            Scrip {
+                new: i64,
+                old: i64,
+            },
+        }
+
+        fn fact() -> impl Strategy<Value = Fact> {
+            prop_oneof![
+                4 => (1i64..=2, 1i64..=900, 5i64..=5_000, 0i64..=2_000)
+                    .prop_map(|(account, units, cents, brokerage)| Fact::Buy { account, units, cents, brokerage }),
+                2 => (1i64..=2, 1i64..=100).prop_map(|(account, pct)| Fact::Sell { account, pct }),
+                1 => (any::<bool>(), 1i64..=100).prop_map(|(to_two, pct)| Fact::Transfer { to_two, pct }),
+                1 => (1i64..=3, 1i64..=3).prop_map(|(new, old)| Fact::Split { new, old }),
+                1 => (1i64..=3, 1i64..=7).prop_map(|(units, held)| Fact::Bonus { units, held }),
+                1 => (1i64..=300, any::<bool>()).prop_map(|(cents, record)| Fact::ReturnOfCapital { cents, record }),
+                1 => (-200i64..=200).prop_map(|cents| Fact::Amma { cents }),
+                1 => (1i64..=3, 1i64..=3).prop_map(|(new, old)| Fact::Scrip { new, old }),
+            ]
+        }
+
+        /// `date`, or the next day XASX trades.
+        async fn trading(pool: &SqlitePool, mut date: NaiveDate) -> NaiveDate {
+            loop {
+                let holiday: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM exchange_holidays WHERE mic = 'XASX' AND holiday_date = ?)",
+                )
+                .bind(date)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if !holiday && !matches!(date.weekday(), Weekday::Sat | Weekday::Sun) {
+                    return date;
+                }
+                date = date + Days::new(1);
+            }
+        }
+
+        async fn open(pool: &SqlitePool, date: NaiveDate) -> Vec<open_parcels::OpenParcel> {
+            open_parcels::db_open_parcels(pool, Some(date))
+                .await
+                .unwrap()
+        }
+
+        fn allocations(parcels: &[&open_parcels::OpenParcel], pct: i64) -> Vec<Value> {
+            parcels
+                .iter()
+                .map(|p| {
+                    let q = p.remaining_quantity;
+                    let take = if pct == 100 { q } else { (q * Decimal::from(pct) / Decimal::ONE_HUNDRED).floor() };
+                    (p.trade_id, take)
+                })
+                .filter(|(_, q)| *q > Decimal::ZERO)
+                .map(|(id, q)| json!({ "purchase_trade_id": id, "quantity_allocated": q.to_string() }))
+                .collect()
+        }
+
+        fn total(allocs: &[Value]) -> Decimal {
+            allocs
+                .iter()
+                .map(|a| {
+                    a["quantity_allocated"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<Decimal>()
+                        .unwrap()
+                })
+                .sum()
+        }
+
+        fn sell_body(
+            listing: i64,
+            account: i64,
+            date: NaiveDate,
+            price: Decimal,
+            allocs: &[Value],
+        ) -> Value {
+            json!({
+                "listing_id": listing, "holding_account_id": account, "date": date,
+                "quantity": total(allocs).to_string(), "average_price": price.to_string(), "currency": "AUD",
+                "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1", "allocations": allocs,
+            })
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// An unrealised gain is the gain the holding would realise if
+            /// sold that day at that price: selling every open parcel of each
+            /// (listing, account) row at the row's price, brokerage-free,
+            /// realises each parcel's cost base exactly as the open-parcels
+            /// schedule carried it, and in total the row's cost base, market
+            /// value, gain and discount-eligible units — after any history of
+            /// buys, sales, transfers, splits, bonus issues, returns of capital
+            /// (with or without a record date), AMMA statements and scrip
+            /// exchanges.
+            #[test]
+            fn an_unrealised_gain_is_what_selling_everything_that_day_realises(
+                amit in any::<bool>(),
+                facts in prop::collection::vec(fact(), 1..=12),
+                gap_days in 1u64..=500,
+                price_cents in (1i64..=9_000, 1i64..=9_000),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    test_support::listing(1).ticker("UNR").amit(amit).insert(&pool).await;
+                    test_support::listing(2).ticker("NEW").insert(&pool).await;
+                    let app = ApiClient::full(&pool);
+                    app.put_ok("/holding_accounts/2", &json!({ "name": "Second" })).await;
+                    let next_id = |table: &'static str| {
+                        let pool = pool.clone();
+                        async move {
+                            sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                                "SELECT COALESCE(MAX(id), 0) + 1 FROM {table}"
+                            )))
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap()
+                        }
+                    };
+                    let mut exchanged = false;
+                    let mut day = ymd(2021, 3, 3);
+                    for fact in &facts {
+                        day = trading(&pool, day + Days::new(40)).await;
+                        let on = day;
+                        let of = |account: i64, parcels: &[open_parcels::OpenParcel]| -> Vec<open_parcels::OpenParcel> {
+                            parcels.iter().filter(|p| p.listing_id == 1 && p.holding_account_id == account).cloned().collect()
+                        };
+                        match fact.clone() {
+                            Fact::Buy { account, units, cents, brokerage } if !exchanged => {
+                                app.put(format!("/trades/{}", next_id("trades").await), &json!({
+                                    "listing_id": 1, "holding_account_id": account, "date": on,
+                                    "trade_type": "Buy", "quantity": units.to_string(),
+                                    "average_price": Decimal::new(cents, 2).to_string(), "currency": "AUD",
+                                    "brokerage": Decimal::new(brokerage, 2).to_string(),
+                                    "brokerage_currency": "AUD", "fx_rate": "1",
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::Sell { account, pct } => {
+                                let parcels = of(account, &open(&pool, on).await);
+                                let allocs = allocations(&parcels.iter().collect::<Vec<_>>(), pct);
+                                if !allocs.is_empty() {
+                                    app.post("/sells", &sell_body(1, account, on, Decimal::new(321, 2), &allocs))
+                                        .await
+                                        .expect_status(StatusCode::CREATED);
+                                }
+                            }
+                            Fact::Transfer { to_two, pct } => {
+                                let (from, to) = if to_two { (1, 2) } else { (2, 1) };
+                                let parcels = of(from, &open(&pool, on).await);
+                                let allocs = allocations(&parcels.iter().collect::<Vec<_>>(), pct);
+                                if !allocs.is_empty() {
+                                    app.post("/transfers", &json!({
+                                        "listing_id": 1, "date": on, "from_account_id": from, "to_account_id": to,
+                                        "allocations": allocs, "fee_allocations": [],
+                                    }))
+                                    .await
+                                    .expect_status(StatusCode::CREATED);
+                                }
+                            }
+                            Fact::Split { new, old } if !exchanged => {
+                                app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
+                                    "listing_id": 1, "date": on, "action_type": "ShareSplit",
+                                    "split_new_units": new.to_string(), "split_old_units": old.to_string(),
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::Bonus { units, held } if !exchanged => {
+                                app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
+                                    "listing_id": 1, "date": on, "action_type": "BonusIssue",
+                                    "bonus_units": units.to_string(), "bonus_held_units": held.to_string(),
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::ReturnOfCapital { cents, record } if !amit && !exchanged => {
+                                let record_date = record.then(|| on - Days::new(5));
+                                app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
+                                    "listing_id": 1, "date": on, "action_type": "ReturnOfCapital",
+                                    "amount_per_unit": Decimal::new(cents, 2).to_string(), "currency": "AUD",
+                                    "record_date": record_date,
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                            }
+                            Fact::Amma { cents } if amit && !exchanged => {
+                                // The latest year ended before today's fact,
+                                // for the account holding the most at it.
+                                let year = if on.month() >= 7 { on.year() } else { on.year() - 1 };
+                                let year_end = ymd(year, 6, 30);
+                                let entered: bool = sqlx::query_scalar(
+                                    "SELECT EXISTS (SELECT 1 FROM amma_statements WHERE tax_year_end_date = ?)",
+                                )
+                                .bind(year_end)
+                                .fetch_one(&pool)
+                                .await
+                                .unwrap();
+                                let at_year_end = open(&pool, year_end).await;
+                                let held: Decimal = of(1, &at_year_end).iter().map(|p| p.remaining_quantity).sum();
+                                if !entered && held > Decimal::ZERO {
+                                    let id = next_id("amma_statements").await;
+                                    test_support::amma(id, 1)
+                                        .units(held)
+                                        .cost_base_adjustment(Decimal::new(cents, 2))
+                                        .with(|a| {
+                                            a.tax_year_end_date = year_end;
+                                            a.date_received = on;
+                                        })
+                                        .insert(&pool)
+                                        .await;
+                                    app.post(format!("/amma_statements/{id}/generate_adjustments"), &json!({}))
+                                        .await
+                                        .expect_status(StatusCode::CREATED);
+                                }
+                            }
+                            Fact::Scrip { new, old } if !exchanged => {
+                                let id = next_id("corporate_actions").await;
+                                app.put(format!("/corporate_actions/{id}"), &json!({
+                                    "listing_id": 1, "date": on, "action_type": "ScripForScrip",
+                                    "scrip_listing_id": 2, "scrip_new_units": new.to_string(),
+                                    "scrip_old_units": old.to_string(),
+                                }))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                                if open(&pool, on).await.iter().any(|p| p.listing_id == 1) {
+                                    app.post_empty(format!("/corporate_actions/{id}/exchange"))
+                                        .await
+                                        .expect_status(StatusCode::CREATED);
+                                    exchanged = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    let as_of = trading(&pool, day + Days::new(gap_days)).await;
+                    let prices = [Decimal::new(price_cents.0, 2), Decimal::new(price_cents.1, 2)];
+                    let resp = app
+                        .post("/portfolio/unrealised_gains", &json!({
+                            "prices": { "1": prices[0].to_string(), "2": prices[1].to_string() },
+                            "as_of_date": as_of,
+                        }))
+                        .await
+                        .expect_status(StatusCode::OK);
+                    let rows: Vec<UnrealisedGain> = resp.json();
+                    let schedule = open(&pool, as_of).await;
+
+                    for row in &rows {
+                        let price = if row.listing_id == 1 { prices[0] } else { prices[1] };
+                        let parcels: Vec<&open_parcels::OpenParcel> = schedule
+                            .iter()
+                            .filter(|p| p.listing_id == row.listing_id && p.holding_account_id == row.holding_account_id)
+                            .collect();
+                        let allocs = allocations(&parcels, 100);
+                        prop_assert_eq!(total(&allocs), row.quantity);
+                        let sell: Value = app
+                            .post("/sells", &sell_body(row.listing_id.0, row.holding_account_id.0, as_of, price, &allocs))
+                            .await
+                            .expect_status(StatusCode::CREATED)
+                            .json();
+                        let sell_id = TradeId(sell["id"].as_i64().unwrap());
+                        let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
+                        let disposal = realised.iter().find(|r| r.disposal.sell() == Some(sell_id)).unwrap();
+                        let mut eligible = Decimal::ZERO;
+                        for p in &parcels {
+                            let sold = disposal
+                                .parcels
+                                .iter()
+                                .find(|d| d.purchase_trade_id == p.trade_id)
+                                .unwrap();
+                            prop_assert_eq!(sold.cost_base, p.remaining_cost_base, "parcel {} cost base", p.trade_id);
+                            if sold.discount_eligible {
+                                eligible += sold.units;
+                            }
+                        }
+                        prop_assert_eq!(eligible, row.cgt_discount_eligible_quantity, "eligible units");
+                        let close = |a: Decimal, b: Decimal| (a - b).abs() <= Decimal::new(1, 20);
+                        prop_assert!(close(disposal.cost_base, row.total_cost_base),
+                            "cost base {} against {}", disposal.cost_base, row.total_cost_base);
+                        prop_assert_eq!(Some(disposal.proceeds), row.market_value);
+                        prop_assert!(close(disposal.capital_gain_loss, row.unrealised_gain_loss.unwrap()),
+                            "gain {} against {:?}", disposal.capital_gain_loss, row.unrealised_gain_loss);
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+    }
 }

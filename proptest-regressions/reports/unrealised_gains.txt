@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ded9afd7d8bf9ec32e481eadaced44d0cdc74fe927546a84efba1d96df2e2317 # shrinks to amit = false, facts = [Buy { account: 1, units: 67, cents: 2247, brokerage: 958 }, Buy { account: 1, units: 1, cents: 5, brokerage: 0 }, Bonus { units: 2, held: 7 }, Sell { account: 1, pct: 10 }], gap_days = 1, price_cents = (1, 1)
+cc 8db46ebcd778e9ec142ae312e8b69829c35dde99e258a9a012f76608853b06b0 # shrinks to amit = false, facts = [Buy { account: 2, units: 241, cents: 5, brokerage: 0 }, Sell { account: 2, pct: 70 }, Split { new: 2, old: 3 }, Buy { account: 2, units: 180, cents: 5, brokerage: 0 }, Scrip { new: 2, old: 1 }], gap_days = 1, price_cents = (1, 4802)

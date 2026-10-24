@@ -43,9 +43,9 @@
 
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::tax_year::tax_year_for;
-use crate::domain::{cgt_discount, open_parcels};
-use crate::entities::cgt_settings;
+use crate::domain::{cgt_discount, contemplated_disposal, open_parcels};
 use crate::entities::corporate_action::{self, AcquiredUnits, RocEvent};
+use crate::entities::{cgt_settings, trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{parse_dec, to_cents};
 use crate::infra::extract::Json;
@@ -330,13 +330,22 @@ fn unit_cohorts(
     sales: &[open_parcels::UnitsConsumed],
     splits: &[corporate_action::SplitEvent],
 ) -> Vec<Cohort> {
+    // Through the date-ordered walk, so the sale that empties the parcel
+    // takes exactly its remainder and no sliver is left "still held".
+    let units = corporate_action::acquired_units_of_sales(
+        parcel.quantity,
+        &sales.iter().map(|c| c.quantity).collect::<Vec<_>>(),
+        splits,
+        parcel.date,
+    );
     let mut cohorts: Vec<Cohort> = sales
         .iter()
-        .map(|c| Cohort {
+        .zip(units)
+        .map(|(c, units)| Cohort {
             left_on: Some(c.date),
             left_register_on: Some(c.settled),
             disposal: c.disposal,
-            units: corporate_action::as_acquired_quantity(c.quantity, splits, parcel.date),
+            units,
         })
         .filter(|c| c.units > AcquiredUnits::ZERO)
         .collect();
@@ -372,6 +381,11 @@ struct EventGain {
     amount: Decimal,
     discount_eligible: bool,
 }
+
+/// A contemplated (not yet recorded) sale's allocations, per parcel, in the
+/// shape the recorded ones are read in — what the pre-sale what-if hands the
+/// E10/G1/C2 walk so the payments after it see its units gone.
+type Contemplated = HashMap<TradeId, Vec<open_parcels::UnitsConsumed>>;
 
 /// The capital gains a parcel's AMIT adjustments and return-of-capital
 /// payments produce without any disposal of the parcel itself: CGT events
@@ -437,6 +451,7 @@ struct EventGain {
 async fn non_disposal_gains(
     conn: &mut sqlx::SqliteConnection,
     fx: &FxRates,
+    contemplated: &Contemplated,
 ) -> Result<Vec<EventGain>, sqlx::Error> {
     // Share splits/consolidations per listing: a payment after a split is per
     // *post-split* unit, and sold units are re-based back to as-acquired
@@ -473,10 +488,21 @@ async fn non_disposal_gains(
         let Some(events) = amit_events.get(&parcel.id) else {
             continue;
         };
+        // A contemplated sale's units join each statement's disposed-of
+        // counts exactly as recording it would (`contemplated_disposal`).
+        let mut events = events.clone();
+        for sale in contemplated.get(&parcel.id).map_or(&[][..], |v| v) {
+            let units = corporate_action::as_acquired_quantity(
+                sale.quantity,
+                splits_of(&splits, parcel.listing_id),
+                parcel.date,
+            );
+            events = contemplated_disposal::events_with_disposal(&events, units, sale.date);
+        }
         reductions
             .entry(parcel.id)
             .or_default()
-            .extend(events.iter().copied().map(Reduction::Amit));
+            .extend(events.into_iter().map(Reduction::Amit));
         order.push(parcel.id);
         parcels.insert(parcel.id, parcel);
     }
@@ -552,7 +578,12 @@ async fn non_disposal_gains(
     // ones do — their later reductions run against the replacement parcel's
     // own chain. Treating them as still held here would apply those later
     // events to them twice.
-    let sold = open_parcels::db_units_sold(&mut *conn, None).await?;
+    let mut sold = open_parcels::db_units_sold(&mut *conn, None).await?;
+    for (trade_id, sales) in contemplated {
+        sold.entry(*trade_id)
+            .or_default()
+            .extend(sales.iter().copied());
+    }
 
     let mut out = Vec::new();
     for trade_id in order {
@@ -761,7 +792,7 @@ pub(crate) async fn db_net_capital_gain_on(
 ) -> Result<Vec<NetCapitalGainYear>, sqlx::Error> {
     let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
-    let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
+    let buckets = gross_buckets(&mut *conn, &realised, &fx, &Contemplated::new()).await?;
     let opening = cgt_settings::db_opening_capital_loss(&mut *conn).await?;
 
     // Group the already-fetched disposals by tax year so each year row can
@@ -795,11 +826,13 @@ pub(crate) async fn db_net_capital_gain_on(
 /// AMMA/E10/G1 conversions below are map lookups, not one DB round-trip
 /// each) — the annual tax report shares one load across its whole document.
 /// Runs on the caller's read transaction, the same snapshot the realised
-/// rows came from.
+/// rows came from. `contemplated` is the what-if's not-yet-recorded sale,
+/// whose units the E10/G1/C2 walk treats as sold (empty everywhere else).
 async fn gross_buckets(
     conn: &mut sqlx::SqliteConnection,
     realised: &[super::realised_gains::RealisedGainLoss],
     fx: &FxRates,
+    contemplated: &Contemplated,
 ) -> Result<HashMap<i32, GrossBuckets>, sqlx::Error> {
     let mut buckets: HashMap<i32, GrossBuckets> = HashMap::new();
 
@@ -858,7 +891,7 @@ async fn gross_buckets(
     // (discount-eligible or not, per the holding period at the event date), so
     // losses can offset them and the discount applies to the eligible portion.
     // They are also reported on their own informational line per event type.
-    for gain in non_disposal_gains(&mut *conn, fx).await? {
+    for gain in non_disposal_gains(&mut *conn, fx, contemplated).await? {
         let b = buckets.entry(gain.tax_year).or_default();
         if gain.discount_eligible {
             b.discount_eligible += gain.amount;
@@ -1092,7 +1125,7 @@ pub(crate) async fn db_cgt_years(
 ) -> Result<Vec<i32>, sqlx::Error> {
     let realised = super::realised_gains::db_realised_gains_on(&mut *conn).await?;
     let fx = FxRates::load(&mut *conn).await?;
-    let buckets = gross_buckets(&mut *conn, &realised, &fx).await?;
+    let buckets = gross_buckets(&mut *conn, &realised, &fx, &Contemplated::new()).await?;
     let opening = cgt_settings::db_opening_capital_loss(&mut *conn).await?;
     Ok(net_years(buckets, opening, current_tax_year())
         .into_iter()
@@ -1122,7 +1155,7 @@ pub(crate) async fn db_cgt_summary_year(
     realised: &[super::realised_gains::RealisedGainLoss],
     fx: &FxRates,
 ) -> Result<Option<CgtSummaryYear>, sqlx::Error> {
-    let buckets = gross_buckets(&mut *conn, realised, fx).await?;
+    let buckets = gross_buckets(&mut *conn, realised, fx, &Contemplated::new()).await?;
     let amma_grossed_up: HashMap<i32, Decimal> = buckets
         .iter()
         .map(|(y, b)| (*y, b.amma_discount_grossed_up))
@@ -1315,6 +1348,114 @@ pub struct WhatIfResponse {
     pub years: Vec<ScenarioYear>,
 }
 
+/// Why a what-if's parcels could not be drawn — decided inside the read
+/// transaction, worded after it (the wording names the listing and account
+/// by label, which reads the pool).
+enum PickRefusal {
+    NeitherOrBoth,
+    NonPositive(TradeId),
+    NotOpen(TradeId),
+    Exceeds(TradeId, Decimal),
+    SumMismatch(Decimal),
+    OverOpen(Decimal),
+}
+
+impl PickRefusal {
+    async fn into_api_error(self, pool: &SqlitePool, req: &WhatIfRequest) -> ApiError {
+        match self.message(pool, req).await {
+            Ok(message) => ApiError::Unprocessable(message),
+            Err(e) => ApiError::from(e),
+        }
+    }
+
+    async fn message(self, pool: &SqlitePool, req: &WhatIfRequest) -> Result<String, sqlx::Error> {
+        // Name the account the request scoped the candidates to — otherwise
+        // an over-request reads as a claim about every unit held, which is
+        // false whenever another account holds more. Same wording as the
+        // optimiser's own over-request refusal.
+        let in_account = match req.holding_account_id {
+            Some(h) => format!(" in {}", labels::account_label(pool, h).await?),
+            None => String::new(),
+        };
+        Ok(match self {
+            PickRefusal::NeitherOrBoth => {
+                "supply either allocations or a strategy (exactly one)".to_owned()
+            }
+            PickRefusal::NonPositive(id) => {
+                format!("allocation units for parcel {id} must be positive")
+            }
+            PickRefusal::NotOpen(id) => format!(
+                "parcel {id} is not an open parcel of {}{in_account}",
+                labels::listing_label(pool, req.listing_id).await?
+            ),
+            PickRefusal::Exceeds(id, left) => {
+                format!("parcel {id} has only {left} unit(s) remaining")
+            }
+            PickRefusal::SumMismatch(total) => format!(
+                "the allocations sum to {total}, not the {} units sold",
+                req.units
+            ),
+            PickRefusal::OverOpen(open) => format!(
+                "only {open} unit(s) of {} are open{in_account}",
+                labels::listing_label(pool, req.listing_id).await?
+            ),
+        })
+    }
+}
+
+/// The parcels a what-if draws its units from: exactly one of the request's
+/// explicit allocations (each open as at the sale date, within what it has
+/// left, summing to the units sold) or a named strategy's picks.
+fn what_if_picks(
+    req: &WhatIfRequest,
+    candidates: &parcel_optimiser::Candidates,
+) -> Result<Vec<(TradeId, Decimal)>, PickRefusal> {
+    match (&req.allocations, req.strategy) {
+        (Some(_), Some(_)) | (None, None) => Err(PickRefusal::NeitherOrBoth),
+        (Some(allocs), None) => {
+            let mut remaining: HashMap<TradeId, Decimal> = candidates
+                .parcels()
+                .iter()
+                .map(|p| (p.trade_id, p.remaining_quantity))
+                .collect();
+            let mut picks = Vec::with_capacity(allocs.len());
+            for a in allocs {
+                if a.units <= Decimal::ZERO {
+                    return Err(PickRefusal::NonPositive(a.purchase_trade_id));
+                }
+                let Some(left) = remaining.get_mut(&a.purchase_trade_id) else {
+                    return Err(PickRefusal::NotOpen(a.purchase_trade_id));
+                };
+                if a.units > *left {
+                    return Err(PickRefusal::Exceeds(a.purchase_trade_id, *left));
+                }
+                *left -= a.units;
+                picks.push((a.purchase_trade_id, a.units));
+            }
+            let total: Decimal = picks.iter().map(|&(_, q)| q).sum();
+            if total != req.units {
+                return Err(PickRefusal::SumMismatch(total));
+            }
+            Ok(picks)
+        }
+        (None, Some(strategy)) => {
+            let open: Decimal = candidates
+                .parcels()
+                .iter()
+                .map(|p| p.remaining_quantity)
+                .sum();
+            if req.units > open {
+                return Err(PickRefusal::OverOpen(open));
+            }
+            // The per-unit price the strategy's gain orderings see.
+            let price = req.proceeds / req.units;
+            Ok(parcel_optimiser::allocate_strategy(
+                candidates, req.units, price, strategy,
+            ))
+        }
+    }
+}
+
 /// Dry-run a hypothetical disposal through the net-capital-gain computation:
 /// the disposal's gain/loss buckets are injected into its tax year and the
 /// netting walk re-run — nothing is written. The whole-of-income tax estimate
@@ -1338,9 +1479,9 @@ async fn what_if_handler(
     }
 
     // One read transaction across every input — the candidate parcels, the
-    // realised rows, the AMMA/E10/G1 walks, and the opening loss — so the
-    // dry-run works from a single consistent snapshot, exactly like the
-    // report proper. Everything after the commit is pure computation.
+    // realised rows, the AMMA/E10/G1 walks with and without the contemplated
+    // units, and the opening loss — so the dry-run works from a single
+    // consistent snapshot, exactly like the report proper.
     let mut tx = db::read_tx(&pool).await.map_err(ApiError::from)?;
     // Candidates as at the hypothetical disposal's own date, not today: a
     // parcel acquired after it can't be sold on it (the Sell path refuses
@@ -1355,94 +1496,44 @@ async fn what_if_handler(
     )
     .await
     .map_err(ApiError::from)?;
+    let picks = match what_if_picks(&req, &candidates) {
+        Ok(picks) => picks,
+        Err(refusal) => {
+            tx.commit().await.map_err(ApiError::from)?;
+            return Err(refusal.into_api_error(&pool, &req).await);
+        }
+    };
     let realised = super::realised_gains::db_realised_gains_on(&mut tx)
         .await
         .map_err(ApiError::from)?;
     let fx = FxRates::load(&mut *tx).await.map_err(ApiError::from)?;
-    let buckets = gross_buckets(&mut tx, &realised, &fx)
+    let buckets = gross_buckets(&mut tx, &realised, &fx, &Contemplated::new())
+        .await
+        .map_err(ApiError::from)?;
+    // The contemplated units leave their parcels on `date` (and the register
+    // on its settlement date, which the C2 test asks), so a payment after it
+    // no longer reaches them — a G1 or E10 gain they would have taken is not
+    // the year's once they are sold, and a C2 one may be.
+    let settled = trade::auto_settlement_date_on(&mut tx, None, req.listing_id, req.date).await?;
+    let mut contemplated = Contemplated::new();
+    for &(trade_id, units) in &picks {
+        contemplated
+            .entry(trade_id)
+            .or_default()
+            .push(open_parcels::UnitsConsumed {
+                date: req.date,
+                settled,
+                quantity: corporate_action::UnitsAt::new(units, req.date),
+                disposal: true,
+            });
+    }
+    let with_buckets = gross_buckets(&mut tx, &realised, &fx, &contemplated)
         .await
         .map_err(ApiError::from)?;
     let opening = cgt_settings::db_opening_capital_loss(&mut *tx)
         .await
         .map_err(ApiError::from)?;
     tx.commit().await.map_err(ApiError::from)?;
-
-    // Exactly one of explicit allocations / a named strategy.
-    let picks: Vec<(TradeId, Decimal)> = match (&req.allocations, req.strategy) {
-        (Some(_), Some(_)) | (None, None) => {
-            return Err(ApiError::Unprocessable(
-                "supply either allocations or a strategy (exactly one)".to_owned(),
-            ));
-        }
-        (Some(allocs), None) => {
-            let mut remaining: HashMap<TradeId, Decimal> = candidates
-                .parcels()
-                .iter()
-                .map(|p| (p.trade_id, p.remaining_quantity))
-                .collect();
-            let mut picks = Vec::with_capacity(allocs.len());
-            for a in allocs {
-                if a.units <= Decimal::ZERO {
-                    return Err(ApiError::Unprocessable(format!(
-                        "allocation units for parcel {} must be positive",
-                        a.purchase_trade_id
-                    )));
-                }
-                let Some(left) = remaining.get_mut(&a.purchase_trade_id) else {
-                    let in_account = match req.holding_account_id {
-                        Some(h) => format!(" in {}", labels::account_label(&pool, h).await?),
-                        None => String::new(),
-                    };
-                    return Err(ApiError::Unprocessable(format!(
-                        "parcel {} is not an open parcel of {}{in_account}",
-                        a.purchase_trade_id,
-                        labels::listing_label(&pool, req.listing_id).await?
-                    )));
-                };
-                if a.units > *left {
-                    return Err(ApiError::Unprocessable(format!(
-                        "parcel {} has only {left} unit(s) remaining",
-                        a.purchase_trade_id
-                    )));
-                }
-                *left -= a.units;
-                picks.push((a.purchase_trade_id, a.units));
-            }
-            let total: Decimal = picks.iter().map(|&(_, q)| q).sum();
-            if total != req.units {
-                return Err(ApiError::Unprocessable(format!(
-                    "the allocations sum to {total}, not the {} units sold",
-                    req.units
-                )));
-            }
-            picks
-        }
-        (None, Some(strategy)) => {
-            let open: Decimal = candidates
-                .parcels()
-                .iter()
-                .map(|p| p.remaining_quantity)
-                .sum();
-            if req.units > open {
-                // Name the account the request scoped the candidates to —
-                // otherwise the refusal reads as a claim about every unit
-                // held, which is false whenever another account holds more.
-                // Same wording as the allocations branch above and the
-                // optimiser's own over-request refusal.
-                let in_account = match req.holding_account_id {
-                    Some(h) => format!(" in {}", labels::account_label(&pool, h).await?),
-                    None => String::new(),
-                };
-                return Err(ApiError::Unprocessable(format!(
-                    "only {open} unit(s) of {} are open{in_account}",
-                    labels::listing_label(&pool, req.listing_id).await?
-                )));
-            }
-            // The per-unit price the strategy's gain orderings see.
-            let price = req.proceeds / req.units;
-            parcel_optimiser::allocate_strategy(&candidates, req.units, price, strategy)
-        }
-    };
 
     let (allocations, totals) =
         parcel_optimiser::disposal_figures(&candidates, &picks, req.proceeds, req.units)
@@ -1453,9 +1544,9 @@ async fn what_if_handler(
     // a year with no recorded activity still yields a row (with the correct
     // brought-forward chain from earlier years).
     let tax_year = tax_year_for(req.date);
-    let mut without = buckets.clone();
+    let mut without = buckets;
     without.entry(tax_year).or_default();
-    let mut with = buckets;
+    let mut with = with_buckets;
     let b = with.entry(tax_year).or_default();
     // At the cent per parcel, as the recorded Sell's own gains will be netted
     // (`realised_gains::parcels_at_the_cent`) — so the preview is the figure
@@ -1473,12 +1564,23 @@ async fn what_if_handler(
     b.other += cents.non_discountable_gain;
     b.losses += cents.capital_loss;
 
+    // Both rows are the worksheet's year record, so both carry the year's
+    // recorded disposals as the report does; the hypothetical one is not a
+    // recorded disposal, and is `hypothetical` + `allocations` instead.
+    let recorded: Vec<_> = realised
+        .iter()
+        .filter(|r| tax_year_for(r.sale_date) == tax_year)
+        .map(|r| r.at_the_cent())
+        .collect();
     let year_row = |rows: Vec<NetCapitalGainYear>, scenario: &str| {
         rows.into_iter()
             .find(|y| y.tax_year == tax_year)
-            .map(|year| ScenarioYear {
-                scenario: scenario.to_owned(),
-                year,
+            .map(|mut year| {
+                year.disposals = recorded.clone();
+                ScenarioYear {
+                    scenario: scenario.to_owned(),
+                    year,
+                }
             })
             .expect("the disposal year was ensured in the buckets")
     };
@@ -1509,7 +1611,7 @@ mod tests {
         amma, cgt_settings, corporate_action, demerger, holding_account, rba_fx_rate,
         scrip_exchange, trade,
     };
-    use crate::infra::{date, decimal};
+    use crate::infra::{date, decimal, fx};
     use crate::reports;
     use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
@@ -5865,6 +5967,112 @@ mod tests {
         }
     }
 
+    /// A return of capital recorded ahead of its payment, with a sale
+    /// contemplated before it: the sold units no longer receive it, so the
+    /// what-if's "with" year carries only the G1 gain of the units still held
+    /// on the payment date — 2 × 51c against their $1.00, not 3 × 51c
+    /// against $1.50 — as the worksheet does once the Sell is entered.
+    #[tokio::test]
+    async fn api_what_if_takes_a_later_return_of_capital_off_the_units_it_sells() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ROC").await;
+        let bought = NaiveDate::from_ymd_opt(2022, 8, 3).unwrap();
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            ListingId(1),
+            bought,
+            dec("3"),
+            dec("0.50"),
+        )
+        .await;
+        corporate_action::db_upsert(
+            &pool,
+            &corporate_action::CorporateAction {
+                id: 1,
+                listing_id: ListingId(1),
+                date: NaiveDate::from_ymd_opt(2023, 6, 30).unwrap(),
+                kind: corporate_action::ActionKind::ReturnOfCapital {
+                    amount_per_unit: dec("0.51"),
+                    currency: "AUD".into(),
+                    record_date: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "1", "proceeds": "19.33",
+                "date": "2022-08-03", "strategy": "fifo",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(r.years[0].year.cgt_event_g1_gain, dec("0.03"));
+        assert_eq!(r.years[1].year.cgt_event_g1_gain, dec("0.02"));
+        // 18.83 on the sale (19.33 − 0.50) and the 0.02 G1 gain.
+        assert_eq!(r.years[1].year.other_gains, dec("18.85"));
+    }
+
+    /// Each scenario row is the worksheet's own year record, recorded
+    /// disposals included — they were always empty.
+    #[tokio::test]
+    async fn api_what_if_rows_list_the_years_recorded_disposals() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "VAS").await;
+        let d = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        insert_trade(
+            &pool,
+            1,
+            trade::TradeType::Buy,
+            ListingId(1),
+            d(2024, 1, 2),
+            dec("200"),
+            dec("10"),
+        )
+        .await;
+        insert_trade(
+            &pool,
+            2,
+            trade::TradeType::Sell,
+            ListingId(1),
+            d(2026, 3, 2),
+            dec("50"),
+            dec("12"),
+        )
+        .await;
+        allocate(&pool, 1, 2, 1, dec("50")).await;
+        let (status, body) = post_what_if(
+            pool.clone(),
+            serde_json::json!({
+                "listing_id": 1, "units": "10", "proceeds": "150",
+                "date": "2026-06-15", "strategy": "fifo",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let r: WhatIfResponse = serde_json::from_slice(&body).unwrap();
+        let worksheet = db_net_capital_gain(&pool).await.unwrap();
+        let recorded = &worksheet
+            .iter()
+            .find(|y| y.tax_year == 2026)
+            .unwrap()
+            .disposals;
+        assert_eq!(recorded.len(), 1);
+        for row in &r.years {
+            assert_eq!(
+                serde_json::to_value(&row.year.disposals).unwrap(),
+                serde_json::to_value(recorded).unwrap(),
+                "{}",
+                row.scenario
+            );
+        }
+    }
+
     mod properties {
         use super::*;
         use proptest::prelude::*;
@@ -5985,6 +6193,314 @@ mod tests {
                     prop_assert!(previous.is_some_and(|last| last >= through));
                 }
                 prop_assert_eq!(loss_total, applied_total + brought);
+            }
+        }
+
+        /// The dates a what-if's history and its contemplated sale are drawn
+        /// from: either side of the AMMA statements' year ends, of the split
+        /// and of the return of capital, and a year past every acquisition.
+        const DATES: [(i32, u32, u32); 10] = [
+            (2022, 8, 3),
+            (2023, 3, 15),
+            (2023, 6, 30),
+            (2023, 7, 3),
+            (2023, 11, 8),
+            (2024, 4, 10),
+            (2024, 6, 28),
+            (2024, 7, 2),
+            (2025, 2, 12),
+            (2025, 7, 16),
+        ];
+
+        fn on(i: usize) -> NaiveDate {
+            let (y, m, d) = DATES[i];
+            ymd(y, m, d)
+        }
+
+        fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
+            NaiveDate::from_ymd_opt(y, m, d).unwrap()
+        }
+
+        /// A contemplated sale's parcels: a named strategy, or `pct`% of
+        /// each open parcel taken by hand.
+        #[derive(Clone, Debug)]
+        enum Picks {
+            Strategy(parcel_optimiser::Strategy),
+            Explicit(u32),
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// The what-if previews the disposal year "with" a contemplated
+            /// sale, so recording that very Sell must make the worksheet
+            /// show exactly the previewed year, and the realised-gains
+            /// report exactly the previewed disposal — whatever the parcels'
+            /// currency, AMMA statements, return of capital, split, earlier
+            /// gains and losses and opening loss, and wherever the sale date
+            /// falls against them. Its "without" year is the worksheet as it
+            /// stood.
+            #[test]
+            fn a_what_if_is_the_worksheet_once_its_sale_is_recorded(
+                usd in any::<bool>(),
+                amit in any::<bool>(),
+                buys in prop::collection::vec((0usize..=8, 1i64..=400, 50i64..=5_000, 0i64..=2_000), 1..=4),
+                split in prop::option::of((0usize..=9, 1i64..=3, 1i64..=3)),
+                roc in prop::option::of((0usize..=9, 1i64..=300, any::<bool>())),
+                amma in prop::collection::vec((2023i32..=2025, -200i64..=200), 0..=2),
+                earlier in prop::option::of((0usize..=9, 1u32..=100, 10i64..=6_000)),
+                opening_cents in prop::option::of(1i64..=500_000),
+                sale_on in 0usize..=9,
+                picks in prop_oneof![
+                    prop::sample::select(parcel_optimiser::ALL_STRATEGIES.to_vec()).prop_map(Picks::Strategy),
+                    (1u32..=100).prop_map(Picks::Explicit),
+                ],
+                sale_cents in 10i64..=6_000,
+                brokerage_cents in 0i64..=3_000,
+            ) {
+                use crate::entities::amit_adjustment_generation::{self as generation, GenerateBody};
+                use serde_json::{Value, json};
+
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    let app = ApiClient::full(&pool);
+                    let currency = if usd { "USD" } else { "AUD" };
+                    let mut l = test_support::listing(1).ticker("WIF").amit(amit && roc.is_none());
+                    if usd {
+                        l = l.mic("XNYS").currency("USD");
+                    }
+                    l.insert(&pool).await;
+                    if usd {
+                        // A rate for every month the history can touch,
+                        // different each month.
+                        for (i, month) in (2022..=2026)
+                            .flat_map(|y| (1..=12).map(move |m| format!("{y}-{m:02}")))
+                            .enumerate()
+                        {
+                            sqlx::query("INSERT INTO rba_fx_rates (currency, month, rate) VALUES ('USD', ?, ?)")
+                                .bind(month)
+                                .bind(decimal::Money(Decimal::new(6_000 + 37 * i as i64, 4)))
+                                .execute(&pool)
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    let sell_body = |date: NaiveDate, cents: i64, brokerage: i64, allocs: &[(i64, Decimal)]| json!({
+                        "listing_id": 1, "holding_account_id": 1, "date": date,
+                        "quantity": allocs.iter().map(|(_, q)| *q).sum::<Decimal>().to_string(),
+                        "average_price": Decimal::new(cents, 2).to_string(), "currency": currency,
+                        "brokerage": Decimal::new(brokerage, 2).to_string(), "brokerage_currency": currency,
+                        "fx_rate": "1",
+                        "allocations": allocs.iter().map(|(id, q)| json!({
+                            "purchase_trade_id": id, "quantity_allocated": q.to_string(),
+                        })).collect::<Vec<_>>(),
+                    });
+
+                    let mut buys = buys;
+                    buys.sort_by_key(|b| b.0);
+                    for (i, (d, units, cents, brokerage)) in buys.iter().enumerate() {
+                        app.put(format!("/trades/{}", i + 1), &json!({
+                            "listing_id": 1, "holding_account_id": 1, "date": on(*d),
+                            "trade_type": "Buy", "quantity": units.to_string(),
+                            "average_price": Decimal::new(*cents, 2).to_string(), "currency": currency,
+                            "brokerage": Decimal::new(*brokerage, 2).to_string(),
+                            "brokerage_currency": currency, "fx_rate": "1",
+                        }))
+                        .await
+                        .expect_status(StatusCode::CREATED);
+                    }
+                    if let Some((d, new, old)) = split {
+                        app.put("/corporate_actions/1", &json!({
+                            "listing_id": 1, "date": on(d), "action_type": "ShareSplit",
+                            "split_new_units": new.to_string(), "split_old_units": old.to_string(),
+                        }))
+                        .await
+                        .expect_status(StatusCode::CREATED);
+                    }
+                    if let Some((d, cents, record)) = roc {
+                        // With a record date a week before payment, units sold
+                        // between the two end a right to receive (C2).
+                        let record_date = record.then(|| on(d) - chrono::Days::new(7));
+                        app.put("/corporate_actions/2", &json!({
+                            "listing_id": 1, "date": on(d), "action_type": "ReturnOfCapital",
+                            "amount_per_unit": Decimal::new(cents, 2).to_string(), "currency": currency,
+                            "record_date": record_date,
+                        }))
+                        .await
+                        .expect_status(StatusCode::CREATED);
+                    }
+                    let open = |date: NaiveDate| {
+                        let pool = pool.clone();
+                        async move {
+                            reports::open_parcels::db_open_parcels(&pool, Some(date))
+                                .await
+                                .unwrap()
+                                .into_iter()
+                                .map(|p| (p.trade_id.0, p.remaining_quantity))
+                                .collect::<Vec<_>>()
+                        }
+                    };
+                    let take = |parcels: Vec<(i64, Decimal)>, pct: u32| -> Vec<(i64, Decimal)> {
+                        parcels
+                            .into_iter()
+                            .map(|(id, q)| {
+                                let t = if pct == 100 { q } else { (q * Decimal::from(pct) / Decimal::ONE_HUNDRED).floor() };
+                                (id, t)
+                            })
+                            .filter(|(_, q)| *q > Decimal::ZERO)
+                            .collect()
+                    };
+                    // Never after the contemplated sale: a what-if dated
+                    // before a recorded sale offers the units sold since (they
+                    // were there to sell then), which a Sell on that date
+                    // would then over-allocate.
+                    let earlier = earlier.map(|(d, pct, cents)| (d.min(sale_on), pct, cents));
+                    if let Some((d, pct, cents)) = earlier {
+                        let allocs = take(open(on(d)).await, pct);
+                        if !allocs.is_empty() {
+                            app.post("/sells", &sell_body(on(d), cents, 995, &allocs))
+                                .await
+                                .expect_status(StatusCode::CREATED);
+                        }
+                    }
+                    if amit && roc.is_none() {
+                        for (i, (year, cents)) in amma.iter().enumerate() {
+                            let year_end = ymd(*year, 6, 30);
+                            let held: Decimal = open(year_end).await.iter().map(|(_, q)| *q).sum();
+                            if held.is_zero() {
+                                continue;
+                            }
+                            let id = i as i64 + 1;
+                            test_support::amma(id, 1)
+                                .units(held)
+                                .cost_base_adjustment(Decimal::new(*cents, 2))
+                                .with(|a| {
+                                    a.tax_year_end_date = year_end;
+                                    a.date_received = year_end + chrono::Days::new(70);
+                                    a.currency = currency.into();
+                                })
+                                .insert(&pool)
+                                .await;
+                            generation::db_generate(&pool, id, &GenerateBody::default()).await.unwrap();
+                        }
+                    }
+                    if let Some(c) = opening_cents {
+                        app.put("/cgt_settings/1", &json!({ "opening_capital_loss": Decimal::new(c, 2).to_string() }))
+                            .await;
+                    }
+
+                    let date = on(sale_on);
+                    // A sale inside a year whose AMMA statement is already
+                    // entered contradicts the statement's year-end holding,
+                    // and recording it re-spreads the statement's rows over
+                    // that year's *other* disposals too, which the what-if
+                    // does not re-cost: only the contemplated disposal's own
+                    // figures are previewed then, so there must be no other.
+                    let statement_reaches = amit
+                        && roc.is_none()
+                        && amma.iter().any(|(year, _)| date <= ymd(*year, 6, 30));
+                    prop_assume!(!(statement_reaches && earlier.is_some()));
+                    let candidates = open(date).await;
+                    let units_open: Decimal = candidates.iter().map(|(_, q)| *q).sum();
+                    if units_open.is_zero() {
+                        return Ok(());
+                    }
+                    let (units, explicit) = match &picks {
+                        Picks::Strategy(_) => {
+                            let pct = 1 + (sale_cents % 100) as u32;
+                            let units = take(vec![(0, units_open)], pct).first().map(|(_, q)| *q);
+                            (units, None)
+                        }
+                        Picks::Explicit(pct) => {
+                            let allocs = take(candidates, *pct);
+                            (Some(allocs.iter().map(|(_, q)| *q).sum()), Some(allocs))
+                        }
+                    };
+                    let Some(units) = units.filter(|u| *u > Decimal::ZERO) else {
+                        return Ok(());
+                    };
+                    let price = Decimal::new(sale_cents, 2);
+                    let brokerage = Decimal::new(brokerage_cents, 2);
+                    // The proceeds the realised-gains report will convert the
+                    // recorded Sell's contract-note total to.
+                    let native = price * units - brokerage;
+                    let rate: Decimal = if usd {
+                        let month = format!("{}", date.format("%Y-%m"));
+                        let r: String = sqlx::query_scalar("SELECT rate FROM rba_fx_rates WHERE month = ?")
+                            .bind(month)
+                            .fetch_one(&pool)
+                            .await
+                            .unwrap();
+                        r.parse().unwrap()
+                    } else {
+                        Decimal::ONE
+                    };
+                    let proceeds = fx::apply_rate(native, rate);
+                    prop_assume!(proceeds >= Decimal::ZERO);
+
+                    let mut request = json!({
+                        "listing_id": 1, "units": units.to_string(),
+                        "proceeds": proceeds.to_string(), "date": date,
+                    });
+                    match (&picks, &explicit) {
+                        (Picks::Strategy(s), _) => request["strategy"] = serde_json::to_value(s).unwrap(),
+                        (_, Some(allocs)) => {
+                            request["allocations"] = allocs
+                                .iter()
+                                .map(|(id, q)| json!({ "purchase_trade_id": id, "units": q.to_string() }))
+                                .collect();
+                        }
+                        _ => unreachable!(),
+                    }
+                    let before = db_net_capital_gain(&pool).await.unwrap();
+                    let resp = app.post("/portfolio/net_capital_gain/what_if", &request).await;
+                    prop_assert_eq!(resp.status, StatusCode::OK, "{}", resp.text());
+                    let what_if: WhatIfResponse = resp.json();
+                    prop_assert_eq!(what_if.tax_year, tax_year_for(date));
+
+                    let year = |rows: &[NetCapitalGainYear]| -> Value {
+                        serde_json::to_value(rows.iter().find(|y| y.tax_year == what_if.tax_year)).unwrap()
+                    };
+                    let without = serde_json::to_value(&what_if.years[0].year).unwrap();
+                    if before.iter().any(|y| y.tax_year == what_if.tax_year) {
+                        prop_assert_eq!(&without, &year(&before), "without");
+                    }
+
+                    let allocs: Vec<(i64, Decimal)> =
+                        what_if.allocations.iter().map(|a| (a.purchase_trade_id.0, a.units)).collect();
+                    // The Sell it rehearses states `units` and these
+                    // allocations, which it refuses unless they add up.
+                    prop_assert_eq!(allocs.iter().map(|(_, q)| *q).sum::<Decimal>(), units);
+                    let resp = app.post("/sells", &sell_body(date, sale_cents, brokerage_cents, &allocs)).await;
+                    prop_assert_eq!(resp.status, StatusCode::CREATED, "{}", resp.text());
+                    let sell_id = TradeId(resp.json::<Value>()["id"].as_i64().unwrap());
+
+                    let realised = realised_gains::db_realised_gains(&pool).await.unwrap();
+                    let row = realised.iter().find(|r| r.disposal.sell() == Some(sell_id)).unwrap();
+                    for p in &what_if.allocations {
+                        let actual = row
+                            .parcels
+                            .iter()
+                            .find(|d| d.purchase_trade_id == p.purchase_trade_id)
+                            .unwrap();
+                        prop_assert_eq!(actual.units, p.units);
+                        prop_assert_eq!(actual.cost_base, p.cost_base, "parcel {} cost base", p.purchase_trade_id);
+                        prop_assert_eq!(actual.proceeds, p.proceeds, "parcel {} proceeds", p.purchase_trade_id);
+                        prop_assert_eq!(actual.discount_eligible, p.discount_eligible);
+                    }
+                    prop_assert_eq!(row.proceeds, what_if.hypothetical.proceeds);
+                    prop_assert_eq!(row.cost_base, what_if.hypothetical.cost_base);
+
+                    // The recorded Sell is now one of the year's disposals;
+                    // the what-if showed it as `hypothetical` instead.
+                    let mut after = db_net_capital_gain(&pool).await.unwrap();
+                    for y in &mut after {
+                        y.disposals.retain(|d| d.disposal.sell() != Some(sell_id));
+                    }
+                    let with = serde_json::to_value(&what_if.years[1].year).unwrap();
+                    prop_assert_eq!(&with, &year(&after), "with");
+                    Ok(())
+                })?;
             }
         }
     }

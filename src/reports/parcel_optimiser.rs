@@ -37,12 +37,11 @@ use crate::domain::cgt_discount::discount_eligible;
 use crate::domain::cost_base::ParcelRow;
 use crate::domain::{contemplated_disposal, open_parcels};
 use crate::entities::closing_price::{self, SharedFetcher};
-use crate::infra::decimal::mul_div;
 use crate::infra::extract::{Json, Query};
 use crate::infra::http::ApiError;
 use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::{date, db};
-use crate::reports::{labels, taxpayer};
+use crate::reports::{labels, realised_gains, taxpayer};
 use axum::Extension;
 use axum::extract::State;
 use chrono::NaiveDate;
@@ -260,7 +259,9 @@ fn allocate_parcels(
     };
     match strategy {
         Strategy::Fifo => order.sort_by(|a, b| fifo(a, b)),
-        Strategy::MinGain => return min_gain_picks(parcels, units, price, sale_date),
+        Strategy::MinGain => {
+            return adding_up_to(min_gain_picks(parcels, units, price, sale_date), units);
+        }
         Strategy::MaxDiscount => {
             // Discount-eligible gains keep the discountable proportion at
             // 100%; losses don't enter the gain at all; a non-eligible gain
@@ -300,6 +301,29 @@ fn allocate_parcels(
         let take = p.remaining_quantity.min(left);
         picks.push((p.trade_id, take));
         left -= take;
+    }
+    adding_up_to(picks, units)
+}
+
+/// `picks` with the last one corrected so they sum to exactly `units`, summed
+/// in order as the Sell's own check sums its allocations. A parcel's
+/// remainder after a split or consolidation is a full-precision figure, and
+/// taking it out of `units` rounds: 297 units drawn from remainders of
+/// 25.333…, 43.666… and 101.333… otherwise came to 296.999…99, and the Sell
+/// the optimiser proposed was refused for not adding up. Only the last pick
+/// (the partial one) moves, and only by a rounding's worth — never to cover
+/// units the candidates do not hold.
+fn adding_up_to(mut picks: Vec<(TradeId, Decimal)>, units: Decimal) -> Vec<(TradeId, Decimal)> {
+    // Far below any quantity a broker states, far above the walk's residue.
+    let rounding = units.abs() * Decimal::new(1, 20);
+    for _ in 0..4 {
+        let sum: Decimal = picks.iter().map(|&(_, q)| q).sum();
+        let Some(last) = picks.last_mut() else { break };
+        let residue = units - sum;
+        if residue.is_zero() || residue.abs() > rounding {
+            break;
+        }
+        last.1 += residue;
     }
     picks
 }
@@ -498,12 +522,17 @@ pub fn disposal_figures(
     let mut allocations = Vec::with_capacity(picks.len());
     let mut totals = DisposalTotals::default();
     let mut units_so_far = Decimal::ZERO;
-    let mut proceeds_so_far = Decimal::ZERO;
+    let mut entitled = Decimal::ZERO;
     for &(trade_id, units) in picks {
         let p = by_id[&trade_id];
         units_so_far += units;
-        let proceeds = mul_div(&[total_proceeds, units_so_far], total_units) - proceeds_so_far;
-        proceeds_so_far += proceeds;
+        // The recorded Sell's own apportionment, so the allocation that
+        // completes the disposal is handed the rest of the total exactly, and
+        // the disposal's total is the running entitlement as the Sell's is.
+        let step =
+            realised_gains::cumulative_share(total_proceeds, units_so_far, total_units, entitled);
+        entitled = step.entitled;
+        let proceeds = step.share;
         let cost_base = candidates.cost_base(trade_id, units)?;
         let gain = proceeds - cost_base;
         let eligible = discount_eligible(p.acquisition_date, sale_date);
@@ -516,7 +545,7 @@ pub fn disposal_figures(
         } else {
             totals.capital_loss -= gain;
         }
-        totals.proceeds += proceeds;
+        totals.proceeds = entitled;
         totals.cost_base += cost_base;
         totals.capital_gain_loss += gain;
         allocations.push(HypotheticalAllocation {
@@ -2332,6 +2361,98 @@ mod tests {
                 (TradeId(2), Decimal::from(10))
             ]
         );
+    }
+
+    /// Remainders a consolidation leaves are full-precision figures, and
+    /// every strategy's picks of them still add up to exactly the units
+    /// asked for — otherwise the Sell it proposes is refused for not adding
+    /// up (296.999…99 of 297 before `adding_up_to`).
+    #[tokio::test]
+    async fn every_strategys_picks_of_full_precision_remainders_add_up_to_the_units() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "CON").await;
+        // 38 and 65 units consolidated 1-for-3 (12.666…7 and 21.666…7),
+        // beside 304 bought after it.
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2022, 8, 3),
+            dec("38"),
+            dec("3.93"),
+        )
+        .await;
+        insert_buy(
+            &pool,
+            2,
+            ListingId(1),
+            ymd(2022, 8, 3),
+            dec("65"),
+            dec("3.93"),
+        )
+        .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: ListingId(1),
+                date: ymd(2024, 4, 10),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: Decimal::ONE,
+                    split_old_units: dec("3"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        insert_buy(
+            &pool,
+            3,
+            ListingId(1),
+            ymd(2025, 2, 12),
+            dec("304"),
+            dec("5.00"),
+        )
+        .await;
+        let candidates = db_candidate_parcels(&pool, ListingId(1), None, ymd(2025, 2, 12))
+            .await
+            .unwrap();
+        for units in (1..=338).map(Decimal::from) {
+            for strategy in ALL_STRATEGIES {
+                let picks = allocate_strategy(&candidates, units, dec("8.77"), strategy);
+                assert_eq!(
+                    picks.iter().map(|&(_, q)| q).sum::<Decimal>(),
+                    units,
+                    "{strategy:?} for {units}"
+                );
+            }
+        }
+    }
+
+    /// The allocation completing a disposal is handed the rest of its
+    /// proceeds exactly, as the recorded Sell's is: `total × units ÷ units`
+    /// re-rounds a full-precision total (…055 came back …056).
+    #[tokio::test]
+    async fn the_last_allocation_takes_exactly_the_rest_of_the_proceeds() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "LST").await;
+        insert_buy(
+            &pool,
+            1,
+            ListingId(1),
+            ymd(2022, 8, 3),
+            dec("7"),
+            dec("0.5"),
+        )
+        .await;
+        let candidates = db_candidate_parcels(&pool, ListingId(1), None, ymd(2023, 7, 3))
+            .await
+            .unwrap();
+        let total = dec("190.54905490549054905490549055");
+        let (allocations, totals) =
+            disposal_figures(&candidates, &[(TradeId(1), dec("7"))], total, dec("7")).unwrap();
+        assert_eq!(allocations[0].proceeds, total);
+        assert_eq!(totals.proceeds, total);
     }
 
     mod properties {

@@ -8167,3 +8167,64 @@ delete; an `ON CONFLICT … DO UPDATE` upsert advances its table's `AUTOINCREMEN
 it updates; a Sell's re-PUT replaces its allocation rows under fresh ids; and the net-capital-gain
 worksheet's G1 is at the cent, so the chain property bounds that comparison by half a cent per
 parcel paid on (2838 tests).
+
+## Property tests, sixth pass: estimates against the records they predict (2026-10-24)
+The first five passes covered cost base, allocation, netting, scheduling, the cross-report
+holdings views, the tax documents and the write operations; none had held an *estimate* to the
+record it predicts. New properties, all of which now hold and stay as regression guards:
+`net_capital_gain`'s `a_what_if_is_the_worksheet_once_its_sale_is_recorded` (after any history of
+AUD or USD buys at any brokerage, a split or consolidation, a return of capital with or without a
+record date, AMMA statements, an earlier sale and an opening loss, a pre-sale what-if by any
+strategy or by hand is, once its Sell is entered, exactly the worksheet's year record and the
+realised-gains disposal it previewed); `franking_at_risk`'s
+`a_franking_what_if_is_what_recording_the_sale_then_denies` (after buys, sales, transfers between
+accounts, splits, bonus issues and dividends going ex around them, recording the contemplated Sell
+changes each dividend's disqualified units and credits at risk by exactly what the what-if said,
+and no dividend it did not list); and `unrealised_gains`'
+`an_unrealised_gain_is_what_selling_everything_that_day_realises` (after any history including
+transfers, returns of capital, AMMA statements and a scrip exchange, selling every open parcel at
+the row's price realises each parcel's scheduled cost base exactly and the row's market value,
+gain and discount-eligible units). Each was coverage-checked (the franking one fires in about one
+case in six) and every regression test below fails with its fix reverted. Seven defects found,
+each fixed with a focused regression test:
+- [x] **AMIT generation refused a holding a consolidation had made non-terminating.** 284 units
+  consolidated 1-for-3 are 94.666…67 at the year end; `as_acquired_quantity` returned early where
+  reading back needs no division and multiplied that rounded figure into 284.000…001, past the
+  parcel, so `generate_adjustments` failed `QuantityExceedsTrade`. The shortest-count read-back now
+  applies to every full-precision figure (`db_a_consolidation_to_a_non_terminating_count_covers_the_whole_parcel`)
+- [x] **A strategy's picks did not add up to the units asked for.** Remainders after a
+  consolidation are full-precision figures, and taking them one by one out of `units` summed 297 to
+  296.999…99, so the Sell the optimiser and what-if proposed was refused for not adding up.
+  `adding_up_to` gives the last pick the rounding residue, never more
+  (`every_strategys_picks_of_full_precision_remainders_add_up_to_the_units`)
+- [x] **The optimiser and what-if re-rounded the last allocation's proceeds.** `disposal_figures`
+  apportioned `total × units ÷ units` for the completing allocation, a digit off the total the
+  recorded Sell hands it; it now shares `realised_gains::cumulative_share`
+  (`the_last_allocation_takes_exactly_the_rest_of_the_proceeds`)
+- [x] **A disposal's proceeds were a re-added sum of its parcels' shares.** Two replacement parcels'
+  full-precision shares summed to 21961.146…666 of a …667 contract note. `cumulative_share` now
+  returns the running entitlement, carried forward in place of the sum, and a disposal's (and a
+  rights sale's, and an optimiser strategy's) total is the final entitlement
+  (`api_a_disposals_proceeds_are_its_contract_notes_total`)
+- [x] **The sale emptying a parcel was costed a digit off its scheduled cost base.** The Sell
+  check took it as exactly the remainder (the fifth pass), but the realised report, the tax
+  report's itemisation and the E10/G1/C2 and AMIT disposed-unit walks each re-based the allocation
+  on its own. `adjustments::acquired_units_of_sales` is the per-sale form of the date-ordered walk
+  (`sold_in_acquired_units` is its sum), and `open_parcels::db_acquired_units_by_allocation` reads
+  it for every allocation; all four go through it
+  (`api_the_sale_emptying_a_parcel_realises_exactly_its_scheduled_cost_base`)
+- [x] **The what-if's "with" year kept a later return of capital's G1 gain on the units it sold.**
+  The preview added the sale's own buckets but walked E10/G1/C2 as if the units were still held.
+  The walk now takes the contemplated allocations as sold on the sale date (and off the register on
+  its settlement date, for C2), which needed the picks made inside the what-if's read transaction —
+  `what_if_picks` and its `PickRefusal`, worded after the commit
+  (`api_what_if_takes_a_later_return_of_capital_off_the_units_it_sells`)
+- [x] **The what-if's year rows always carried an empty `disposals`.** `docs/API.md` calls them the
+  worksheet's year records; both now list the year's recorded disposals
+  (`api_what_if_rows_list_the_years_recorded_disposals`)
+
+Checked and left as designed: a what-if dated before a recorded sale offers the units sold since,
+which a Sell on that date would then over-allocate (documented); and a contemplated sale inside a
+year whose AMMA statement is already entered contradicts the statement's year-end holding, so
+recording it re-spreads the statement's rows over that year's *other* disposals, which the what-if
+does not re-cost — `docs/API.md`'s Pre-sale what-if section now says so (2848 tests).

@@ -137,10 +137,10 @@ mod model;
 /// `domain` depends on nothing in `entities` — and are re-exported here so the
 /// entity's callers keep one path to everything about a corporate action.
 pub use crate::domain::adjustments::{
-    AcquiredUnits, PriceBasisEvent, RocEvent, SplitEvent, UnitsAt, as_acquired_quantity,
-    checked_as_acquired_quantity, contemporaneous_price, db_demerger_price_statements,
-    db_payment_currency_conflict, db_return_of_capital_events, db_share_split_events,
-    db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
+    AcquiredUnits, PriceBasisEvent, RocEvent, SplitEvent, UnitsAt, acquired_units_of_sales,
+    as_acquired_quantity, checked_as_acquired_quantity, contemporaneous_price,
+    db_demerger_price_statements, db_payment_currency_conflict, db_return_of_capital_events,
+    db_share_split_events, db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
 };
 /// The list route's filter type — `api_spec` reads its fields through
 /// `utoipa::IntoParams` so the OpenAPI document's query parameters come from

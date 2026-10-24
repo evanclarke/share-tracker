@@ -130,7 +130,7 @@ impl Costing {
 /// sale falls on or before, which is the same boundary
 /// `crate::domain::cost_base::db_cost_base_reduction_events` counts the recorded
 /// allocations on (`sale_date <= tax_year_end_date`).
-fn events_with_disposal(
+pub fn events_with_disposal(
     events: &[AmitReductionEvent],
     units_acquired: AcquiredUnits,
     sale_date: NaiveDate,

@@ -58,6 +58,11 @@ The 2026-10-24 fifth property-test pass (every write operation against its own u
 the one defect it found — the Sell emptying a full-precision parcel) is closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md).
 
+The 2026-10-24 sixth property-test pass (each estimate against the record it predicts — the pre-sale
+what-if against the worksheet once its Sell is entered, the franking what-if against the denial
+recording the sale causes, unrealised gains against selling everything that day — and the seven
+defects it found) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
+
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
 since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal

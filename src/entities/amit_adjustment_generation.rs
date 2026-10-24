@@ -1206,6 +1206,52 @@ mod tests {
         assert_eq!(stated(TradeId(2)), dec("25"));
     }
 
+    /// A consolidation that leaves a parcel a non-terminating count at the
+    /// statement's year end (284 units, 1-for-3: 94.666…) still generates a
+    /// row covering the whole parcel, stored as its own 284 units.
+    #[tokio::test]
+    async fn db_a_consolidation_to_a_non_terminating_count_covers_the_whole_parcel() {
+        let pool = test_pool().await;
+        amit_listing(&pool, 1, "HNDQ").await;
+        test_support::buy(1, 1)
+            .date(ymd(2023, 3, 15))
+            .qty(dec("284"))
+            .price(dec("0.5"))
+            .insert(&pool)
+            .await;
+        corporate_action::db_upsert(
+            &pool,
+            &CorporateAction {
+                id: 1,
+                listing_id: ListingId(1),
+                date: ymd(2023, 6, 30),
+                kind: ActionKind::ShareSplit {
+                    split_new_units: Decimal::ONE,
+                    split_old_units: dec("3"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let held = reports::open_parcels::db_open_parcels(&pool, Some(ymd(2023, 6, 30)))
+            .await
+            .unwrap()[0]
+            .remaining_quantity;
+        test_support::amma(6, 1)
+            .units(held)
+            .cost_base_adjustment(Decimal::ZERO)
+            .with(|a| {
+                a.tax_year_end_date = ymd(2023, 6, 30);
+                a.date_received = ymd(2023, 9, 8);
+            })
+            .insert(&pool)
+            .await;
+        let result = db_generate(&pool, 6, &GenerateBody::default()).await;
+        let result = result.unwrap();
+        assert_eq!(result.created[0].adjustment.quantity, dec("284"));
+        assert_eq!(result.units_adjusted, held);
+    }
+
     // API-level tests
 
     #[tokio::test]

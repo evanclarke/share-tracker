@@ -2,8 +2,9 @@
 //! proceeds, the adjusted cost base of the parcels it consumed, the gain or loss in AUD and the
 //! CGT-discount and indexation figures, plus the per-parcel detail behind each.
 
+use crate::domain::adjustments::AcquiredUnits;
 use crate::domain::cost_base::{self, ParcelRow};
-use crate::domain::{cgt_discount, indexation};
+use crate::domain::{cgt_discount, indexation, open_parcels};
 use crate::entities::corporate_action;
 use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
 use crate::infra::currency::CurrencyCode;
@@ -364,6 +365,9 @@ pub(crate) fn scrip_cash_apportionment(
 /// sale date's unit basis) came from the purchase parcel.
 #[derive(sqlx::FromRow)]
 struct Allocation {
+    /// `parcel_allocations.id`: the key of its as-acquired units in
+    /// [`ReportData::acquired_units`].
+    id: i64,
     sale_trade_id: TradeId,
     purchase_trade_id: TradeId,
     #[sqlx(try_from = "Money")]
@@ -424,6 +428,12 @@ struct ReportData {
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).
     split_events: HashMap<ListingId, Vec<SplitEvent>>,
+    /// Each allocation's units in its parcel's as-acquired basis, by
+    /// allocation id (`open_parcels::db_acquired_units_by_allocation`): the
+    /// parcel's sales walked in date order, so the one emptying it is costed
+    /// as exactly its remainder. An allocation missing from it (an in-memory
+    /// fixture) is re-based on its own.
+    acquired_units: HashMap<i64, AcquiredUnits>,
     /// Every imported ATO FX rate, so per-allocation conversions are map
     /// lookups instead of one DB round-trip each.
     fx: FxRates,
@@ -492,7 +502,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     .await?;
 
     let allocations: Vec<Allocation> = sqlx::query_as(
-        "SELECT sale_trade_id, purchase_trade_id, quantity_allocated FROM parcel_allocations",
+        "SELECT id, sale_trade_id, purchase_trade_id, quantity_allocated FROM parcel_allocations",
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -501,6 +511,11 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
     let roc_events = corporate_action::db_return_of_capital_events(&mut *conn).await?;
     // share splits/consolidations per listing (quantity re-basing)
     let split_events = corporate_action::db_share_split_events(&mut *conn).await?;
+    let acquired_units = open_parcels::db_acquired_units_by_allocation(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|a| (a.id, a.units))
+        .collect();
     let fx = FxRates::load(&mut *conn).await?;
     let cpi = indexation::CpiQuarters::load(&mut *conn).await?;
 
@@ -513,6 +528,7 @@ async fn load_report_data(conn: &mut sqlx::SqliteConnection) -> Result<ReportDat
         cba_reduction,
         roc_events,
         split_events,
+        acquired_units,
         fx,
         cpi,
     })
@@ -540,13 +556,18 @@ pub async fn db_realised_gains_on(
 ///
 /// Two properties have to hold at once, and this form gets both.
 ///
-/// * **The shares sum exactly to `total`.** The differences telescope, so the
-///   sum after any allocation is that allocation's cumulative entitlement, not
-///   a sum of independently rounded shares — a division remainder (a third of
-///   $10) lands on the last allocation instead of leaking. And the allocation
-///   that *completes* the disposal (`units_so_far == units_total`) is handed
-///   the whole total with no division at all, so not even the final
-///   `total × units / units` can re-round it.
+/// * **The shares add up to `total`.** The differences telescope, so after
+///   any allocation the running figure is that allocation's cumulative
+///   entitlement, not a sum of independently rounded shares — a division
+///   remainder (a third of \$10) lands on the last allocation instead of
+///   leaking. And the allocation that *completes* the disposal
+///   (`units_so_far == units_total`) is handed the whole total with no
+///   division at all, so not even the final `total × units / units` can
+///   re-round it. The running figure is the returned entitlement, carried
+///   forward as `entitled_before` — **not** a sum of the shares: shares of
+///   different magnitude at full precision re-round when added (two
+///   replacement parcels' shares summed to 21961.146…666 of a
+///   …667 contract note), so a disposal's total is the final entitlement.
 /// * **Every share is still the parcel's own pro-rata figure**, so the
 ///   per-parcel rows a UI drills into mean something on their own.
 ///
@@ -554,18 +575,30 @@ pub async fn db_realised_gains_on(
 /// sale's cost), never to one component of it: a component apportioned and
 /// then combined with an exact figure re-rounds in the combining step and the
 /// telescoping is lost (SCENARIOS Z-a).
-fn cumulative_share(
+pub(crate) fn cumulative_share(
     total: Decimal,
     units_so_far: Decimal,
     units_total: Decimal,
-    taken_so_far: Decimal,
-) -> Decimal {
-    let entitlement = if units_so_far == units_total {
+    entitled_before: Decimal,
+) -> Apportioned {
+    let entitled = if units_so_far == units_total {
         total
     } else {
         mul_div(&[total, units_so_far], units_total)
     };
-    entitlement - taken_so_far
+    Apportioned {
+        share: entitled - entitled_before,
+        entitled,
+    }
+}
+
+/// One step of [`cumulative_share`]: this allocation's share, and the
+/// cumulative entitlement to carry to the next step (and, after the last, the
+/// disposal's total).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Apportioned {
+    pub share: Decimal,
+    pub entitled: Decimal,
 }
 
 /// The gain/loss computation: a pure function over [`ReportData`], so the
@@ -625,13 +658,13 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
                 sale.date,
                 sale.fx_override(),
             )?;
-            let (qty_so_far, proceeds_so_far) = sale_proceeds_assigned
+            let (qty_so_far, entitled) = sale_proceeds_assigned
                 .entry(sale_id)
                 .or_insert((Decimal::ZERO, Decimal::ZERO));
             *qty_so_far += qty_alloc;
-            let share = cumulative_share(sale_total, *qty_so_far, sale.quantity, *proceeds_so_far);
-            *proceeds_so_far += share;
-            share
+            let step = cumulative_share(sale_total, *qty_so_far, sale.quantity, *entitled);
+            *entitled = step.entitled;
+            step.share
         } else {
             Decimal::ZERO
         };
@@ -645,11 +678,14 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             .split_events
             .get(&buy.listing_id)
             .map_or(&[][..], |v| v);
-        let qty_alloc_acquired = corporate_action::as_acquired_quantity(
-            UnitsAt::new(qty_alloc, sale.date),
-            splits,
-            buy.date,
-        );
+        let qty_alloc_acquired = match data.acquired_units.get(&alloc.id) {
+            Some(units) => *units,
+            None => corporate_action::as_acquired_quantity(
+                UnitsAt::new(qty_alloc, sale.date),
+                splits,
+                buy.date,
+            ),
+        };
 
         // Adjusted cost base of the allocated portion via the shared pipeline
         // (`domain::cost_base`), converted to AUD at the (possibly deemed)
@@ -704,7 +740,15 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             }
         });
 
-        *sale_proceeds.entry(sale_id).or_insert(Decimal::ZERO) += alloc_proceeds;
+        // The running entitlement, not a sum of the shares (see
+        // `cumulative_share`): the contract-note total once every allocation
+        // is in.
+        sale_proceeds.insert(
+            sale_id,
+            sale_proceeds_assigned
+                .get(&sale_id)
+                .map_or(Decimal::ZERO, |&(_, entitled)| entitled),
+        );
         *sale_cost_base.entry(sale_id).or_insert(Decimal::ZERO) += alloc_cost;
 
         // Classify each allocation's gain/loss for CGT: a gain from a parcel
@@ -808,8 +852,8 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             .fx
             .to_aud(sale.rights_cost, &sale.currency, sale.date, fx)?;
         let mut units_so_far = Decimal::ZERO;
-        let mut cost_so_far = Decimal::ZERO;
-        let mut proceeds_so_far = Decimal::ZERO;
+        let mut cost_entitled = Decimal::ZERO;
+        let mut proceeds_entitled = Decimal::ZERO;
         for alloc in data
             .rights_allocations
             .iter()
@@ -820,18 +864,21 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
             };
             units_so_far += alloc.units;
             let (alloc_proceeds, alloc_cost) = if sale.units > Decimal::ZERO {
-                let p = cumulative_share(total_proceeds, units_so_far, sale.units, proceeds_so_far);
-                let c = cumulative_share(total_cost, units_so_far, sale.units, cost_so_far);
-                proceeds_so_far += p;
-                cost_so_far += c;
-                (p, c)
+                let p =
+                    cumulative_share(total_proceeds, units_so_far, sale.units, proceeds_entitled);
+                let c = cumulative_share(total_cost, units_so_far, sale.units, cost_entitled);
+                proceeds_entitled = p.entitled;
+                cost_entitled = c.entitled;
+                (p.share, c.share)
             } else {
                 (Decimal::ZERO, Decimal::ZERO)
             };
 
             let alloc_gain = alloc_proceeds - alloc_cost;
-            proceeds += alloc_proceeds;
-            cost_base += alloc_cost;
+            // The running entitlements, not sums of the shares (see
+            // `cumulative_share`).
+            proceeds = proceeds_entitled;
+            cost_base = cost_entitled;
             let discount_eligible = cgt_discount::discount_eligible(buy.acquired(), sale.date);
             if alloc_gain > Decimal::ZERO {
                 if discount_eligible {
@@ -908,7 +955,6 @@ async fn realised_gains_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::adjustments::AcquiredUnits;
     use crate::entities::demerger::Demerge;
     use crate::entities::holding_account::HoldingAccount;
     use crate::entities::listing_rename::RenameBody;
@@ -1043,6 +1089,7 @@ mod tests {
 
     fn mem_alloc(sale: i64, buy: i64, qty: i64) -> Allocation {
         Allocation {
+            id: sale * 1000 + buy,
             sale_trade_id: TradeId(sale),
             purchase_trade_id: TradeId(buy),
             quantity_allocated: Decimal::from(qty),
@@ -4092,6 +4139,186 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cost_base, "10000000000".parse().unwrap());
         assert_eq!(rows[0].capital_loss, "10000000000".parse().unwrap());
+    }
+
+    /// Writes through the whole application, as the web UI does.
+    async fn through_the_api(
+        app: &ApiClient,
+        method: &str,
+        path: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
+        let resp = match method {
+            "PUT" => app.put(path, &body).await,
+            _ => app.post(path, &body).await,
+        };
+        assert_eq!(resp.status, StatusCode::CREATED, "{path}: {}", resp.text());
+        resp.json()
+    }
+
+    fn sell_everything(
+        listing: i64,
+        date: &str,
+        price: &str,
+        parcels: &[open_parcels::OpenParcel],
+    ) -> serde_json::Value {
+        let allocations: Vec<_> = parcels
+            .iter()
+            .filter(|p| p.listing_id == listing)
+            .map(|p| serde_json::json!({
+                "purchase_trade_id": p.trade_id, "quantity_allocated": p.remaining_quantity.to_string(),
+            }))
+            .collect();
+        let quantity: Decimal = parcels
+            .iter()
+            .filter(|p| p.listing_id == listing)
+            .map(|p| p.remaining_quantity)
+            .sum();
+        serde_json::json!({
+            "listing_id": listing, "holding_account_id": 1, "date": date,
+            "quantity": quantity.to_string(), "average_price": price, "currency": "AUD",
+            "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1", "allocations": allocations,
+        })
+    }
+
+    /// The Sell emptying a parcel whose remainder is non-terminating (67
+    /// units, a 2-for-7 bonus issue, 8 sold) realises exactly the cost base
+    /// the open-parcels schedule carried for it: the Sell check takes it as
+    /// the remainder, and so now does the costing — re-based on its own it
+    /// came back a digit off.
+    #[tokio::test]
+    async fn api_the_sale_emptying_a_parcel_realises_exactly_its_scheduled_cost_base() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "BON").await;
+        let app = ApiClient::full(&pool);
+        through_the_api(
+            &app,
+            "PUT",
+            "/trades/1",
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "date": "2021-04-12", "trade_type": "Buy",
+                "quantity": "67", "average_price": "22.47", "currency": "AUD",
+                "brokerage": "9.58", "brokerage_currency": "AUD", "fx_rate": "1",
+            }),
+        )
+        .await;
+        through_the_api(
+            &app,
+            "PUT",
+            "/corporate_actions/1",
+            serde_json::json!({
+                "listing_id": 1, "date": "2021-05-26", "action_type": "BonusIssue",
+                "bonus_units": "2", "bonus_held_units": "7",
+            }),
+        )
+        .await;
+        through_the_api(&app, "POST", "/sells", serde_json::json!({
+            "listing_id": 1, "holding_account_id": 1, "date": "2021-07-05", "quantity": "8",
+            "average_price": "3.21", "currency": "AUD", "brokerage": "0", "brokerage_currency": "AUD",
+            "fx_rate": "1", "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "8" }],
+        }))
+        .await;
+        let schedule = open_parcels::db_open_parcels(
+            &pool,
+            Some(NaiveDate::from_ymd_opt(2021, 7, 6).unwrap()),
+        )
+        .await
+        .unwrap();
+        let sell = through_the_api(
+            &app,
+            "POST",
+            "/sells",
+            sell_everything(1, "2021-07-06", "0.01", &schedule),
+        )
+        .await;
+        let realised = db_realised_gains(&pool).await.unwrap();
+        let row = realised
+            .iter()
+            .find(|r| r.disposal.sell() == Some(TradeId(sell["id"].as_i64().unwrap())))
+            .unwrap();
+        assert_eq!(row.parcels[0].cost_base, schedule[0].remaining_cost_base);
+    }
+
+    /// A disposal's proceeds are its contract note's total, however its
+    /// parcels' shares round: two replacement parcels' full-precision shares
+    /// summed to 21961.146…666 of a …667 total.
+    #[tokio::test]
+    async fn api_a_disposals_proceeds_are_its_contract_notes_total() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        let app = ApiClient::full(&pool);
+        through_the_api(
+            &app,
+            "PUT",
+            "/trades/1",
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "date": "2021-04-12", "trade_type": "Buy",
+                "quantity": "241", "average_price": "0.05", "currency": "AUD",
+                "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1",
+            }),
+        )
+        .await;
+        through_the_api(&app, "POST", "/sells", serde_json::json!({
+            "listing_id": 1, "holding_account_id": 1, "date": "2021-05-24", "quantity": "168",
+            "average_price": "3.21", "currency": "AUD", "brokerage": "0", "brokerage_currency": "AUD",
+            "fx_rate": "1", "allocations": [{ "purchase_trade_id": 1, "quantity_allocated": "168" }],
+        }))
+        .await;
+        through_the_api(
+            &app,
+            "PUT",
+            "/corporate_actions/1",
+            serde_json::json!({
+                "listing_id": 1, "date": "2021-07-05", "action_type": "ShareSplit",
+                "split_new_units": "2", "split_old_units": "3",
+            }),
+        )
+        .await;
+        through_the_api(
+            &app,
+            "PUT",
+            "/trades/3",
+            serde_json::json!({
+                "listing_id": 1, "holding_account_id": 1, "date": "2021-08-16", "trade_type": "Buy",
+                "quantity": "180", "average_price": "0.05", "currency": "AUD",
+                "brokerage": "0", "brokerage_currency": "AUD", "fx_rate": "1",
+            }),
+        )
+        .await;
+        through_the_api(
+            &app,
+            "PUT",
+            "/corporate_actions/2",
+            serde_json::json!({
+                "listing_id": 1, "date": "2021-09-27", "action_type": "ScripForScrip",
+                "scrip_listing_id": 2, "scrip_new_units": "2", "scrip_old_units": "1",
+            }),
+        )
+        .await;
+        through_the_api(
+            &app,
+            "POST",
+            "/corporate_actions/2/exchange",
+            serde_json::json!(null),
+        )
+        .await;
+        let schedule = open_parcels::db_open_parcels(
+            &pool,
+            Some(NaiveDate::from_ymd_opt(2021, 9, 28).unwrap()),
+        )
+        .await
+        .unwrap();
+        let body = sell_everything(2, "2021-09-28", "48.02", &schedule);
+        let quantity: Decimal = body["quantity"].as_str().unwrap().parse().unwrap();
+        let sell = through_the_api(&app, "POST", "/sells", body).await;
+        let realised = db_realised_gains(&pool).await.unwrap();
+        let row = realised
+            .iter()
+            .find(|r| r.disposal.sell() == Some(TradeId(sell["id"].as_i64().unwrap())))
+            .unwrap();
+        assert_eq!(row.parcels.len(), 2);
+        assert_eq!(row.proceeds, dec("48.02") * quantity);
     }
 
     mod properties {

@@ -149,6 +149,86 @@ pub async fn db_units_sold(
     Ok(sold)
 }
 
+/// One parcel allocation's units in its parcel's as-acquired basis, as
+/// [`db_acquired_units_by_allocation`] reads them.
+#[derive(Debug, Clone, Copy)]
+pub struct AllocationUnits {
+    /// `parcel_allocations.id`.
+    pub id: i64,
+    /// The Sell (or rollover closing Sell) drawing on the parcel.
+    pub sale_trade_id: TradeId,
+    /// The parcel drawn on.
+    pub purchase_trade_id: TradeId,
+    /// The units, in the parcel's as-acquired basis.
+    pub units: AcquiredUnits,
+}
+
+/// Every parcel allocation's units in its parcel's as-acquired basis — each parcel's allocations walked in sale-date
+/// order by [`adjustments::acquired_units_of_sales`], so the one that empties
+/// a parcel is exactly its remainder, as the Sell check took it. Every
+/// consumption is walked (a rollover's closing Sell too), since each moves
+/// the remainder the next one is read against.
+pub async fn db_acquired_units_by_allocation(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Vec<AllocationUnits>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT pa.id, pa.sale_trade_id, pa.purchase_trade_id, pa.quantity_allocated, \
+                s.date AS sale_date, \
+                b.quantity AS parcel_quantity, b.date AS parcel_date, b.listing_id \
+         FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         JOIN trades b ON b.id = pa.purchase_trade_id \
+         ORDER BY pa.purchase_trade_id, pa.id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let splits = adjustments::db_share_split_events(&mut *conn).await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    let mut i = 0;
+    while i < rows.len() {
+        let parcel_id: TradeId = rows[i].try_get("purchase_trade_id")?;
+        let end = rows[i..]
+            .iter()
+            .position(|r| r.try_get::<TradeId, _>("purchase_trade_id").ok() != Some(parcel_id))
+            .map_or(rows.len(), |n| i + n);
+        let first = &rows[i];
+        let listing_id: ListingId = first.try_get("listing_id")?;
+        let parcel = AcquiredUnits::new(parse_dec("quantity", first.try_get("parcel_quantity")?)?);
+        let acquired: NaiveDate = first.try_get("parcel_date")?;
+        let mut ids = Vec::with_capacity(end - i);
+        let mut sales = Vec::with_capacity(end - i);
+        for row in &rows[i..end] {
+            ids.push((
+                row.try_get::<i64, _>("id")?,
+                row.try_get::<TradeId, _>("sale_trade_id")?,
+            ));
+            sales.push(UnitsAt::new(
+                parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+                row.try_get("sale_date")?,
+            ));
+        }
+        let units = adjustments::acquired_units_of_sales(
+            parcel,
+            &sales,
+            splits.get(&listing_id).map_or(&[][..], |v| v),
+            acquired,
+        );
+        out.extend(
+            ids.into_iter()
+                .zip(units)
+                .map(|((id, sale_trade_id), units)| AllocationUnits {
+                    id,
+                    sale_trade_id,
+                    purchase_trade_id: parcel_id,
+                    units,
+                }),
+        );
+        i = end;
+    }
+    Ok(out)
+}
+
 /// Every Buy/DRP parcel with units still open as at `as_of` (`None` = the
 /// live view, i.e. as at today), each with its remaining quantity in that
 /// date's unit basis and the AUD cost base of those units. Parcels fully
