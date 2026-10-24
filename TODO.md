@@ -63,6 +63,12 @@ what-if against the worksheet once its Sell is entered, the franking what-if aga
 recording the sale causes, unrealised gains against selling everything that day — and the seven
 defects it found) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
 
+The 2026-10-24 seventh property-test pass (pure rules against independent references — the
+money-weighted return solver, the 12-month discount rule, backup retention — and cross-check
+reports against the consumers they check for — FX coverage against the tax summary, rollover
+consistency and the price-collection timeline against the operations and schedule — and the five
+defects it found) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
+
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
 since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal

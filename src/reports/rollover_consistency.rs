@@ -35,7 +35,8 @@
 //!   against Σ of the replacement parcels' stored initial cost base. Exact for a
 //!   transfer, for a demerger (its percentage only *splits* the carried total
 //!   across the head and demerged parcels), and for a scrip-for-scrip exchange
-//!   with no cash component.
+//!   with no cash component — up to the rounding of the two sums themselves
+//!   (`summation_slack`).
 //! - **Quantity** — for a **transfer** only, where the units move one for one:
 //!   Σ of the closing Sell's allocations against Σ of the transfer-in
 //!   quantities. A scrip exchange and a demerger apply their own ratios, so
@@ -249,6 +250,29 @@ struct GroupProblems {
     problems: Vec<String>,
 }
 
+/// How far two totals of the same cost base, each a sum over `terms` figures
+/// in all, can part by rounding alone.
+///
+/// The two sides of the comparison sum different figures — the consumed
+/// parcels' carried cost bases, and the replacement parcels the operation
+/// apportioned them into (a demerger's two legs per parcel) — and no
+/// replacement records which source it came from, so the totals are all
+/// there is to compare. Each figure agrees exactly, but a sum of 28-digit
+/// `Decimal`s rounds as it grows: a demerger of six full-precision parcels
+/// carried 46739.259999…999 against 46739.260000…000 consumed, and the
+/// report told the user to delete and redo an operation nothing had
+/// changed behind. A sum rounds only once it is at full precision, and then
+/// by at most one unit in its last place per addition, so the slack is that
+/// unit per term — zero while neither total is at full precision, where no
+/// rounding happened and any difference is a changed fact.
+fn summation_slack(terms: usize, a: Decimal, b: Decimal) -> Decimal {
+    let full_precision = |d: Decimal| d.mantissa().unsigned_abs() >= 10u128.pow(27);
+    if !(full_precision(a) || full_precision(b)) {
+        return Decimal::ZERO;
+    }
+    Decimal::new(terms as i64, a.scale().min(b.scale()))
+}
+
 /// The stored-versus-recomputed comparison for one group.
 async fn problems_for(
     conn: &mut sqlx::SqliteConnection,
@@ -363,7 +387,8 @@ async fn problems_for(
             .copied()
             .unwrap_or_default();
         let stored = stored_cost_base.get(currency).copied().unwrap_or_default();
-        if expected != stored {
+        let terms = allocation_rows.len() + replacements.len();
+        if (expected - stored).abs() > summation_slack(terms, expected, stored) {
             problems.push(format!(
                 "this {} carried {stored} {currency} of cost base away on {}, but the units it \
                  consumed are worth {expected} {currency} on today's facts (a difference of {}) — \
@@ -624,6 +649,92 @@ mod tests {
         assert_eq!(alerts[0].kind, RolloverKind::Demerger);
         // Both replacement parcels are named — the head and the demerged one.
         assert_eq!(alerts[0].replacement_trade_ids.len(), 2);
+    }
+
+    /// Regression: the two totals compared are sums of full-precision
+    /// figures — the consumed parcels' cost bases, and the twice as many legs
+    /// a demerger apportioned them into — and such a sum rounds as it grows.
+    /// Three parcels, 68% of each (in whole units) moved to a second account
+    /// (a partial carry, so full-precision cost bases), then all six demerged
+    /// at 85%: nothing
+    /// changed behind the demerger, but it carried 46739.259999…999 against
+    /// 46739.260000…000 consumed, and the report told the user to redo it. The
+    /// comparison now allows that rounding and nothing more (the test above
+    /// still flags a changed fact). Shrunk from the rollover-chain property.
+    #[tokio::test]
+    async fn db_an_untouched_demerger_of_carried_parcels_reconciles() {
+        let pool = test_pool().await;
+        test_support::listing(1).ticker("HEAD").insert(&pool).await;
+        test_support::listing(2).ticker("SPUN").insert(&pool).await;
+        holding_account::db_upsert(
+            &pool,
+            &HoldingAccount {
+                id: HoldingAccountId(2),
+                name: "Broker".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        let parcels = [
+            ("558", "10.73", "1.72", "379"),
+            ("1284", "29.50", "14.10", "873"),
+            ("1171", "2.44", "0.86", "796"),
+        ];
+        for (n, (qty, price, brokerage, _)) in parcels.iter().enumerate() {
+            test_support::buy(n as i64 + 1, 1)
+                .date(ymd(2023, 1, 10) + chrono::Days::new(7 * n as u64))
+                .qty(dec(qty))
+                .price(dec(price))
+                .brokerage(dec(brokerage))
+                .insert(&pool)
+                .await;
+        }
+        transfer::db_transfer(
+            &pool,
+            1,
+            &TransferBody {
+                listing_id: ListingId(1),
+                date: ymd(2023, 3, 1),
+                from_account_id: HoldingAccountId(1),
+                to_account_id: HoldingAccountId(2),
+                allocations: parcels
+                    .iter()
+                    .enumerate()
+                    .map(|(n, (.., moved))| AllocationInput {
+                        purchase_trade_id: TradeId(n as i64 + 1),
+                        quantity_allocated: dec(moved),
+                    })
+                    .collect(),
+                fee_allocations: Vec::new(),
+                fee_market_price: None,
+                fee_fx_rate: None,
+            },
+        )
+        .await
+        .unwrap();
+        ca::db_upsert(
+            &pool,
+            &ca::CorporateAction {
+                id: 10,
+                listing_id: ListingId(1),
+                date: ymd(2023, 7, 3),
+                kind: ca::ActionKind::Demerger {
+                    demerger_listing_id: ListingId(2),
+                    demerger_new_units: Decimal::ONE,
+                    demerger_held_units: Decimal::ONE,
+                    demerger_cost_base_pct: dec("85"),
+                    demerger_close_date: None,
+                    demerger_close_price: None,
+                    demerger_close_sourced_from: None,
+                    demerger_close_reason: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        demerger::db_demerge(&pool, 10).await.unwrap();
+        let alerts = db_rollover_alerts(&pool).await.unwrap();
+        assert!(alerts.iter().all(|a| a.problems.is_empty()), "{alerts:#?}");
     }
 
     #[tokio::test]

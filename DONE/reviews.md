@@ -8228,3 +8228,67 @@ which a Sell on that date would then over-allocate (documented); and a contempla
 year whose AMMA statement is already entered contradicts the statement's year-end holding, so
 recording it re-spreads the statement's rows over that year's *other* disposals, which the what-if
 does not re-cost — `docs/API.md`'s Pre-sale what-if section now says so (2848 tests).
+
+## Property tests, seventh pass: rules against references, and checks against what they check (2026-10-24)
+The first six passes covered cost base, allocation, netting, scheduling, the holdings views, the
+tax documents, the write operations and the estimates; none had held a pure rule to an independent
+reference model, or a cross-check report to the consumer it checks for. New properties and
+exhaustive checks, all of which now hold and stay as regression guards: `performance`'s
+`a_money_weighted_return_is_the_rate_the_flows_grew_at` (investments on any dates across up to 40
+years, closed by what they grow to at a chosen rate from −50% to +200% p.a., solve back to that
+rate); `cgt_discount`'s `the_rule_agrees_with_counting_the_owned_days` (every acquisition day from
+1985 to 2030 against every event day within a fortnight of its anniversary, against the ATO's rule
+counted out in days); `fx_coverage`'s `every_month_the_tax_summary_needs_and_lacks_is_listed` (any
+USD dividends and trust distributions, entitled before payment or not, against any imported months:
+a tax summary failing for want of a rate fails on a month the report lists, resting on nothing);
+`infra::db`'s `pruning_after_every_run_keeps_what_the_policy_keeps_of_the_history` (an irregular
+backup schedule pruned after every run keeps exactly the policy's set of the whole history, never
+touches another database's backups, and a second prune deletes nothing); `activity`'s
+`the_ledger_and_every_holdings_view_agree` widened with the price-collection timeline (it holds the
+listing, per account, on exactly the dates the open-parcels schedule does, and its held spans cover
+exactly those dates); and `operations`' rollover-chain property widened with the rollover-consistency
+report (after any chain nothing changed behind, it flags nothing but its standing cash-component
+note). The chain property's own discount check now calls `discount_eligible` rather than a copy of
+the rule. Every regression test below fails with its fix reverted. Five defects found, each fixed
+with a focused regression test:
+- [x] **A holding whose flows spanned more than ~7 years had no money-weighted return.** The
+  solver compounded every flow to the last date, so at the −99.99% bound the first flow's factor,
+  `exp(ln(0.0001) × years)`, fell below `Decimal`'s resolution for a fractional span past ~7 years,
+  and `checked_exp`'s `None` aborted the whole solve; past ~27 years the +1,000% bound's `11^years`
+  overflowed the same way (the 7- and 20-year tests passed only because their spans were whole
+  years, which takes the exact `powd` path). The NPV's sign is now evaluated where every factor is
+  at most 1 — compounded forward at a negative rate, discounted back at a non-negative one — so
+  nothing overflows and an underflowing factor is the zero it is. The Portfolio Overview panel
+  shows this figure for any range over a year, so a range over about seven years showed none
+  (`money_weighted_return_survives_a_fractional_span_past_seven_years`,
+  `money_weighted_return_survives_a_thirty_year_span`)
+- [x] **A parcel bought on 28 February and sold on 29 February a year later took the discount.** The
+  ATO's rule excludes both days, so the owned days were 1 March – 28 February, a day short of 12
+  months, but `acquired + 12 months` clamped to 28 February and called it eligible. The anniversary
+  is now counted back from the event (`event − 12 months > acquired`), which agrees with counting
+  the owned days on every date (`the_leap_day_after_a_28_february_purchase_is_a_day_short`)
+- [x] **FX coverage checked a trust distribution at its payment month only.** Every tax document
+  assesses and converts it at its entitlement date, so a distribution entitled on 30 June and paid
+  in July, with June's rate missing, failed the tax summary while the report listed nothing (or the
+  wrong month). The income source now also yields the entitlement month where it differs
+  (`db_a_trust_distribution_entitled_in_a_missing_month_is_listed_on_that_month`)
+- [x] **FX coverage checked a parcel at its trade date, not the month its cost base converts at.**
+  A deemed acquisition date — an inheritance of the deceased's cost base, a rollover replacement, a
+  transfer-in — anchors the cost base's conversion (`ParcelRow::acquired`); for an inheritance no
+  other row sits in that month, so a missing rate left the cost base silently on the stated fallback
+  unreported. The trade source now also yields the deemed month where it differs, and the
+  reduction-month alert compares against it too
+  (`db_an_inherited_parcel_is_listed_on_the_month_its_cost_base_converts_at`)
+- [x] **Rollover consistency told the user to redo an untouched demerger.** It compares a sum of
+  the consumed parcels' carried cost bases against a sum of the replacement legs — no replacement
+  records its source, so totals are all there is — and with full-precision figures (a partial
+  transfer's carry split again by a demerger) the 28-digit sums rounded apart: 46739.259999…999
+  against 46739.260000…000. The comparison now allows one unit in the last place per figure summed,
+  and only once a total is at full precision (`summation_slack`); a changed fact still flags
+  (`db_an_untouched_demerger_of_carried_parcels_reconciles`, shrunk from the chain property).
+  `docs/API.md`'s Rollover consistency section states the bound
+
+Checked and left as designed: settlement coverage reads the listing's live exchange, as the
+settlement write path does (a documented Known limitation); the valuation FX fallback and price
+alerts held under reading; a price alert fires on a move of exactly the threshold, where the module
+doc says "more than" — cosmetic (2858 tests).

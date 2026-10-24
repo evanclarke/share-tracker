@@ -1946,6 +1946,7 @@ mod tests {
 
     mod properties {
         use super::*;
+        use crate::entities::closing_price::HeldTimeline;
         use crate::entities::corporate_action::CorporateAction;
         use crate::entities::sell::{self, SellBody};
         use crate::entities::transfer::TransferBody;
@@ -2236,6 +2237,39 @@ mod tests {
                             prop_assert_eq!(balance, held, "units held on {}", date);
                         } else {
                             prop_assert!((balance - held).abs() <= Decimal::new(1, 20), "units held on {}: {} against {}", date, balance, held);
+                        }
+                    }
+
+                    // The price-collection timeline holds what the schedule
+                    // holds: the listing is held, per account, on exactly the
+                    // dates the schedule has a parcel open, and its held spans
+                    // cover exactly those dates.
+                    let timeline = HeldTimeline::load(&pool).await.unwrap();
+                    let last = dates.last().copied().unwrap_or(ymd(2021, 2, 3));
+                    let spans = timeline.held_spans(ListingId(1), last);
+                    for date in &dates {
+                        let parcels = open_parcels::db_open_parcels(&pool, Some(*date)).await.unwrap();
+                        let held = !parcels.is_empty();
+                        prop_assert_eq!(
+                            timeline.held_listing_ids(Some(*date)).contains(&ListingId(1)),
+                            held,
+                            "timeline held on {} with {} parcels open", date, parcels.len()
+                        );
+                        prop_assert_eq!(
+                            spans.iter().any(|(from, to)| from <= date && date <= to),
+                            held,
+                            "held spans {:?} on {}", spans, date
+                        );
+                        for (account, units) in timeline.units_by_account_on(ListingId(1), *date, *date) {
+                            let scheduled: Decimal = parcels
+                                .iter()
+                                .filter(|p| p.holding_account_id == account)
+                                .map(|p| p.remaining_quantity)
+                                .sum();
+                            prop_assert!(
+                                (units - scheduled).abs() <= Decimal::new(1, 20),
+                                "timeline units in account {:?} on {}: {} against {}", account, date, units, scheduled
+                            );
                         }
                     }
 

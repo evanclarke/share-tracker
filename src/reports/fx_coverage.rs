@@ -65,7 +65,11 @@ pub struct FxCoverageAlert {
     pub record_id: i64,
     pub listing_id: Option<ListingId>,
     pub ticker: Option<String>,
-    /// The record's own date — the one whose month anchors its conversion.
+    /// The date whose month anchors the conversion: the record's own date,
+    /// or a second date the record also converts at — a trust distribution's
+    /// entitlement date, at which every tax document assesses it, or a
+    /// parcel's deemed acquisition date, at which its cost base converts — a
+    /// record converting in two months being listed once for each.
     pub date: NaiveDate,
     pub currency: CurrencyCode,
     /// The conversion month (`YYYY-MM`) the alert is about: the missing one,
@@ -105,17 +109,39 @@ struct Convertible {
 /// is the alert's `record`, which the web UI's FX Coverage screen also keys
 /// its link to the record on (config.js's `FX_COVERAGE_RECORD_ROUTES`).
 pub(crate) const SOURCES: [(&str, &str); 8] = [
+    // A parcel's cost base converts at its *acquisition* month, which for a
+    // rollover replacement, a transfer-in or an inheritance of a deceased's
+    // cost base is the deemed (carried) date rather than the trade's own
+    // (`ParcelRow::acquired`); the trade date still anchors a Sell and the
+    // performance report's flows. A parcel whose two months differ is
+    // listed on each.
     (
         "trade",
         "SELECT t.id, t.listing_id, l.ticker, t.date, t.currency, t.fx_rate AS fallback, \
                 t.spot_fx_rate AS spot \
-         FROM trades t JOIN listings l ON l.id = t.listing_id WHERE t.currency <> 'AUD'",
+         FROM trades t JOIN listings l ON l.id = t.listing_id WHERE t.currency <> 'AUD' \
+         UNION ALL \
+         SELECT t.id, t.listing_id, l.ticker, t.deemed_acquisition_date, t.currency, \
+                t.fx_rate AS fallback, t.spot_fx_rate AS spot \
+         FROM trades t JOIN listings l ON l.id = t.listing_id WHERE t.currency <> 'AUD' \
+           AND t.deemed_acquisition_date IS NOT NULL \
+           AND strftime('%Y-%m', t.deemed_acquisition_date) <> strftime('%Y-%m', t.date)",
     ),
+    // Every tax document assesses — and converts — a trust distribution at
+    // its entitlement date (`Income::assessment_date`), while the
+    // performance report times the cash by its payment; a row whose two
+    // months differ is listed on each.
     (
         "income",
         "SELECT i.id, i.listing_id, l.ticker, i.date_paid AS date, i.currency, \
                 NULL AS fallback, NULL AS spot \
-         FROM income i JOIN listings l ON l.id = i.listing_id WHERE i.currency <> 'AUD'",
+         FROM income i JOIN listings l ON l.id = i.listing_id WHERE i.currency <> 'AUD' \
+         UNION ALL \
+         SELECT i.id, i.listing_id, l.ticker, i.entitlement_date AS date, i.currency, \
+                NULL AS fallback, NULL AS spot \
+         FROM income i JOIN listings l ON l.id = i.listing_id WHERE i.currency <> 'AUD' \
+           AND i.trust_income AND i.entitlement_date IS NOT NULL \
+           AND strftime('%Y-%m', i.entitlement_date) <> strftime('%Y-%m', i.date_paid)",
     ),
     (
         "AMMA statement",
@@ -168,14 +194,17 @@ pub(crate) const SOURCES: [(&str, &str); 8] = [
 ];
 
 /// Every non-AUD amount that converts, with the date whose month anchors it
-/// and whatever fallback its own row carries.
+/// and whatever fallback its own row carries — once per month, where a record
+/// converts in two (see the trade and income sources).
 ///
 /// Deliberately omits two record kinds whose conversion is already covered by
 /// a row that *is* here: an [inheritance](crate::entities::inheritance) and an
 /// [ESS vest](crate::entities::ess_vest) each resolve their rate once and
 /// carry it onto the parcel Buy they create, so the trade row is the one that
-/// matters. An ESS statement's *income* side converts from the statement
-/// itself, so that row is included.
+/// matters — on both its months, since an inheritance of the deceased's cost
+/// base converts at the deceased's acquisition month, the Buy's deemed date.
+/// An ESS statement's *income* side converts from the statement itself, so
+/// that row is included.
 async fn load_convertibles(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<Convertible>, sqlx::Error> {
@@ -301,17 +330,18 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
     // return-of-capital reductions convert at the parcel's acquisition month.
     let reductions = sqlx::query(
         "SELECT t.id AS id, t.listing_id AS listing_id, l.ticker AS ticker, \
-                t.date AS date, t.currency AS currency, \
+                COALESCE(t.deemed_acquisition_date, t.date) AS date, t.currency AS currency, \
                 s.tax_year_end_date AS reduction_date, 'AMIT' AS reduction \
          FROM amit_adjustments adj \
          JOIN trades t ON t.id = adj.trade_id \
          JOIN amma_statements s ON s.id = adj.amma_statement_id \
          JOIN listings l ON l.id = t.listing_id \
          WHERE t.currency <> 'AUD' \
-           AND strftime('%Y-%m', s.tax_year_end_date) <> strftime('%Y-%m', t.date) \
+           AND strftime('%Y-%m', s.tax_year_end_date) \
+               <> strftime('%Y-%m', COALESCE(t.deemed_acquisition_date, t.date)) \
          UNION ALL \
          SELECT t.id AS id, t.listing_id AS listing_id, l.ticker AS ticker, \
-                t.date AS date, t.currency AS currency, \
+                COALESCE(t.deemed_acquisition_date, t.date) AS date, t.currency AS currency, \
                 c.date AS reduction_date, 'return of capital' AS reduction \
          FROM corporate_actions c \
          JOIN trades t ON t.listing_id = c.listing_id \
@@ -319,7 +349,8 @@ pub async fn db_fx_coverage(pool: &SqlitePool) -> Result<Vec<FxCoverageAlert>, s
          WHERE c.action_type = 'ReturnOfCapital' \
            AND t.trade_type IN ('Buy', 'DRP') AND t.currency <> 'AUD' \
            AND t.date <= COALESCE(c.record_date, c.date) \
-           AND strftime('%Y-%m', c.date) <> strftime('%Y-%m', t.date) \
+           AND strftime('%Y-%m', c.date) \
+               <> strftime('%Y-%m', COALESCE(t.deemed_acquisition_date, t.date)) \
          ORDER BY reduction_date DESC, id DESC",
     )
     .fetch_all(&mut *tx)
@@ -383,6 +414,7 @@ mod tests {
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
     use crate::entities::rights_sale::{AllocationInput, SellRightsBody};
     use crate::entities::{corporate_action, rba_fx_rate, rights_sale};
+    use crate::reports::tax_summary;
     use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -719,6 +751,70 @@ mod tests {
         assert!(row.detail.contains("0.99"), "{}", row.detail);
     }
 
+    /// Regression: a trust distribution is assessed — and converted, by
+    /// every tax document — at its entitlement date, which the scan never
+    /// looked at. Paid in July with July imported, entitled on 30 June with
+    /// June missing, the tax summary failed while the report said nothing.
+    /// It now lists the entitlement month, resting on nothing.
+    #[tokio::test]
+    async fn db_a_trust_distribution_entitled_in_a_missing_month_is_listed_on_that_month() {
+        let pool = test_pool().await;
+        usd_listing(&pool, 1, "UST").await;
+        rate(&pool, "2024-07", "0.66").await;
+        test_support::income(1, 1, ymd(2024, 7, 15))
+            .with(|i| {
+                i.currency = "USD".into();
+                i.unfranked_amount = Decimal::from(100);
+                i.trust_income = true;
+                i.entitlement_date = Some(ymd(2024, 6, 30));
+            })
+            .insert(&pool)
+            .await;
+
+        let alerts = db_fx_coverage(&pool).await.unwrap();
+        let missing = of_kind(&alerts, "missing_rate");
+        assert_eq!(missing.len(), 1, "{alerts:#?}");
+        assert_eq!(missing[0].record, "income");
+        assert_eq!(missing[0].month, "2024-06");
+        assert_eq!(missing[0].date, ymd(2024, 6, 30));
+        assert_eq!(missing[0].resting_on.as_deref(), Some("nothing"));
+        assert!(tax_summary::db_tax_summary(&pool).await.is_err());
+    }
+
+    /// Regression: an inherited parcel under the deceased's cost base is
+    /// costed at the deceased's acquisition month (its deemed date), and no
+    /// other trade row sits in that month, so a month with no ATO rate left
+    /// the cost base silently on the stated fallback rate while the scan
+    /// checked only the date of death. It now lists the deemed month too.
+    #[tokio::test]
+    async fn db_an_inherited_parcel_is_listed_on_the_month_its_cost_base_converts_at() {
+        let pool = test_pool().await;
+        usd_listing(&pool, 1, "INH").await;
+        rate(&pool, "2024-03", "0.66").await;
+        ApiClient::full(&pool)
+            .put_ok(
+                "/inheritances/1",
+                &serde_json::json!({
+                    "listing_id": 1,
+                    "quantity": "100",
+                    "date_of_death": "2024-03-11",
+                    "cost_base_rule": "DeceasedCostBase",
+                    "cost_base": "5000",
+                    "deceased_acquisition_date": "2003-05-14",
+                    "currency": "USD",
+                    "fx_rate": "0.58",
+                }),
+            )
+            .await;
+
+        let alerts = db_fx_coverage(&pool).await.unwrap();
+        let missing = of_kind(&alerts, "missing_rate");
+        assert_eq!(missing.len(), 1, "{alerts:#?}");
+        assert_eq!(missing[0].record, "trade");
+        assert_eq!(missing[0].month, "2003-05");
+        assert_eq!(missing[0].resting_on.as_deref(), Some("record_fx_rate"));
+    }
+
     #[tokio::test]
     async fn api_report_is_served() {
         let pool = test_pool().await;
@@ -735,5 +831,81 @@ mod tests {
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].kind, "missing_rate");
         assert_eq!(alerts[0].ticker.as_deref(), Some("AAPL"));
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// The months a property history can fall in: April to September
+        /// 2024, either side of a financial year end.
+        const MONTHS: [(i32, u32); 6] = [
+            (2024, 4),
+            (2024, 5),
+            (2024, 6),
+            (2024, 7),
+            (2024, 8),
+            (2024, 9),
+        ];
+
+        /// One USD income record: whether it is a trust distribution, the
+        /// month it was paid in, and — for a trust row — whether it was
+        /// entitled at the end of the month before.
+        fn records() -> impl Strategy<Value = Vec<(bool, usize, bool)>> {
+            prop::collection::vec((any::<bool>(), 1usize..MONTHS.len(), any::<bool>()), 1..=6)
+        }
+
+        proptest! {
+            #![proptest_config(test_support::db_proptest_config())]
+
+            /// Whatever income is recorded and whichever months are imported,
+            /// a tax summary that fails for want of a rate fails on a month
+            /// the coverage report lists, for a record resting on nothing —
+            /// the report exists so that a missing month is found before a
+            /// tax figure needs it.
+            #[test]
+            fn every_month_the_tax_summary_needs_and_lacks_is_listed(
+                records in records(),
+                imported in prop::collection::vec(any::<bool>(), MONTHS.len()),
+            ) {
+                test_support::block_on(async move {
+                    let pool = test_pool().await;
+                    usd_listing(&pool, 1, "UST").await;
+                    for (i, (year, month)) in MONTHS.iter().enumerate() {
+                        if imported[i] {
+                            rate(&pool, &format!("{year}-{month:02}"), "0.66").await;
+                        }
+                    }
+                    for (n, &(trust, month, entitled_before)) in records.iter().enumerate() {
+                        let (year, m) = MONTHS[month];
+                        let paid = NaiveDate::from_ymd_opt(year, m, 15).unwrap();
+                        let entitled = NaiveDate::from_ymd_opt(year, m, 1).unwrap().pred_opt().unwrap();
+                        test_support::income(n as i64 + 1, 1, paid)
+                            .with(|i| {
+                                i.currency = "USD".into();
+                                i.unfranked_amount = Decimal::from(100);
+                                i.trust_income = trust;
+                                i.entitlement_date = (trust && entitled_before).then_some(entitled);
+                            })
+                            .insert(&pool)
+                            .await;
+                    }
+                    let alerts = db_fx_coverage(&pool).await.unwrap();
+                    let listed: Vec<&str> = alerts
+                        .iter()
+                        .filter(|a| a.resting_on.as_deref() == Some("nothing"))
+                        .map(|a| a.month.as_str())
+                        .collect();
+                    if let Err(e) = tax_summary::db_tax_summary(&pool).await {
+                        let message = ApiError::from(e).to_string();
+                        prop_assert!(
+                            listed.iter().any(|month| message.contains(&format!("in {month}"))),
+                            "the tax summary failed ({message}) on a month coverage does not list: {alerts:#?}"
+                        );
+                    }
+                    Ok(())
+                })?;
+            }
+        }
     }
 }

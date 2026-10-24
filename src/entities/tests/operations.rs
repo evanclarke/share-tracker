@@ -5,10 +5,11 @@
 //! undoes it puts every table back exactly as it was.
 
 use super::*;
+use crate::domain::cgt_discount::discount_eligible;
 use crate::entities::corporate_action::{self, ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::drp_enrolment::{self, DrpEnrolment, ResidualHandling};
 use crate::infra::id::HoldingAccountId;
-use crate::reports::{net_capital_gain, open_parcels, realised_gains};
+use crate::reports::{net_capital_gain, open_parcels, realised_gains, rollover_consistency};
 use crate::test_support::{ApiResponse, table_contents, table_differences};
 use chrono::{Datelike, Days, NaiveDate, Weekday};
 use proptest::prelude::*;
@@ -995,8 +996,7 @@ async fn chain(
     for disposal in realised_gains::db_realised_gains(&pool).await.unwrap() {
         for parcel in &disposal.parcels {
             *realised.entry(parcel.acquisition_date).or_default() += parcel.cost_base;
-            let held_over_a_year =
-                disposal.sale_date > parcel.acquisition_date + chrono::Months::new(12);
+            let held_over_a_year = discount_eligible(parcel.acquisition_date, disposal.sale_date);
             if parcel.proceeds > parcel.cost_base && !held_over_a_year {
                 prop_assert!(
                     disposal.non_discountable_gain > Decimal::ZERO,
@@ -1005,6 +1005,20 @@ async fn chain(
                 );
             }
         }
+    }
+    // Nothing changed behind any operation after it ran, so the
+    // rollover-consistency check has nothing to say about one beyond the
+    // note it always carries on a rollover with a cash component.
+    for alert in rollover_consistency::db_rollover_alerts(&pool)
+        .await
+        .unwrap()
+    {
+        let flagged: Vec<&String> = alert
+            .problems
+            .iter()
+            .filter(|p| !p.contains("carries a cash component"))
+            .collect();
+        prop_assert!(flagged.is_empty(), "{:?}: {:?}", alert, flagged);
     }
     let g1: Decimal = net_capital_gain::db_net_capital_gain(&pool)
         .await

@@ -3659,6 +3659,74 @@ mod tests {
         path
     }
 
+    mod prune_properties {
+        use super::*;
+        use chrono::{Datelike, NaiveDate};
+        use proptest::prelude::*;
+        use std::collections::BTreeSet;
+
+        /// What the retention policy keeps of a whole history: the newest
+        /// `KEEP_RECENT`, and the first of each of the `KEEP_MONTHLY` most
+        /// recent months that have one.
+        fn policy(history: &[NaiveDateTime]) -> BTreeSet<NaiveDateTime> {
+            let mut newest_first = history.to_vec();
+            newest_first.sort_by(|a, b| b.cmp(a));
+            let mut keep: BTreeSet<NaiveDateTime> =
+                newest_first.iter().take(KEEP_RECENT).copied().collect();
+            let mut months: Vec<(i32, u32)> = Vec::new();
+            for ts in &newest_first {
+                let month = (ts.year(), ts.month());
+                if !months.contains(&month) {
+                    months.push(month);
+                }
+            }
+            for month in months.into_iter().take(KEEP_MONTHLY) {
+                let first = history
+                    .iter()
+                    .filter(|ts| (ts.year(), ts.month()) == month)
+                    .min()
+                    .unwrap();
+                keep.insert(*first);
+            }
+            keep
+        }
+
+        proptest! {
+            /// However irregular the schedule — runs hours apart, gaps of two
+            /// months, a manual run beside the weekly one — pruning after every
+            /// run keeps exactly what the policy keeps of the whole history:
+            /// a backup pruned once is never one the policy would still want,
+            /// and a monthly keeper survives until its month rolls off. Another
+            /// database's backups and this one's quarantined files beside them
+            /// are never touched by the backup pruning, and pruning again
+            /// deletes nothing.
+            #[test]
+            fn pruning_after_every_run_keeps_what_the_policy_keeps_of_the_history(
+                gaps_in_hours in prop::collection::vec(1i64..=1_500, 1..=60),
+            ) {
+                let dir = tempfile::tempdir().unwrap();
+                let dir_str = dir.path().to_string_lossy().to_string();
+                let decoy = dir.path().join("other-2026-01-01-000000.db");
+                fs::write(&decoy, b"").unwrap();
+                let mut at = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_hms_opt(3, 0, 0).unwrap();
+                let mut history = Vec::new();
+                for gap in gaps_in_hours {
+                    at += chrono::Duration::hours(gap);
+                    fake_backup(dir.path(), &at.format("%Y-%m-%d-%H%M%S").to_string());
+                    history.push(at);
+                    prune_backups("test.db", Some(&dir_str)).unwrap();
+                }
+                let surviving: BTreeSet<NaiveDateTime> = fs::read_dir(dir.path())
+                    .unwrap()
+                    .filter_map(|e| backup_timestamp(&e.unwrap().file_name().to_string_lossy(), "test"))
+                    .collect();
+                prop_assert_eq!(&surviving, &policy(&history));
+                prop_assert!(decoy.exists());
+                prop_assert!(prune_backups("test.db", Some(&dir_str)).unwrap().is_empty());
+            }
+        }
+    }
+
     #[test]
     fn prune_keeps_recent_and_first_of_month_keepers() {
         // Four weekly backups in each of Jan–May 2026. Newest KEEP_RECENT (8)

@@ -218,14 +218,20 @@ pub(crate) fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Op
         .iter()
         .map(|&(d, a)| (Decimal::from((d - start).num_days()) / year, a))
         .collect();
-    // The NPV's sign, evaluated at the *last* flow date rather than the
-    // first: Σ aᵢ·base^(t_max−tᵢ) = NPV·base^t_max with base^t_max > 0, so the
-    // zeroes and signs — all the bisection uses — are the same. Discounting to
-    // t₀ divides by base^tᵢ, which at the −99.99% bound is 1e-28 for a flow 7
-    // years old — non-zero, but small enough that the division overflows
-    // Decimal (and underflows to a bare `None` just past it). Compounding
-    // forward multiplies by factors that stay ≤ 1 at negative rates; an early
-    // flow that underflows to zero is genuinely negligible there.
+    // The NPV's sign, evaluated where every factor is at most 1: at a
+    // negative rate compounded forward to the *last* flow date,
+    // Σ aᵢ·base^(t_max−tᵢ) = NPV·base^t_max, and at a non-negative one
+    // discounted back to the first, Σ aᵢ·base^(−tᵢ) = NPV. Either is the NPV
+    // times a positive number, so the zeroes and signs — all the bisection
+    // uses — are the same. Taking one form for both ends overflows Decimal at
+    // the other: discounting to t₀ at the −99.99% bound divides by 1e-28 for a
+    // flow 7 years old, and compounding to t_max at the +1,000% bound
+    // multiplies the first flow by 11^years, past Decimal::MAX beyond ~27
+    // years. With every factor ≤ 1 nothing can overflow, and a factor too small
+    // to represent is genuinely negligible beside the flow whose factor is 1,
+    // so it counts as zero — it used to abort the solve, which left every
+    // holding whose flows spanned more than ~7 years (a fractional number of
+    // them) with no return at all.
     let t_max = timed
         .iter()
         .map(|&(t, _)| t)
@@ -240,22 +246,23 @@ pub(crate) fn money_weighted_annual_return(flows: &[(NaiveDate, Decimal)]) -> Op
     // is the identical computation for that path. But an exponent that lands
     // on an exact integer (flows spaced a whole number of years apart) takes
     // a *different*, exact path inside `checked_powd` — repeated squaring,
-    // not ln/exp — which is both more precise and avoids ln/exp underflow at
-    // the wide extremes this bisection's bounds can reach (a 20-year gap at
-    // the −99.99% bound needs `ln(0.0001)·20 ≈ −184`, right at `checked_exp`'s
-    // underflow edge); that path is preserved by falling back to
-    // `checked_powd` whenever the exponent is a whole number.
+    // not ln/exp — which is more precise; that path is preserved by falling
+    // back to `checked_powd` whenever the exponent is a whole number. Either
+    // way the factor is at most 1, so `None` from either can only be an
+    // underflow, which is the zero the comment above describes.
     let npv = |rate: Decimal| -> Option<Decimal> {
         let base = Decimal::ONE + rate;
         let ln_base = base.checked_ln()?;
+        let forward = base < Decimal::ONE;
         let mut total = Decimal::ZERO;
         for &(t, amount) in &timed {
-            let exp = t_max - t;
+            let exp = if forward { t_max - t } else { -t };
             let factor = if exp.normalize().scale() == 0 {
-                base.checked_powd(exp)?
+                base.checked_powd(exp)
             } else {
-                (ln_base * exp).checked_exp()?
-            };
+                (ln_base * exp).checked_exp()
+            }
+            .unwrap_or(Decimal::ZERO);
             total = total.checked_add(amount.checked_mul(factor)?)?;
         }
         Some(total)
@@ -909,6 +916,40 @@ mod tests {
         assert_eq!(r.round_dp(6), "-0.034064".parse().unwrap());
     }
 
+    /// Regression: flows a fractional number of years apart and more than ~7
+    /// years long had no return at all. At the −99.99% bound the first flow's
+    /// factor, `exp(ln(0.0001) × 7.22)`, is below Decimal's resolution, and
+    /// `checked_exp`'s `None` for it aborted the solve; a factor that small is
+    /// zero beside the flow whose factor is 1.
+    #[test]
+    fn money_weighted_return_survives_a_fractional_span_past_seven_years() {
+        let start = d(1985, 9, 20);
+        let end = start + chrono::Duration::days(2637); // 7.2247 years
+        let r = money_weighted_annual_return(&[
+            (start, Decimal::from(-10_000)),
+            (end, Decimal::from(10_000)),
+        ])
+        .expect("a rate exists: the money came back unchanged");
+        assert_eq!(r.round_dp(6), Decimal::ZERO);
+    }
+
+    /// Regression: past ~27 years the +1,000% bound compounded the first flow
+    /// by 11^years, which overflows Decimal, so a long-held holding had no
+    /// return however ordinary its rate. Discounting to the first flow at a
+    /// positive rate keeps every factor at most 1.
+    #[test]
+    fn money_weighted_return_survives_a_thirty_year_span() {
+        let start = d(1990, 1, 1);
+        let end = start + chrono::Duration::days(30 * 365);
+        let r = money_weighted_annual_return(&[
+            (start, Decimal::from(-10_000)),
+            (end, Decimal::from(40_000)),
+        ])
+        .expect("a rate exists: (1+r)^30 = 4");
+        // (1+r)^30 = 4 → r = 4^(1/30) − 1 ≈ 4.7294% p.a.
+        assert_eq!(r.round_dp(6), "0.047294".parse().unwrap());
+    }
+
     /// Regression for the `ln`-hoisting optimisation in `npv`'s inner loop:
     /// two flows a non-whole number of years apart take the `checked_exp`
     /// path (not the exact-integer-exponent `checked_powd` fallback the
@@ -1311,5 +1352,46 @@ mod tests {
         // Unpriced open holding: figures present, market metrics null.
         assert_eq!(rows[0].invested, Decimal::from(1000));
         assert_eq!(rows[0].market_value, None);
+    }
+
+    mod properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Whatever the flows' span and size, a money-weighted return is
+            /// the rate that solves them: investments on any dates across up
+            /// to 40 years, closed by the value they grow to at a chosen rate
+            /// between −50% and +200% p.a., solve back to that rate.
+            #[test]
+            fn a_money_weighted_return_is_the_rate_the_flows_grew_at(
+                start_day in 0i64..15_000,
+                investments in prop::collection::vec((0i64..14_600, 1i64..1_000_000_000), 1..=6),
+                span in 1i64..=14_600,
+                rate_bp in -5_000i64..=20_000,
+            ) {
+                let start = NaiveDate::from_ymd_opt(1985, 9, 20).unwrap() + chrono::Duration::days(start_day);
+                let end = start + chrono::Duration::days(span);
+                let rate = Decimal::new(rate_bp, 4);
+                let base = Decimal::ONE + rate;
+                let mut flows = Vec::new();
+                let mut closing = Decimal::ZERO;
+                for &(offset, cents) in &investments {
+                    let date = start + chrono::Duration::days(offset % span);
+                    let amount = Decimal::new(cents, 2);
+                    let years = Decimal::from((end - date).num_days()) / Decimal::from(365);
+                    closing += amount * base.powd(years);
+                    flows.push((date, -amount));
+                }
+                prop_assume!(closing > Decimal::ZERO);
+                flows.push((end, closing));
+                let solved = money_weighted_annual_return(&flows);
+                let solved = solved.unwrap_or_else(|| panic!("no rate found for flows {flows:?}"));
+                prop_assert!(
+                    (solved - rate).abs() < Decimal::new(1, 5),
+                    "solved {solved}, flows grew at {rate}: {flows:?}"
+                );
+            }
+        }
     }
 }
