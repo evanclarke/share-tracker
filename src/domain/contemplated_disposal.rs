@@ -48,7 +48,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
-use crate::domain::adjustments::{self, AcquiredUnits, RocEvent, SplitEvent, UnitsAt};
+use crate::domain::adjustments::{self, AcquiredUnits, ListingSplits, RocEvent, UnitsAt};
 use crate::domain::cost_base::{self, AmitReductionEvent, ParcelRow};
 use crate::infra::fx::FxRates;
 
@@ -65,7 +65,7 @@ pub struct Costing {
     /// Return-of-capital payments (CGT event G1) per listing.
     roc: HashMap<ListingId, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).
-    splits: HashMap<ListingId, Vec<SplitEvent>>,
+    splits: HashMap<ListingId, ListingSplits>,
     /// Every imported ATO FX rate, so the per-parcel conversion is a map
     /// lookup rather than a round trip.
     fx: FxRates,
@@ -99,7 +99,8 @@ impl Costing {
         units: UnitsAt,
         sale_date: NaiveDate,
     ) -> Result<Decimal, sqlx::Error> {
-        let splits = self.splits.get(&parcel.listing_id).map_or(&[][..], |v| v);
+        let splits = adjustments::parcel_splits(&self.splits, parcel.listing_id, parcel.id);
+        let splits = &*splits;
         let units_acquired = adjustments::as_acquired_quantity(units, splits, parcel.date);
         let amit = events_with_disposal(
             self.amit.get(&parcel.id).map_or(&[][..], |v| v),

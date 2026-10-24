@@ -1103,6 +1103,11 @@ fn is_busy_code(code: i32) -> bool {
 /// A **busy** database is classified first, ahead of the constraint kinds:
 /// see [`is_busy`]. It is neither the client's fault nor the server's, so it
 /// is neither a 422 nor a 500 — it answers `503` with [`BUSY_BODY`].
+/// The prefix of every `RAISE(ABORT, …)` message 0055's guard triggers raise:
+/// a write behind a rounded share split or bonus issue (or to the unit grid it
+/// rounded onto). What follows it is the reason, answered `422`.
+const ROUNDED_ENTITLEMENT_GUARD: &str = "rounded entitlement: ";
+
 impl From<sqlx::Error> for ApiError {
     #[expect(
         clippy::wildcard_enum_match_arm,
@@ -1120,6 +1125,12 @@ impl From<sqlx::Error> for ApiError {
             // listings.ticker". It names columns/constraints, never a value
             // the client supplied, so it is safe to surface.
             let detail = db.message();
+            // A guard trigger refusing a write that would move a rounded
+            // corporate action's stored per-parcel counts (migration 0055):
+            // its message is the whole user-facing reason.
+            if let Some(reason) = detail.strip_prefix(ROUNDED_ENTITLEMENT_GUARD) {
+                return ApiError::Unprocessable(reason.to_owned());
+            }
             let body = match db.kind() {
                 ErrorKind::ForeignKeyViolation => {
                     "the request refers to a record that does not exist".to_owned()

@@ -357,7 +357,7 @@ async fn problems_for(
         let parcel = ParcelRow::from_row(row)?;
         let as_acquired = as_acquired_quantity(
             UnitsAt::new(allocated, group.date),
-            &inputs.splits,
+            &inputs.splits.for_parcel(parcel.id),
             parcel.date,
         );
         *expected_cost_base

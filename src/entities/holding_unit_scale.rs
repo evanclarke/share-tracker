@@ -231,6 +231,30 @@ pub(crate) async fn db_too_fine(
     }))
 }
 
+/// The unit scale `listing_id` is held to in `account_id` — the override's
+/// when one exists for the pair, else the account's — or `None` where the
+/// holding is unconstrained (or the account does not exist). What a
+/// ratio-driven action's per-holding rounding rounds onto
+/// (`corporate_action`'s stored counts, the scrip exchange and demerger).
+pub(crate) async fn db_unit_scale(
+    conn: &mut sqlx::SqliteConnection,
+    account_id: HoldingAccountId,
+    listing_id: ListingId,
+) -> Result<Option<u32>, sqlx::Error> {
+    Ok(sqlx::query_scalar::<_, Option<u32>>(
+        "SELECT CASE WHEN o.id IS NULL THEN ha.unit_scale ELSE o.unit_scale END \
+         FROM holding_accounts ha \
+         LEFT JOIN holding_unit_scales o \
+                ON o.holding_account_id = ha.id AND o.listing_id = ? \
+         WHERE ha.id = ?",
+    )
+    .bind(listing_id)
+    .bind(account_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten())
+}
+
 /// Which stored quantities a scale change must still fit.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Holding {

@@ -11,6 +11,7 @@ mod edit_guard;
 mod events;
 mod payloads;
 mod representability;
+mod rounding;
 mod storage;
 
 use super::*;

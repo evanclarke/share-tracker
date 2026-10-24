@@ -36,10 +36,10 @@ use crate::domain::cost_base::{Term, UnrepresentableCost, UnrepresentableQuantit
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action::{
-    self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
+    self, ActionKind, ListingSplits, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, UnitsAt,
 };
 use crate::entities::holding_unit_scale::{self, TooFine};
-use crate::entities::trade::{self, Trade, TradeType};
+use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
 use crate::infra::decimal::parse_dec;
@@ -237,18 +237,20 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
 /// they are allotted on or after the record date, out of the entitlement this
 /// figure caps. Each quantity is re-based to record-date units across any
 /// splits/consolidations so buys, sells, prior usage, and the cap all
-/// compare in one basis.
+/// compare in one basis — each parcel by its own conversion (a rounded
+/// action's stored count for it), and each sale by the conversion of the
+/// parcel it drew on, so the holding sums to the count its register holds.
 pub(crate) async fn db_held_at_record_date(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
     action_id: i64,
     record_date: NaiveDate,
-    splits: &[SplitEvent],
+    splits: &ListingSplits,
 ) -> Result<Decimal, sqlx::Error> {
-    let held_rows = sqlx::query(
-        "SELECT trade_type, date, quantity FROM trades \
+    let bought = sqlx::query(
+        "SELECT id, date, quantity FROM trades \
          WHERE listing_id = ? AND settlement_date <= ? \
-           AND rights_action_id IS NOT ?",
+           AND trade_type IN ('Buy', 'DRP') AND rights_action_id IS NOT ?",
     )
     .bind(listing_id)
     .bind(record_date)
@@ -256,16 +258,31 @@ pub(crate) async fn db_held_at_record_date(
     .fetch_all(&mut *conn)
     .await?;
     let mut held = Decimal::ZERO;
-    for row in &held_rows {
-        let trade_date: NaiveDate = row.try_get("date")?;
+    for row in &bought {
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
-        let in_record_units = UnitsAt::new(qty, trade_date)
-            .rebased(splits, Some(record_date))
+        held += UnitsAt::new(qty, row.try_get("date")?)
+            .rebased(&splits.for_parcel(row.try_get("id")?), Some(record_date))
             .quantity();
-        match row.try_get::<TradeType, _>("trade_type")? {
-            TradeType::Buy | TradeType::DRP => held += in_record_units,
-            TradeType::Sell => held -= in_record_units,
-        }
+    }
+    // A Sell's quantity is the sum of its allocations, each re-based as the
+    // parcel it drew on is.
+    let sold = sqlx::query(
+        "SELECT pa.purchase_trade_id, s.date, pa.quantity_allocated \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE s.listing_id = ? AND s.settlement_date <= ? AND s.trade_type = 'Sell'",
+    )
+    .bind(listing_id)
+    .bind(record_date)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in &sold {
+        let qty = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        held -= UnitsAt::new(qty, row.try_get("date")?)
+            .rebased(
+                &splits.for_parcel(row.try_get("purchase_trade_id")?),
+                Some(record_date),
+            )
+            .quantity();
     }
     Ok(held)
 }
@@ -310,18 +327,19 @@ pub(crate) async fn db_rights_used(
     conn: &mut sqlx::SqliteConnection,
     action_id: i64,
     record_date: NaiveDate,
-    splits: &[SplitEvent],
+    splits: &ListingSplits,
 ) -> Result<Decimal, sqlx::Error> {
-    let prior_rows = sqlx::query("SELECT date, quantity FROM trades WHERE rights_action_id = ?")
-        .bind(action_id)
-        .fetch_all(&mut *conn)
-        .await?;
+    let prior_rows =
+        sqlx::query("SELECT id, date, quantity FROM trades WHERE rights_action_id = ?")
+            .bind(action_id)
+            .fetch_all(&mut *conn)
+            .await?;
     let mut used = Decimal::ZERO;
     for row in &prior_rows {
         let trade_date: NaiveDate = row.try_get("date")?;
         let qty = parse_dec("quantity", row.try_get("quantity")?)?;
         used += UnitsAt::new(qty, trade_date)
-            .rebased(splits, Some(record_date))
+            .rebased(&splits.for_parcel(row.try_get("id")?), Some(record_date))
             .quantity();
     }
     let sold_units: Vec<String> =
@@ -421,7 +439,7 @@ async fn execute(
         return Err(ExerciseError::BackDatedOverWholeHolding(back_dated));
     }
 
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut tx, action.listing_id).await?;
     let held =
         db_held_at_record_date(&mut tx, action.listing_id, action_id, record_date, &splits).await?;
     let entitled = entitled_units(held, rights_units, rights_held_units);
@@ -429,8 +447,11 @@ async fn execute(
     // Rights already used against this action (prior exercises + rights
     // sales) plus this exercise, re-based to record-date units.
     let mut used = db_rights_used(&mut tx, action_id, record_date, &splits).await?;
+    // The exercise's own units, dated on or after the record date: no parcel
+    // of its own yet, so the actions as announced (it will be a fresh parcel,
+    // which no rounded action between the two dates has converted).
     used += UnitsAt::new(body.units, body.date)
-        .rebased(&splits, Some(record_date))
+        .rebased(&splits.announced(), Some(record_date))
         .quantity();
     // `None` means the entitlement is past `Decimal`'s range, so nothing the
     // request can name reaches it (`entitled_units`).
@@ -549,6 +570,7 @@ mod tests {
     use super::*;
     use crate::entities;
     use crate::entities::corporate_action::{CorporateAction, FractionRule};
+    use crate::entities::trade::TradeType;
     use crate::entities::{listing, rba_fx_rate, sell};
     use crate::reports::realised_gains::DisposalId;
     use crate::reports::{open_parcels, realised_gains};

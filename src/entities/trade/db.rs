@@ -62,7 +62,8 @@ impl CrudEntity for Trade {
          fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
          residual_brought_forward, residual_carried_forward, residual_paid_out, rights_action_id, \
          buyback_action_id, scrip_action_id, demerger_action_id, deemed_acquisition_date, \
-         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id";
+         holding_account_id, transfer_id, ess_statement_id, worthless_action_id, inheritance_id, \
+         cash_in_lieu_action_id";
     const ORDER_BY: &'static str = "date, id";
     const NOUN: &'static str = "trade";
 
@@ -684,11 +685,11 @@ async fn write(
     // re-based back across any share splits/consolidations (TD 2000/10)
     // before comparing.
     if let Some(id) = id {
-        let splits = corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id).await?;
+        let splits = corporate_action::db_splits_for_listing(&mut tx, trade.listing_id).await?;
         let allocated_total = corporate_action::sold_in_acquired_units(
             AcquiredUnits::new(trade.quantity),
             open_parcels::db_parcel_sales(&mut tx, id).await?,
-            &splits,
+            &splits.for_parcel(id),
             trade.date,
         );
         if AcquiredUnits::new(trade.quantity) < allocated_total {

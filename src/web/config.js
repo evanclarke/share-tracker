@@ -94,6 +94,17 @@ export const ENTITIES = [
     columns: ['id', 'holding_account_id', 'listing_id', 'unit_scale'],
   },
   {
+    slug: 'entitlement_overrides', title: 'Units Received Overrides', menu: 'Activity', api: '/entitlement_overrides',
+    desc: 'The units a holding’s statement says it received from a share split, bonus issue, scrip-for-scrip exchange or demerger whose fractional-entitlement rule is not Exact, where that disagrees with the rule’s own rounding. It replaces the holding’s rounded count, which is spread over its parcels by largest remainder. For an exchange or demerger, enter it before running the operation (it is frozen once the operation has run).',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('corporate_action_id', 'Corporate action', 'corporateActions', { required: true }),
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
+      dec('units_received', 'Units received', { required: true, hint: 'The holding’s whole post-action count of the action’s listing (of the replacement or demerged listing for an exchange or demerger), on the account’s unit scale.' }),
+    ],
+    columns: ['id', 'corporate_action_id', 'holding_account_id', 'units_received'],
+  },
+  {
     slug: 'currencies', title: 'Currencies', menu: 'Reference Data', api: '/currencies', readonly: true,
     desc: 'Recognised ISO 4217 fiat and ISO 24165 token codes (import-managed).',
     columns: ['code', 'kind', 'numeric_code', 'name', 'short_name', 'minor_units', 'source'],
@@ -411,7 +422,7 @@ export const ENTITIES = [
       dec('demerger_close_price', 'Demerger: actual close that day', { optional: true, default: '', hint: 'What the security really traded at, in the listing’s quote currency — the price provider restates its whole pre-demerger series for the spin-off, and this is what re-bases it back.' }),
       txt('demerger_close_sourced_from', 'Demerger: close sourced from', { optional: true, hint: 'Where the figure came from, e.g. “nyse.com daily close, retrieved 2026-08-20”.' }),
       txt('demerger_close_reason', 'Demerger: why it is stated', { optional: true, hint: 'Why the close had to be stated, e.g. “Yahoo adjusts the pre-demerger series by the spin-off factor”.' }),
-      sel('fraction_rule', 'Fractional entitlements', ['Exact', 'Down', 'Up', 'Nearest', 'CashInLieu'], { optional: true, default: '', hint: 'How the registry treats a fractional entitlement where the ratio does not divide a holding, as the issuer announced it (ASX Listing Rule 7.20): Exact = the exact fraction is held; Down / Up / Nearest = rounded onto the holding’s unit precision; CashInLieu = rounded down, the fraction sold and paid out. Recorded now; every rule is currently computed as Exact.' }),
+      sel('fraction_rule', 'Fractional entitlements', ['Exact', 'Down', 'Up', 'Nearest', 'CashInLieu'], { optional: true, default: '', hint: 'How the registry treats a fractional entitlement where the ratio does not divide a holding, as the issuer announced it (ASX Listing Rule 7.20): Exact = the exact fraction is held; Down / Up / Nearest = rounded onto the holding’s unit precision; CashInLieu = rounded down, the fraction sold and paid out (record the payment with the row’s Cash in lieu action). Applied once per holding onto its account’s unit scale and stored per parcel; a holding with no unit scale keeps the exact count. A statement that disagrees goes in as a Units Received override.' }),
       sel('worthless_event', 'Worthless: CGT event', ['G3Declaration', 'C2Cancellation'], { optional: true, default: '', hint: 'G3 = liquidator/administrator declaration; C2 = deregistration/cancellation.' }),
     ],
     // The form renders only the selected action_type's field group (plus the
@@ -462,10 +473,11 @@ export const ENTITIES = [
         ];
       }
       if (row.action_type === 'BuyBack') return [{ label: 'Participate', href: '#/participate/' + row.id }];
-      if (row.action_type === 'ScripForScrip') return [{ label: 'Exchange', href: '#/scrip-exchange/' + row.id }];
-      if (row.action_type === 'Demerger') return [{ label: 'Demerge', href: '#/demerge/' + row.id }];
+      const inLieu = row.fraction_rule === 'CashInLieu' ? [{ label: 'Cash in lieu', href: '#/cash-in-lieu/' + row.id }] : [];
+      if (row.action_type === 'ScripForScrip') return [{ label: 'Exchange', href: '#/scrip-exchange/' + row.id }].concat(inLieu);
+      if (row.action_type === 'Demerger') return [{ label: 'Demerge', href: '#/demerge/' + row.id }].concat(inLieu);
       if (row.action_type === 'WorthlessShares') return [{ label: 'Recognise', href: '#/recognise/' + row.id }];
-      return [];
+      return inLieu;
     },
   },
   {
@@ -859,7 +871,7 @@ export const REPORTS = [
         'rights_sale_allocations', 'investment_expenses', 'drp_enrolments',
         'cgt_settings', 'attachments', 'listings', 'listing_renames',
         'closing_prices', 'tax_year_settings', 'rba_fx_rates',
-        'exchange_holidays', 'distribution_events',
+        'exchange_holidays', 'distribution_events', 'entitlement_overrides',
       ], { optional: true, hint: 'Blank browses every audited table. With a Row ID, the table that id belongs to.' }),
       int('row_id', 'Row ID', { hint: 'Blank to browse recent changes across the whole trail \u2014 the only way in for a row created and destroyed by an operation, which no list shows. Otherwise the audited row\u2019s own id: the id column of its entity list while it exists, or the Row ID an entry here carries once it is gone \u2014 for tax_year_settings, the financial year itself (e.g. 2026).' }),
       int('before_id', 'Older than (history id)', { hint: 'Browse cursor: show the entries older than this trail entry. The \u201cLoad older\u201d button below the table fills it in.' }),
@@ -1081,6 +1093,21 @@ export const ACTIONS = [
       return 'Recognised worthless ' + listing(a.listing_id) + ' as a capital loss'
         + ' (closing sell #' + (r && r.sell ? r.sell.id : '?') + ').';
     },
+  },
+  // Cash in lieu: one holding's payment for the fraction a CashInLieu action's
+  // rounding left, recorded as a Sell of exactly that fraction (dated the
+  // payment date, the cash as its proceeds). One call per holding.
+  {
+    slug: 'cash-in-lieu', nav: 'corporate_actions', ownerApi: '/corporate_actions', cancel: '#/e/corporate_actions', submit: 'Record payment',
+    post: function (id) { return '/corporate_actions/' + id + '/cash_in_lieu'; },
+    title: function (id, owner, listing) { return 'Cash in lieu for ' + listing(owner.listing_id) + ' action #' + id; },
+    desc: function (a, listing) { return 'Records the cash a holding was paid for the fraction this action’s rounding left it (rounded down onto the account’s unit scale, the fractions sold by the registry). It is the disposal of that fraction: a Sell of exactly it, dated the payment date, at the cash paid, costed out of the parcel that carried it. For an exchange or demerger, run the operation first — the fraction is of the replacement listing’s units. Undo by deleting the Sell from the Sells view.'; },
+    fields: [
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1', hint: 'The holding the registry paid — one payment per holding.' }),
+      dt('date', 'Payment date', { required: true, hint: 'On or after the action’s date; the disposal’s date for CGT.' }),
+      dec('proceeds', 'Cash paid', { required: true, hint: 'In the listing’s currency.' }),
+    ],
+    toast: function (trade, listing) { return trade ? 'Recorded cash in lieu as ' + describeTrade(trade, listing) + ' (trade #' + trade.id + ').' : 'Recorded cash in lieu.'; },
   },
   // AMIT adjustment generation: derives one amit_adjustment per parcel open
   // at the statement's tax year end, in its own listing and holding account.

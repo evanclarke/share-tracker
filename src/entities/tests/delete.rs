@@ -41,6 +41,10 @@ const DELETE_ROUTES: &[(&str, &str)] = &[
         "/holding_unit_scales/9999",
         "no unit-scale override with that id",
     ),
+    (
+        "/entitlement_overrides/9999",
+        "no units-received override with that id",
+    ),
     ("/income/9999", "no income with that id"),
     ("/income/9999/reinvest", "no distribution with that id"),
     ("/inheritances/9999", "no inheritance with that id"),

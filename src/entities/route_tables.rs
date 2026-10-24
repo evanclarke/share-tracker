@@ -36,6 +36,7 @@ pub(crate) const PUT_ROUTES: &[(&str, PutOutcome)] = &[
     ("/listings/{id}", PutOutcome::CreateThenReplace),
     ("/holding_accounts/{id}", PutOutcome::CreateThenReplace),
     ("/holding_unit_scales/{id}", PutOutcome::CreateThenReplace),
+    ("/entitlement_overrides/{id}", PutOutcome::CreateThenReplace),
     ("/trades/{id}", PutOutcome::CreateThenReplace),
     ("/income/{id}", PutOutcome::CreateThenReplace),
     ("/interest_income/{id}", PutOutcome::CreateThenReplace),
@@ -184,6 +185,11 @@ pub(crate) const LIST_ROUTES: &[ListRoute] = &[
         path: "/holding_unit_scales",
         filters: &[],
         reason: "One row per exceptional holding — a handful at most, read whole.",
+    },
+    ListRoute {
+        path: "/entitlement_overrides",
+        filters: &["corporate_action_id", "holding_account_id"],
+        reason: "",
     },
     ListRoute {
         path: "/cgt_settings",

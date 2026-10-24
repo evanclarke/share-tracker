@@ -53,6 +53,7 @@
 //! entitlements (the demerge keeps exact fractional unit counts).
 
 use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::entitlement_rounding::ParcelCount;
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action::{self, ActionKind};
@@ -150,6 +151,20 @@ pub enum DemergeError {
     /// demerger dated after today (SCENARIOS S-10), which the 422 names.
     #[error("the demerger's closing Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
+    /// A holding cannot be rounded onto the demerged listing's grid (a parcel
+    /// left with no units, or a units-received override off it). Mapped to
+    /// `422`.
+    #[error("the demerger's rounding of a holding failed: {0}")]
+    Rounding(#[source] corporate_action::RoundError),
+}
+
+impl From<corporate_action::RoundError> for DemergeError {
+    fn from(e: corporate_action::RoundError) -> Self {
+        match e {
+            corporate_action::RoundError::Db(err) => DemergeError::Db(err),
+            other @ corporate_action::RoundError::Holding { .. } => DemergeError::Rounding(other),
+        }
+    }
 }
 
 impl From<sell::SellError> for DemergeError {
@@ -200,6 +215,7 @@ async fn execute(
         demerger_new_units: new_units,
         demerger_held_units: held_units,
         demerger_cost_base_pct: cost_base_pct,
+        fraction_rule,
         // The stated pre-demerger close is a price-series fact, read only by
         // the closing-price re-base; the demerge operation ignores it.
         ..
@@ -228,9 +244,23 @@ async fn execute(
     // demerger, so it is bounded at the demerger date.
     let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id, action.date).await?;
     let parcels = inputs.open_parcels(&mut tx, action.listing_id).await?;
+    // The registry's rounding of each holding's demerged-entity units onto
+    // the demerged listing's grid (`fraction_rule`), distributed across its
+    // parcels; a holding it leaves unrounded keeps the exact ratio's count.
+    // The head parcels keep their own units, so only this leg rounds.
+    let rounded = corporate_action::db_round_replacements(
+        &mut tx,
+        action_id,
+        fraction_rule,
+        demerger_listing_id,
+        (new_units, held_units),
+        &parcels.iter().map(rollover::converted).collect::<Vec<_>>(),
+    )
+    .await?;
 
     let mut replacements: Vec<Replacement> = Vec::with_capacity(parcels.len());
     for p in &parcels {
+        let rounded = rounded.get(&p.parcel.id).copied();
         let carried_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining)?;
 
         // Step 2: apportion by the advised percentage. demerged + head sum
@@ -255,12 +285,18 @@ async fn execute(
             // Checked rather than computed: an entitlement ratio greater than
             // one over a very large holding produces a demerged quantity past
             // `Decimal`'s ceiling, and there is no lesser count to write.
-            demerged_quantity: cost_base::checked_rebased_quantity(
-                ("units held", p.at_date_units.quantity()),
-                ("demerger_new_units", new_units),
-                ("demerger_held_units", held_units),
-            )
-            .map_err(DemergeError::UnrepresentableDemergedQuantity)?,
+            // Where the holding was rounded, the count is its share of the
+            // rounded total instead.
+            demerged_quantity: match rounded {
+                Some(count) => count.after,
+                None => cost_base::checked_rebased_quantity(
+                    ("units held", p.at_date_units.quantity()),
+                    ("demerger_new_units", new_units),
+                    ("demerger_held_units", held_units),
+                )
+                .map_err(DemergeError::UnrepresentableDemergedQuantity)?,
+            },
+            rounded,
             head_cost_base,
             demerged_cost_base,
             currency: p.parcel.currency.clone(),
@@ -324,18 +360,20 @@ async fn execute(
     for r in &replacements {
         // Each Buy takes the id its own INSERT was given — never the previous
         // one plus one, which would be the same guess `MAX(id) + 1` was.
-        for (into, listing_id, quantity, cost_base) in [
+        for (into, listing_id, quantity, cost_base, rounded) in [
             (
                 &mut head_ids,
                 action.listing_id,
                 r.at_date_units,
                 r.head_cost_base,
+                None,
             ),
             (
                 &mut demerged_ids,
                 demerger_listing_id,
                 r.demerged_quantity,
                 r.demerged_cost_base,
+                r.rounded,
             ),
         ] {
             let buy_id = rollover::insert_replacement_buy(
@@ -354,6 +392,18 @@ async fn execute(
                 rollover::Provenance::DemergerAction(action_id),
             )
             .await?;
+            // The rounded count, recorded against the Buy that carries it.
+            if let Some(count) = rounded {
+                corporate_action::db_insert_count(
+                    &mut tx,
+                    action_id,
+                    &ParcelCount {
+                        trade_id: buy_id,
+                        ..count
+                    },
+                )
+                .await?;
+            }
             into.push(buy_id);
         }
     }
@@ -407,6 +457,9 @@ struct Replacement {
     /// Replacement parcels stay in the account of the parcel that produced
     /// them.
     holding_account_id: HoldingAccountId,
+    /// The holding's rounding of this parcel's demerged-entity units, where
+    /// it was rounded — stored against the demerged-entity Buy.
+    rounded: Option<ParcelCount>,
 }
 
 /// The two write-time checks: the demerge has not already been applied, and
@@ -506,6 +559,10 @@ impl From<DemergeError> for ApiError {
                     ApiError::unprocessable("the demerger's parcel allocations are invalid")
                 }
             }
+            DemergeError::Rounding(e) => match e.detail() {
+                Some(detail) => ApiError::Unprocessable(detail),
+                None => ApiError::internal(e),
+            },
             DemergeError::Db(err) => err.into(),
         }
     }

@@ -201,6 +201,12 @@ pub enum SellError {
     /// and re-recognise instead (see `entities::worthless`).
     #[error("this Sell is a worthless-shares recognise closing Sell and cannot be edited")]
     WorthlessSell,
+    /// The existing trade is a cash-in-lieu Sell (`cash_in_lieu_action_id`
+    /// set): its quantity is the fraction its action's rounding stored, so
+    /// free-form edits are rejected. Delete it (`DELETE /sells/:id`) and
+    /// record the payment again instead (see `entities::cash_in_lieu`).
+    #[error("this Sell is a cash-in-lieu payment and cannot be edited")]
+    CashInLieuSell,
     /// The id already holds a trade that is not a plain Sell — a Buy or a
     /// DRP parcel. `PUT /sells/:id` is an upsert, so without this the parcel
     /// would be *rewritten* as a Sell in place, leaving whatever created it
@@ -317,6 +323,11 @@ impl From<SellError> for ApiError {
                 "this Sell is a worthless-shares recognise closing Sell and cannot be edited — \
                  delete it and re-recognise instead",
             ),
+            SellError::CashInLieuSell => ApiError::unprocessable(
+                "this Sell is a cash-in-lieu payment, disposing of the fraction its corporate \
+                 action's rounding left, and cannot be edited — delete it and record the \
+                 payment again instead",
+            ),
             SellError::PurchaseInDifferentAccount => ApiError::unprocessable(
                 "an allocated parcel is held in a different holding account from the Sell — \
                  transfer it first or fix the Sell's account",
@@ -412,6 +423,7 @@ struct SellProvenanceRow {
     demerger_action_id: Option<i64>,
     transfer_id: Option<i64>,
     worthless_action_id: Option<i64>,
+    cash_in_lieu_action_id: Option<i64>,
 }
 
 /// Whether the trade `id` is a holding-account transfer's network-fee disposal
@@ -565,7 +577,7 @@ async fn write(
     if let Some(id) = id {
         let existing: Option<SellProvenanceRow> = sqlx::query_as(
             "SELECT trade_type, buyback_action_id, scrip_action_id, demerger_action_id, \
-                    transfer_id, worthless_action_id \
+                    transfer_id, worthless_action_id, cash_in_lieu_action_id \
              FROM trades WHERE id = ?",
         )
         .bind(id)
@@ -598,6 +610,9 @@ async fn write(
             }
             if p.worthless_action_id.is_some() {
                 return Err(SellError::WorthlessSell);
+            }
+            if p.cash_in_lieu_action_id.is_some() {
+                return Err(SellError::CashInLieuSell);
             }
         }
         // A transfer's network-fee disposal Sell carries its provenance on the
@@ -689,9 +704,10 @@ pub(crate) enum SellProvenance {
     DemergerAction(i64),
     Transfer(i64),
     WorthlessAction(i64),
+    CashInLieuAction(i64),
 }
 
-/// The five provenance columns as the INSERT binds them: one operation's id in
+/// The six provenance columns as the INSERT binds them: one operation's id in
 /// its own column, NULL in the other four.
 #[derive(Debug, Clone, Copy, Default)]
 struct ProvenanceColumns {
@@ -700,6 +716,7 @@ struct ProvenanceColumns {
     demerger_action_id: Option<i64>,
     transfer_id: Option<i64>,
     worthless_action_id: Option<i64>,
+    cash_in_lieu_action_id: Option<i64>,
 }
 
 impl SellProvenance {
@@ -711,8 +728,18 @@ impl SellProvenance {
             SellProvenance::DemergerAction(id) => columns.demerger_action_id = Some(id),
             SellProvenance::Transfer(id) => columns.transfer_id = Some(id),
             SellProvenance::WorthlessAction(id) => columns.worthless_action_id = Some(id),
+            SellProvenance::CashInLieuAction(id) => columns.cash_in_lieu_action_id = Some(id),
         }
         columns
+    }
+
+    /// Whether the Sell's quantity is one the operation *computed* rather
+    /// than one the taxpayer stated — exempt from the unit-scale check, which
+    /// is for typing slips: a whole-holding closing Sell consumes whatever
+    /// each parcel holds, and a cash-in-lieu Sell disposes of the fraction a
+    /// rounding left off the grid by definition.
+    fn computes_quantity(self) -> bool {
+        self.closes_whole_holding() || matches!(self, SellProvenance::CashInLieuAction(_))
     }
 
     /// Whether the operation's closing Sell mechanically closes the **whole**
@@ -844,8 +871,8 @@ pub(crate) async fn upsert_sell_in_tx(
           currency, brokerage, gst_on_brokerage, brokerage_includes_gst, brokerage_currency, \
           fx_rate, spot_fx_rate, contract_note_ref, statement_total, \
           buyback_action_id, scrip_action_id, demerger_action_id, holding_account_id, transfer_id, \
-          worthless_action_id) \
-         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+          worthless_action_id, cash_in_lieu_action_id) \
+         VALUES (?, 'Sell', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              trade_type             = 'Sell', \
              date                   = excluded.date, \
@@ -868,7 +895,8 @@ pub(crate) async fn upsert_sell_in_tx(
              demerger_action_id     = excluded.demerger_action_id, \
              holding_account_id     = excluded.holding_account_id, \
              transfer_id            = excluded.transfer_id, \
-             worthless_action_id    = excluded.worthless_action_id",
+             worthless_action_id    = excluded.worthless_action_id, \
+             cash_in_lieu_action_id = excluded.cash_in_lieu_action_id",
         id.map(|id| id.0),
     )
     .bind(body.date)
@@ -892,6 +920,7 @@ pub(crate) async fn upsert_sell_in_tx(
     .bind(body.holding_account_id)
     .bind(columns.transfer_id)
     .bind(columns.worthless_action_id)
+    .bind(columns.cash_in_lieu_action_id)
     .execute(&mut *tx)
     .await?;
     // Read straight off the statement that wrote the row, on this very
@@ -916,7 +945,7 @@ pub(crate) async fn upsert_sell_in_tx(
     // A quantity the taxpayer states must sit on its holding's unit grid; a
     // whole-holding closing Sell consumes whatever each parcel holds, which a
     // non-dividing ratio can leave off it, so it is not refused for that.
-    let stated = !provenance.is_some_and(SellProvenance::closes_whole_holding);
+    let stated = !provenance.is_some_and(SellProvenance::computes_quantity);
     if stated
         && let Some(too_fine) = holding_unit_scale::db_too_fine(
             &mut *tx,
@@ -1011,7 +1040,7 @@ pub(crate) async fn upsert_sell_in_tx(
         let total = corporate_action::sold_in_acquired_units(
             AcquiredUnits::new(purchase_qty),
             open_parcels::db_parcel_sales(&mut *tx, alloc.purchase_trade_id).await?,
-            &splits,
+            &splits.for_parcel(alloc.purchase_trade_id),
             purchase_date,
         );
         if total > AcquiredUnits::new(purchase_qty) {

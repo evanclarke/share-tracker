@@ -1331,7 +1331,8 @@ pub async fn db_cost_base_reduction_events(
         let trade_date: chrono::NaiveDate = row.try_get("trade_date")?;
         let covered = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
         let cba = parse_dec("cost_base_adjustment", row.try_get("cost_base_adjustment")?)?;
-        let splits = splits.get(&listing_id).map_or(&[][..], |v| v);
+        let splits = adjustments::parcel_splits(&splits, listing_id, trade_id);
+        let splits = &*splits;
         // Units of the parcel already disposed of when the statement's year
         // ended, re-based back to the parcel's as-acquired basis (an
         // allocation is in its own sale date's units) through the

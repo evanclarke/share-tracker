@@ -344,7 +344,7 @@ struct Placement<'a> {
     statement_id: i64,
     year_end: NaiveDate,
     mode: WriteMode,
-    splits: &'a [corporate_action::SplitEvent],
+    splits: &'a corporate_action::ListingSplits,
     created: Vec<GeneratedAdjustment>,
     units_adjusted: Decimal,
     unattributed: Vec<UnattributedUnits>,
@@ -373,11 +373,12 @@ impl Placement<'_> {
         Box::pin(async move {
             let year_end = self.year_end;
             let moves = db_rollovers_of(&mut *conn, holding.id).await?;
+            let splits = self.splits.for_parcel(holding.id).into_owned();
             let mut staying = holding.units;
             for movement in moves.iter().filter(|m| m.date > year_end) {
                 let carried = corporate_action::as_acquired_quantity(
                     corporate_action::UnitsAt::new(movement.units, movement.date),
-                    self.splits,
+                    &splits,
                     holding.basis_date,
                 );
                 let from_this_statement = staying.min(carried);
@@ -399,11 +400,11 @@ impl Placement<'_> {
                         let units = corporate_action::as_acquired_quantity(
                             corporate_action::split_adjusted_quantity(
                                 from_this_statement,
-                                self.splits,
+                                &splits,
                                 holding.basis_date,
                                 Some(movement.date),
                             ),
-                            self.splits,
+                            &self.splits.for_parcel(replacement),
                             movement.date,
                         );
                         self.place(
@@ -431,7 +432,7 @@ impl Placement<'_> {
                 // re-basing runs either way).
                 let rebased = corporate_action::split_adjusted_quantity(
                     staying,
-                    self.splits,
+                    &splits,
                     holding.basis_date,
                     Some(self.year_end),
                 )
@@ -507,7 +508,7 @@ pub async fn db_generate(
     // re-bases each parcel's stored as-acquired quantity into that basis
     // before multiplying. Splits are still needed here to store each
     // quantity in the parcel's own as-acquired basis.
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut tx, listing_id).await?;
 
     if body.replace {
         // Same transaction as the regeneration below, so a failure mid-way
@@ -532,7 +533,7 @@ pub async fn db_generate(
         // column stores as-acquired units (the basis `trade.quantity` caps).
         let units = corporate_action::as_acquired_quantity(
             parcel.remaining_as_of,
-            &splits,
+            &splits.for_parcel(parcel.parcel.id),
             parcel.parcel.date,
         );
         placement

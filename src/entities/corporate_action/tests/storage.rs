@@ -282,9 +282,14 @@ async fn db_demerger_is_not_a_split_or_payment_event() {
     .await
     .unwrap();
 
-    assert!(db_share_split_events(&pool).await.unwrap().is_empty());
     assert!(
-        db_splits_for_listing(&pool, ListingId(1))
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
             .await
             .unwrap()
             .is_empty()
@@ -361,13 +366,18 @@ async fn db_a_demergers_stated_close_moves_no_quantity_cost_base_or_capacity() {
              single unit or a single dollar of cost base"
     );
     assert!(
-        db_splits_for_listing(&pool, ListingId(1))
+        db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
             .await
             .unwrap()
             .is_empty(),
         "the quantity re-basing set never sees a demerger"
     );
-    assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+    assert!(
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         split_adjusted_quantity(
             AcquiredUnits::new(Decimal::from(1000)),
@@ -478,9 +488,14 @@ async fn db_scrip_for_scrip_is_not_a_split_or_payment_event() {
     .await
     .unwrap();
 
-    assert!(db_share_split_events(&pool).await.unwrap().is_empty());
     assert!(
-        db_splits_for_listing(&pool, ListingId(1))
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
             .await
             .unwrap()
             .is_empty()
@@ -528,9 +543,14 @@ async fn db_buy_back_is_not_a_split_or_payment_event() {
     .await
     .unwrap();
 
-    assert!(db_share_split_events(&pool).await.unwrap().is_empty());
     assert!(
-        db_splits_for_listing(&pool, ListingId(1))
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
             .await
             .unwrap()
             .is_empty()
@@ -551,9 +571,14 @@ async fn db_rights_issue_is_not_a_split_or_payment_event() {
     .await
     .unwrap();
 
-    assert!(db_share_split_events(&pool).await.unwrap().is_empty());
     assert!(
-        db_splits_for_listing(&pool, ListingId(1))
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
             .await
             .unwrap()
             .is_empty()
@@ -830,13 +855,17 @@ async fn db_split_events_grouped_by_listing_sorted_by_date() {
         .await
         .unwrap();
 
-    let events = db_share_split_events(&pool).await.unwrap();
+    let events = db_share_split_events(&mut pool.acquire().await.unwrap())
+        .await
+        .unwrap();
     assert_eq!(events.len(), 2);
     let l1: Vec<NaiveDate> = events[&ListingId(1)].iter().map(|e| e.date).collect();
     assert_eq!(l1, vec![d(2024, 11, 30), d(2025, 3, 1)]);
     assert_eq!(events[&ListingId(2)].len(), 1);
 
-    let for_listing = db_splits_for_listing(&pool, ListingId(1)).await.unwrap();
+    let for_listing = db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
+        .await
+        .unwrap();
     assert_eq!(for_listing.len(), 2);
     assert_eq!(for_listing[0].date, d(2024, 11, 30));
 }
@@ -860,7 +889,9 @@ async fn db_split_events_include_bonus_issues_as_equivalent_splits() {
         .await
         .unwrap();
 
-    let events = db_share_split_events(&pool).await.unwrap();
+    let events = db_share_split_events(&mut pool.acquire().await.unwrap())
+        .await
+        .unwrap();
     let l1 = &events[&ListingId(1)];
     assert_eq!(l1.len(), 2);
     assert_eq!(l1[0].date, d(2024, 11, 30));
@@ -874,7 +905,9 @@ async fn db_split_events_include_bonus_issues_as_equivalent_splits() {
         (Decimal::from(11), Decimal::from(10))
     );
 
-    let for_listing = db_splits_for_listing(&pool, ListingId(1)).await.unwrap();
+    let for_listing = db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
+        .await
+        .unwrap();
     assert_eq!(for_listing.len(), 2);
     assert_eq!(for_listing[1].new_units, Decimal::from(11));
     assert_eq!(for_listing[1].old_units, Decimal::from(10));
@@ -908,8 +941,13 @@ async fn db_split_events_carry_each_actions_announced_terms() {
     .unwrap();
 
     for events in [
-        db_splits_for_listing(&pool, ListingId(1)).await.unwrap(),
-        db_share_split_events(&pool).await.unwrap()[&ListingId(1)].clone(),
+        db_splits_for_listing(&mut pool.acquire().await.unwrap(), ListingId(1))
+            .await
+            .unwrap(),
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()[&ListingId(1)]
+            .clone(),
     ] {
         let labels: Vec<String> = events.iter().map(|e| e.terms.label()).collect();
         assert_eq!(

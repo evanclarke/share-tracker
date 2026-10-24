@@ -172,7 +172,7 @@ the precedent: the rule is on the plan, the grid on the holding.
   payment), not a column on it. Until then every rule is computed as `Exact` (`docs/API.md`
   *Fractional entitlements* says so), and a received cash-in-lieu payment is entered as an
   ordinary Sell as before
-- [ ] **Compute per holding, store per parcel.** For a non-`Exact` action, the post-action count of
+- [x] **Compute per holding, store per parcel.** For a non-`Exact` action, the post-action count of
   each holding account is `round(ratio × units on the register at the record date, unit_scale,
   fraction_rule)` — register by **settlement** date, per Financial correctness — with an optional
   per-account "units received" override for a statement that disagrees. The rounded total is
@@ -196,6 +196,44 @@ the precedent: the rule is on the plan, the grid on the holding.
   holding's `unit_scale`) with its own `sell::SellProvenance` variant (a new `trades` provenance
   column, so the `trades` audit trigger pair is re-created and the action is frozen while it
   exists), dated the payment date; with undo (delete) and `?dry_run=true`
+  *Done 2026-10-24 (migrations 0055/0056; `domain::entitlement_rounding`,
+  `corporate_action::rounding`, `entities::entitlement_override`, `entities::cash_in_lieu`).*
+  Decisions made in building it: **a NULL `unit_scale` keeps the action exact** for that holding
+  (no grid to round onto — a crypto wallet holds what the ratio produces; refusing would make an
+  action with one such holding unrecordable), storing nothing for it. **The units an action
+  converts are decided by trade date, not settlement date**: the parcels traded before its `date`
+  less the sales dated before it, because that is the set every quantity re-base converts (a
+  split/bonus has no record date here, and its `date` decides which basis a trade is stated in) —
+  rounding any other set would disagree with the re-base; a Known limitation says so. The
+  **units-received override** is its own audited table/entity (`/entitlement_overrides`, one per
+  action × account), recomputing a split/bonus's listing on write and read by an exchange/demerger
+  when it runs (frozen after). The distribution gives the left-over grid steps first to a parcel the
+  round-down would empty, then by largest remainder, acquisition date, trade id — every count stays
+  within a step of its exact share; a total too small to give each parcel a step is **refused 422**
+  (a zero-unit parcel would strand its cost base). **Dependent-fact edits are refused, not
+  recomputed**: 0055's guard triggers refuse a trade/sale/allocation dated before a rounded
+  split/bonus (in a holding with a grid) and a change to that holding's scale/override, answered
+  422 via an `infra::http` classifier; the action's own edits (ratio, rule, date, an earlier
+  action) and override writes recompute the listing in their transaction. The child table
+  `corporate_action_parcel_counts` is **not audited** (derived from audited, frozen inputs — the
+  `report_snapshots` ground) but is staleness-triggered; `entitlement_overrides` is audited. For a
+  scrip exchange/demerger the stored count is the replacement Buy's quantity (row keyed on that
+  Buy, cascading with the operation's undo). `CashInLieu` carries the fraction on one parcel (to 12
+  places beyond the grid) until `POST /corporate_actions/{id}/cash_in_lieu` sells it
+  (`SellProvenance::CashInLieuAction`, `trades.cash_in_lieu_action_id`, trades audit pair re-created,
+  action frozen, undo = `DELETE /sells`, `?dry_run=true`). Readers convert a parcel through
+  `ListingSplits::for_parcel` (the loaders no longer return a slice); the activity ledger's running
+  balance applies the stored sums. Properties: `domain::entitlement_rounding`'s pure property, and
+  `entities::tests::operations`' new rounded-world property (every rounded operation incl. cash in
+  lieu previews and undoes exactly, and the stored counts of every rounded holding sum to its rounded
+  total, on the grid, each within a step of its exact share, after every step). **The CI seed** is
+  committed — to `proptest-regressions/entities/corporate_action/tests/rounding.txt`, against
+  `a_rounded_unrealised_gain_is_what_selling_everything_that_day_realises`, which runs
+  `unrealised_gains`' property body and strategy unchanged with every ratio action rounded on
+  whole-unit accounts — and passes there; a second instance this work's own run found
+  (`d841d284…`, a 2-for-3 exchange) is committed beside it. Both still fail the `Exact` property in
+  `reports::unrealised_gains`, so they are not in that file: that run fails intermittently on random
+  seeds until item 4 decides `Exact`'s fate
 - [ ] **Retire the exact-fraction machinery where it is no longer reached.** Once every ratio-driven
   action a holding can carry rounds onto a grid, a quantity is a terminating decimal on it
   everywhere. Decide (owner) whether `Exact` stays a permitted rule; if not, migrate existing

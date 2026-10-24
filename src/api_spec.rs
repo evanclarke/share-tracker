@@ -37,6 +37,7 @@ use crate::entities::amit_adjustment_generation::{GenerateBody, GeneratedAdjustm
 use crate::entities::amma::{AmmaStatement, AmmaStatementBody};
 use crate::entities::attachment::Attachment;
 use crate::entities::buyback_participation::{Participation, ParticipationBody};
+use crate::entities::cash_in_lieu::CashInLieuBody;
 use crate::entities::cgt_settings::{CgtSettings, CgtSettingsBody};
 use crate::entities::closing_price::{
     BackfillBody, BackfillSummary, ClearBody, ClearSummary, ClosingPrice, FetchBody,
@@ -48,6 +49,7 @@ use crate::entities::demerger::Demerge;
 use crate::entities::distribution_event::DistributionEvent;
 use crate::entities::drp_enrolment::{DrpEnrolment, DrpEnrolmentBody};
 use crate::entities::drp_reinvestment::ReinvestBody;
+use crate::entities::entitlement_override::{EntitlementOverride, EntitlementOverrideBody};
 use crate::entities::ess_statement::{EssStatement, EssStatementBody};
 use crate::entities::exchange::{Exchange, ExchangeBody};
 use crate::entities::exchange_holiday::{ExchangeHoliday, ExchangeHolidayBody};
@@ -208,8 +210,9 @@ account: /trades, /income, /investment_expenses, /amma_statements, \
 /distribution_events (the last three have no holding account); \
 /interest_income takes ?holding_account_id= and the date range; \
 /drp_enrolments takes ?listing_id= and ?holding_account_id=; \
-/amit_adjustments takes ?amma_statement_id= and ?trade_id=, and \
-/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=. \
+/amit_adjustments takes ?amma_statement_id= and ?trade_id=, \
+/parcel_allocations ?sale_trade_id= and ?purchase_trade_id=, and \
+/entitlement_overrides ?corporate_action_id= and ?holding_account_id=. \
 /rights_sales takes ?listing_id= (the rights issue's listing), \
 ?holding_account_id=, ?rights_action_id= and the date range; \
 /exchange_holidays and /exchange_holidays/{mic} take the date range over \
@@ -284,6 +287,7 @@ const TAGS: &[(&str, &str)] = &[
     ("/listings", "Listings"),
     ("/holding_accounts", "Holding accounts"),
     ("/holding_unit_scales", "Holding accounts"),
+    ("/entitlement_overrides", "Corporate actions"),
     ("/rba_fx_rates", "RBA FX rates"),
     ("/mic_registry", "MIC registry"),
     ("/currencies", "Currencies"),
@@ -893,6 +897,7 @@ components!(
     AmitAdjustmentBody,
     HoldingAccountBody,
     HoldingUnitScaleBody,
+    EntitlementOverrideBody,
     InheritanceBody,
     DrpEnrolmentBody,
     EssStatementBody,
@@ -912,6 +917,7 @@ components!(
     ExerciseBody,
     SellRightsBody,
     ParticipationBody,
+    CashInLieuBody,
     GenerateBody,
     snapshot::GenerateBody,
     RegenerateBody,
@@ -932,6 +938,7 @@ components!(
     AmitAdjustment,
     HoldingAccount,
     HoldingUnitScale,
+    EntitlementOverride,
     Inheritance,
     DrpEnrolment,
     EssStatement,
@@ -2893,7 +2900,7 @@ mod tests {
             filtered += 1;
         }
         assert_eq!(
-            filtered, 19,
+            filtered, 20,
             "the set of filtered list routes has changed; the paragraph must describe the new one"
         );
 

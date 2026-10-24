@@ -4534,56 +4534,63 @@ fn deletes_blocked_by_a_dependant_documented() {
     assert!(API_MD.contains("`DELETE` returns `422` while anything still references the exchange"));
 }
 
-/// Docs-sync pin for fractional entitlements (SCENARIOS E-11, E-36). The
-/// behaviour — every ratio-driven action keeping the exact fraction its ratio
-/// produces — is pinned by tests in the corporate-action and rollover modules;
-/// what needed writing down is the *convention* (registry rounding and
-/// cash-in-lieu are deliberately not modelled), stated for all four ratio
-/// actions rather than only `ShareSplit` and `Demerger`, and the answer to the
-/// question it leaves the reader with: what to do with the cash actually
-/// received for a fraction.
+/// Docs-sync pin for fractional entitlements (SCENARIOS E-11, E-36; TODO
+/// "Unit granularity and registry rounding of fractional entitlements"). The
+/// behaviour — a non-`Exact` rule rounding each holding onto its grid and
+/// storing each parcel's count, `Exact` keeping the exact fraction, the
+/// cash-in-lieu disposal — is pinned by tests in `domain::entitlement_rounding`,
+/// `corporate_action::tests::rounding` and `entities::cash_in_lieu`; what needed
+/// writing down is how each rule applies, the distribution rule, what freezes
+/// behind a rounded action, and the worked figures a reader can check their own
+/// entry against.
 #[test]
 fn fractional_entitlements_documented() {
-    // The shared section: the convention, its reason, and both registry
-    // practices it declines to model.
     assert!(API_MD.contains("### Fractional entitlements"));
     assert!(API_MD.contains(
         "Every ratio-driven action — `ShareSplit`, `BonusIssue`, `ScripForScrip`, `Demerger` — \
          carries a required **`fraction_rule`**"
     ));
-    // The rule's five values, and the honest statement of what applies today
-    // (the rounding itself is the section's next TODO item).
     for rule in ["`Exact`", "`Down`", "`Up`", "`Nearest`", "`CashInLieu`"] {
         assert!(API_MD.contains(&format!("| {rule} |")), "{rule}");
     }
-    assert!(API_MD.contains("**What currently applies: every rule is computed as `Exact`.**"));
-    assert!(API_MD.contains(
-        "Until then every ratio-driven action keeps the **exact fractional quantity** its ratio \
-         produces"
-    ));
     assert!(API_MD.contains("sells the aggregated fractions on-market and pays **cash in lieu**"));
-    assert!(API_MD.contains("would silently lose (or invent) part of a parcel"));
-    // What to do with the cash: a CGT event on the disposed fraction, entered
-    // as an ordinary Sell — not a rounding to be absorbed.
+    // How a rounded rule applies: per holding, onto the grid, by largest
+    // remainder — the section's own worked example — and stored.
+    assert!(API_MD.contains("**How a rule other than `Exact` applies.**"));
+    assert!(
+        API_MD.contains(
+            "**distributed across the holding's parcels by largest remainder** on the grid"
+        )
+    );
     assert!(API_MD.contains(
-        "it is the disposal of that fraction and its own (small) CGT event, not a bookkeeping \
-         rounding: enter it as an ordinary [Sell](#sells) of the fractional units"
+        "Two 50-unit parcels after a 1-for-3 consolidation are 17 + 16 = 33 units — never 16.67 \
+         + 16.67."
     ));
-    assert!(API_MD.contains("A registry that rounds the entitlement *up* to a whole unit instead"));
-    // E-11 / E-36: the two bullets that stated it for neither, with the
-    // worked figures a reader can check their own entry against.
+    assert!(
+        API_MD.contains("A holding whose `unit_scale` is `null` has **no grid to round onto**")
+    );
+    assert!(API_MD.contains("**The facts a stored count rests on are frozen while it stands.**"));
+    assert!(API_MD.contains("**units-received override**"));
+    // Cash in lieu is the operation's disposal of the fraction.
+    assert!(API_MD.contains("### Paying cash in lieu"));
+    assert!(API_MD.contains("writes the **disposal of the fraction**"));
+    // `Exact` keeps the exact fraction, with the worked figures (E-11 / E-36).
+    assert!(
+        API_MD.contains("**`Exact`** keeps the **exact fractional quantity** its ratio produces")
+    );
+    assert!(API_MD.contains("would silently lose (or invent) part of a parcel"));
     assert!(API_MD.contains("a 1-for-10 issue on 105 units gives 10.5 bonus units"));
     assert!(API_MD.contains(
         "a 1-for-3 exchange of 101 units gives 33.666666666666666666666666667 replacement units"
     ));
-    // …and the two that did, now pointing at the shared section — plus the
-    // unit-precision section, whose computed quantities are what land off a
-    // holding's grid.
-    assert_eq!(
+    assert!(API_MD.contains("A registry that rounds the entitlement *up* to a whole unit"));
+    // Each ratio-driven type's bullet, the unit-precision section and the
+    // known limitation all point at the shared section.
+    assert!(
         API_MD
             .matches("[Fractional entitlements](#fractional-entitlements)")
-            .count(),
-        5
+            .count()
+            >= 5
     );
 }
 

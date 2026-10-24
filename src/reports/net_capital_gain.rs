@@ -494,7 +494,7 @@ async fn non_disposal_gains(
         for sale in contemplated.get(&parcel.id).map_or(&[][..], |v| v) {
             let units = corporate_action::as_acquired_quantity(
                 sale.quantity,
-                splits_of(&splits, parcel.listing_id),
+                &corporate_action::parcel_splits(&splits, parcel.listing_id, parcel.id),
                 parcel.date,
             );
             events = contemplated_disposal::events_with_disposal(&events, units, sale.date);
@@ -538,7 +538,7 @@ async fn non_disposal_gains(
         // window is ex-entitlement and declined here, exactly as the cost base
         // it would otherwise have to disagree with declines it.
         let Some(per_unit) = event.per_unit_for(
-            splits_of(&splits, parcel.listing_id),
+            &corporate_action::parcel_splits(&splits, parcel.listing_id, parcel.id),
             &parcel.currency,
             parcel.date,
             parcel.settlement_date,
@@ -615,7 +615,7 @@ async fn non_disposal_gains(
         } in unit_cohorts(
             parcel,
             sold.get(&trade_id).map_or(&[][..], |v| v),
-            splits_of(&splits, parcel.listing_id),
+            &corporate_action::parcel_splits(&splits, parcel.listing_id, parcel.id),
         ) {
             let mut remaining = cohort_initial_cost(&parcel.parcel(), units);
             for event in events.iter() {
@@ -745,14 +745,6 @@ async fn non_disposal_gains(
 /// `parcel.quantity` is non-zero: the caller guards it.
 fn cohort_initial_cost(parcel: &cost_base::Parcel<'_>, units: AcquiredUnits) -> Decimal {
     cost_base::prorated_initial_cost(parcel.initial_cost(), units, parcel.quantity)
-}
-
-/// This listing's split/consolidation events, or an empty slice.
-fn splits_of(
-    splits: &HashMap<ListingId, Vec<corporate_action::SplitEvent>>,
-    listing_id: ListingId,
-) -> &[corporate_action::SplitEvent] {
-    splits.get(&listing_id).map_or(&[][..], |v| v)
 }
 
 /// The `ParcelRow` for a reduction row's trade, mapped once per parcel however

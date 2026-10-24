@@ -9,6 +9,7 @@ pub mod amit_adjustment_generation;
 pub mod amma;
 pub mod attachment;
 pub mod buyback_participation;
+pub mod cash_in_lieu;
 pub mod cgt_settings;
 pub mod closing_price;
 pub mod corporate_action;
@@ -17,6 +18,7 @@ pub mod demerger;
 pub mod distribution_event;
 pub mod drp_enrolment;
 pub mod drp_reinvestment;
+pub mod entitlement_override;
 pub mod ess_statement;
 pub mod ess_vest;
 pub mod exchange;
@@ -56,6 +58,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
         .merge(listing_rename::router())
         .merge(holding_account::router())
         .merge(holding_unit_scale::router())
+        .merge(entitlement_override::router())
         .merge(currencies::router())
         .merge(mic_registry::router())
         .merge(rba_fx_rate::router())
@@ -85,6 +88,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
         .merge(inheritance::router())
         .merge(transfer::router())
         .merge(worthless::router())
+        .merge(cash_in_lieu::router())
         .merge(attachment::router())
 }
 

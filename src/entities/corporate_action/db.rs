@@ -5,6 +5,7 @@
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
 use super::model::{ActionKind, CorporateAction};
+use super::rounding::{self, RoundError};
 use crate::domain::adjustments::{
     AcquiredUnits, SplitRatio, UnitsAt, db_payment_currency_conflict, db_splits_for_listing,
     sold_in_acquired_units,
@@ -184,6 +185,21 @@ pub enum WriteError {
     /// Mapped to `422`.
     #[error("a return of capital does not apply to an AMIT")]
     ReturnOfCapitalOnAmit,
+    /// A rounded share split / bonus issue of the listing cannot store its
+    /// per-holding counts over the state the write leaves behind — a holding
+    /// too small to give each parcel a unit on its grid, or a units-received
+    /// override that does not fit it (`rounding::RoundError`). Mapped to `422`.
+    #[error("the listing's rounded entitlements cannot be stored: {0}")]
+    Rounding(#[source] RoundError),
+}
+
+impl From<RoundError> for WriteError {
+    fn from(e: RoundError) -> Self {
+        match e {
+            RoundError::Db(err) => WriteError::Db(err),
+            other @ RoundError::Holding { .. } => WriteError::Rounding(other),
+        }
+    }
 }
 
 impl From<WriteError> for ApiError {
@@ -192,8 +208,8 @@ impl From<WriteError> for ApiError {
             // Frozen while exercise/participation trades reference it → 422.
             WriteError::ReferencedByTrade => ApiError::unprocessable(
                 "this corporate action is referenced by rights-exercise, buy-back, \
-                 scrip-for-scrip, demerger, or worthless-shares trades or by rights sales \
-                 and cannot be edited — delete those rows first (a demerger's stated \
+                 scrip-for-scrip, demerger, worthless-shares or cash-in-lieu trades or by \
+                 rights sales and cannot be edited — delete those rows first (a demerger's stated \
                  pre-demerger close is the one exception: it is a price fact and stays \
                  editable, so change only those four fields)",
             ),
@@ -243,6 +259,11 @@ impl From<WriteError> for ApiError {
                  AMMA statement's cost_base_adjustment, entered as AMIT adjustments (CGT event \
                  E10), not an E4 return of capital",
             ),
+            // A holding the rounding cannot store → 422 naming it.
+            WriteError::Rounding(e) => match e.detail() {
+                Some(detail) => ApiError::Unprocessable(detail),
+                None => ApiError::internal(e),
+            },
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
             // A committed create whose row could not be read back: a real
@@ -266,7 +287,7 @@ impl From<WriteError> for ApiError {
 /// before comparing — the same [`sold_in_acquired_units`] those paths use. A
 /// corporate-action write is the third way the comparison can move: it changes
 /// the split stream itself rather than either side of the sum.
-async fn allocations_fit_parcels(
+pub async fn allocations_fit_parcels(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
 ) -> Result<bool, sqlx::Error> {
@@ -300,9 +321,30 @@ async fn allocations_fit_parcels(
             .2
             .push(UnitsAt::new(allocated, sale_date));
     }
-    Ok(consumed.into_values().all(|(quantity, acquired, sales)| {
-        sold_in_acquired_units(quantity, sales, &splits, acquired) <= quantity
-    }))
+    Ok(consumed
+        .into_iter()
+        .all(|(parcel, (quantity, acquired, sales))| {
+            sold_in_acquired_units(quantity, sales, &splits.for_parcel(parcel), acquired)
+                <= quantity
+        }))
+}
+
+/// Whether a ratio-driven action's own operation has written trades — its
+/// scrip-for-scrip exchange or demerger, or a cash-in-lieu payment. What was
+/// read when it ran (the action's terms, a units-received override) is frozen
+/// from then on.
+pub async fn db_operation_ran(
+    conn: &mut sqlx::SqliteConnection,
+    action_id: i64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM trades \
+                       WHERE scrip_action_id = ?1 OR demerger_action_id = ?1 \
+                          OR cash_in_lieu_action_id = ?1)",
+    )
+    .bind(action_id)
+    .fetch_one(&mut *conn)
+    .await
 }
 
 /// The first quantity of `listing_id` that the recorded split stream re-bases
@@ -350,7 +392,13 @@ pub async fn rebased_quantity_beyond_range(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
 ) -> Result<Option<UnrepresentableQuantity>, sqlx::Error> {
-    let splits = db_splits_for_listing(&mut *conn, listing_id).await?;
+    // A bound on the arithmetic, not any one parcel's conversion: the ratios
+    // as announced (a stored count is on its holding's grid, within a step of
+    // the ratio's share, so it re-bases no further than the ratio does).
+    let splits = db_splits_for_listing(&mut *conn, listing_id)
+        .await?
+        .announced()
+        .into_owned();
     // Nothing re-bases quantities on this listing, so nothing can overflow.
     if splits.is_empty() {
         return Ok(None);
@@ -661,7 +709,7 @@ async fn write(
                 "SELECT EXISTS(SELECT 1 FROM trades \
                                WHERE rights_action_id = ?1 OR buyback_action_id = ?1 \
                                   OR scrip_action_id = ?1 OR demerger_action_id = ?1 \
-                                  OR worthless_action_id = ?1) \
+                                  OR worthless_action_id = ?1 OR cash_in_lieu_action_id = ?1) \
                      OR EXISTS(SELECT 1 FROM rights_sales WHERE rights_action_id = ?1)",
             )
             .bind(id)
@@ -852,6 +900,13 @@ async fn write(
     if let Some(previous) = previous_listing_id.filter(|p| *p != action.listing_id) {
         listings.push(previous);
     }
+    // A rounded split/bonus stores each parcel's count, computed from the
+    // listing's whole history up to it — so every write that can move one
+    // (this action's terms, its date, a new action before it, a move to
+    // another listing) recomputes them, before the checks below read them.
+    for &listing_id in &listings {
+        rounding::db_recompute_listing(&mut tx, listing_id).await?;
+    }
     for &listing_id in &listings {
         // Representability first: `allocations_fit_parcels` re-bases each
         // allocation itself, so an unrepresentable one overflows *inside* that
@@ -953,6 +1008,19 @@ pub enum DeleteError {
     /// delete answers with. Mapped to `422`.
     #[error("this corporate action is still referenced ({0})")]
     StillReferenced(String),
+    /// The listing's later rounded actions cannot store their counts once
+    /// this one is gone. Mapped to `422`.
+    #[error("the listing's rounded entitlements cannot be stored: {0}")]
+    Rounding(#[source] RoundError),
+}
+
+impl From<RoundError> for DeleteError {
+    fn from(e: RoundError) -> Self {
+        match e {
+            RoundError::Db(err) => DeleteError::Db(err),
+            other @ RoundError::Holding { .. } => DeleteError::Rounding(other),
+        }
+    }
 }
 
 impl From<DeleteError> for ApiError {
@@ -969,6 +1037,10 @@ impl From<DeleteError> for ApiError {
                  excess (delete the parcels first)",
             ),
             DeleteError::StillReferenced(body) => ApiError::Unprocessable(body),
+            DeleteError::Rounding(e) => match e.detail() {
+                Some(detail) => ApiError::Unprocessable(detail),
+                None => ApiError::internal(e),
+            },
             DeleteError::Db(err) => err.into(),
         }
     }
@@ -1063,6 +1135,10 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
     // prices exactly as recording one does, so the same pass runs in the
     // delete's own transaction; see `db_upsert` above.
     closing_price::db_rebase_listing_prices(&mut tx, action.listing_id).await?;
+    // The action's own stored counts went with it (ON DELETE CASCADE); a later
+    // rounded action re-based its "units before" through it, so the listing is
+    // recomputed.
+    rounding::db_recompute_listing(&mut tx, action.listing_id).await?;
 
     tx.commit().await?;
     Ok(true)

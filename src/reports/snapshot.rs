@@ -1240,7 +1240,7 @@ mod tests {
     /// The tables whose writes must mark stored snapshots stale, each with the
     /// trigger operations it is *required* to carry — an extra or a missing one
     /// fails — and why that is the set.
-    const STALENESS_TRIGGERED_TABLES: [(&str, &[&str], &str); 10] = [
+    const STALENESS_TRIGGERED_TABLES: [(&str, &[&str], &str); 12] = [
         (
             "trades",
             &["insert", "update", "delete"],
@@ -1324,6 +1324,16 @@ mod tests {
              while an INSERT filling a month that had no rate is the provisional true-up's \
              business (regenerated, not staled — only the rate was interim), and there is no \
              delete route (0031_audit_rba_fx_rates.sql, SCENARIOS M-13)",
+        ),
+        (
+            "corporate_action_parcel_counts",
+            &["insert", "update", "delete"],
+            "a rounded split/bonus issue re-bases each parcel by its stored count, which the              open-holdings reports read; staled from its action's `date`              (0055_rounded_entitlements.sql)",
+        ),
+        (
+            "entitlement_overrides",
+            &["insert", "update", "delete"],
+            "a units-received override replaces a holding's rounded count, so the stored              counts the reports read move with it; staled from its action's `date`              (0055_rounded_entitlements.sql)",
         ),
     ];
 

@@ -48,8 +48,10 @@ use utoipa_axum::routes;
 /// shown to be read *live* by valuation rather than only consumed at trade
 /// write time) and `distribution_events` (0048, the externally fetched
 /// distribution calendar the health alerts compare recorded income against)
-/// — each migration rebuilding `row_history` to extend the CHECK.
-pub const AUDITED_TABLES: [&str; 23] = [
+/// and `entitlement_overrides` (0055, a holding's stated units received from
+/// a rounded corporate action) — each migration rebuilding `row_history` to
+/// extend the CHECK.
+pub const AUDITED_TABLES: [&str; 24] = [
     "trades",
     "parcel_allocations",
     "income",
@@ -73,6 +75,7 @@ pub const AUDITED_TABLES: [&str; 23] = [
     "rba_fx_rates",
     "exchange_holidays",
     "distribution_events",
+    "entitlement_overrides",
 ];
 
 /// One audited table, resolved from a requested name: how `row_history`
@@ -1558,6 +1561,17 @@ mod tests {
                 "amount_per_unit",
                 "'0.8'",
             ),
+            (
+                "entitlement_overrides",
+                Some(
+                    "INSERT INTO corporate_actions (id, action_type, listing_id, date, split_new_units, split_old_units, fraction_rule) VALUES (22, 'ShareSplit', 1, '2024-07-01', '1', '3', 'Down'); \
+                     INSERT INTO entitlement_overrides (id, corporate_action_id, holding_account_id, units_received) VALUES (22, 22, 1, '33')",
+                ),
+                "id",
+                22,
+                "units_received",
+                "'34'",
+            ),
         ];
         assert_eq!(cases.len(), AUDITED_TABLES.len());
 
@@ -1584,7 +1598,8 @@ mod tests {
         // the RightsIssue action were never updated, so their trail is the
         // single DELETE entry (expected 1).
         for (table, key_column, id, expected) in [
-            ("attachments", "id", 17i64, 2i64),
+            ("entitlement_overrides", "id", 22i64, 2i64),
+            ("attachments", "id", 17, 2),
             ("rights_sale_allocations", "id", 14, 2),
             ("rights_sales", "id", 13, 2),
             ("corporate_actions", "id", 12, 1),
@@ -1632,7 +1647,8 @@ mod tests {
         let sql = include_str!("../../migrations/0013_row_history.sql");
         // listing_renames (0018), closing_prices (0021), tax_year_settings
         // (0027), rba_fx_rates (0031), exchange_holidays (0039) and
-        // distribution_events (0048) postdate 0013, and are checked below —
+        // distribution_events (0048) and entitlement_overrides (0055) postdate
+        // 0013, and are checked below —
         // every other table was audited from the start.
         let tables_as_of_0013 = AUDITED_TABLES.into_iter().filter(|&t| {
             t != "listing_renames"
@@ -1641,6 +1657,7 @@ mod tests {
                 && t != "rba_fx_rates"
                 && t != "exchange_holidays"
                 && t != "distribution_events"
+                && t != "entitlement_overrides"
         });
         let mut count = 0;
         for table in tables_as_of_0013 {
@@ -2051,6 +2068,49 @@ mod tests {
                 flat48.matches(&format!("'{col}', OLD.{col}")).count(),
                 2,
                 "both distribution_events triggers must record {col}"
+            );
+        }
+
+        // 0055 introduced entitlement_overrides — a holding's stated units
+        // received from a rounded corporate action — and audited it with the
+        // table: the CHECK, the never-reused key, the one-per-holding UNIQUE,
+        // the re-created guards and the audit pair recording every column.
+        let sql55 = include_str!("../../migrations/0055_rounded_entitlements.sql");
+        assert!(
+            sql55.contains("'entitlement_overrides'"),
+            "0055 must add entitlement_overrides to the table_name CHECK"
+        );
+        assert!(
+            sql55.contains("id                  INTEGER PRIMARY KEY AUTOINCREMENT"),
+            "the surrogate key must not reuse a deleted row's id"
+        );
+        assert!(
+            sql55.contains("UNIQUE (corporate_action_id, holding_account_id)"),
+            "one override per action per account stays enforced"
+        );
+        for op in ["update", "delete"] {
+            assert!(
+                sql55.contains(&format!(
+                    "CREATE TRIGGER entitlement_overrides_row_history_{op} "
+                )),
+                "0055 must create the entitlement_overrides {op} trigger"
+            );
+            assert!(
+                sql55.contains(&format!("CREATE TRIGGER row_history_append_only_{op} ")),
+                "0055 must re-create the row_history {op} guard"
+            );
+        }
+        let flat55 = sql55.split_whitespace().collect::<Vec<_>>().join(" ");
+        for col in [
+            "id",
+            "corporate_action_id",
+            "holding_account_id",
+            "units_received",
+        ] {
+            assert_eq!(
+                flat55.matches(&format!("'{col}', OLD.{col}")).count(),
+                2,
+                "both entitlement_overrides triggers must record {col}"
             );
         }
 

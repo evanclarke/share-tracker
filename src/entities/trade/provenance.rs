@@ -98,6 +98,12 @@ pub(crate) const TRADE_PROVENANCE: &[TradeProvenance] = &[
         edit_refusal: None,
         deleted_alone: false,
     },
+    TradeProvenance {
+        column: "cash_in_lieu_action_id",
+        source: "a cash-in-lieu payment",
+        edit_refusal: None,
+        deleted_alone: false,
+    },
 ];
 
 /// The provenance link named by a [`provenance_column_sql`] result.

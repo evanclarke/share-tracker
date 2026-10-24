@@ -912,6 +912,7 @@ pub const NOT_CLIENT_WRITABLE: &[&str] = &[
     "scrip_action_id",
     "demerger_action_id",
     "worthless_action_id",
+    "cash_in_lieu_action_id",
     // Derived on the trade: how the settlement date was arrived at, and the
     // pre-CGT-testing date an inherited parcel inherits from the deceased.
     "settlement_date_source",
@@ -1353,6 +1354,7 @@ impl TradeBuilder {
                 scrip_action_id: None,
                 demerger_action_id: None,
                 worthless_action_id: None,
+                cash_in_lieu_action_id: None,
                 deemed_acquisition_date: None,
                 holding_account_id: HoldingAccountId(1),
                 transfer_id: None,
@@ -2172,7 +2174,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 54, "every migration is recorded");
+        assert_eq!(from_cache.len(), 56, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in

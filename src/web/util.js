@@ -767,6 +767,13 @@ export async function loadOptions(source) {
       return (await api('GET', '/listings')).map(function (l) { return { value: l.id, label: listingOptionLabel(l) }; });
     case 'holdingAccounts':
       return (await api('GET', '/holding_accounts')).map(function (a) { return { value: a.id, label: a.id + ': ' + a.name }; });
+    // The ratio-driven actions a units-received override can belong to.
+    case 'corporateActions': {
+      const listing = await listingNamer();
+      return (await api('GET', '/corporate_actions'))
+        .filter(function (a) { return a.fraction_rule != null && a.fraction_rule !== 'Exact'; })
+        .map(function (a) { return { value: a.id, label: a.id + ': ' + a.action_type + ' ' + listing(a.listing_id) + ' on ' + a.date + ' (' + a.fraction_rule + ')' }; });
+    }
     case 'amma': {
       const listing = await listingNamer();
       return (await api('GET', '/amma_statements')).map(function (a) { return { value: a.id, label: a.id + ': ' + listing(a.listing_id) + ' FY' + a.tax_year_end_date }; });
@@ -835,6 +842,7 @@ export function tradeOrigin(t) {
   if (t.inheritance_id != null) return 'Inheritance';
   if (t.buyback_action_id != null) return 'Buy-back';
   if (t.worthless_action_id != null) return 'Worthless shares';
+  if (t.cash_in_lieu_action_id != null) return 'Cash in lieu';
   return '';
 }
 
@@ -1264,7 +1272,7 @@ const COLUMN_KINDS = (function () {
   // sparkline series' copy of a stored snapshot row's `current_price`.
   set('rate4', ['avg_cost_base_per_unit', 'average_price', 'current_price', 'unit_price']);
   set('quantity', [
-    'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units',
+    'quantity', 'quantity_allocated', 'securities_held', 'units_held', 'units', 'units_received',
     'original_quantity', 'remaining_quantity', 'quantity_held', 'cgt_discount_eligible_quantity',
     'split_new_units', 'split_old_units', 'bonus_units', 'bonus_held_units',
     // AMIT adjustment cross-check: the statement's units against the set's,

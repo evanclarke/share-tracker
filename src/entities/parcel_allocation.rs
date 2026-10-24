@@ -130,6 +130,7 @@ pub async fn db_upsert(
 ) -> Result<(), UpsertError> {
     use crate::entities::corporate_action;
     use crate::entities::trade::TradeType;
+    use crate::infra::db::read_tx;
     use chrono::NaiveDate;
 
     let sale_row = sqlx::query("SELECT trade_type, date, quantity FROM trades WHERE id = ?")
@@ -161,7 +162,12 @@ pub async fn db_upsert(
     // The parcel's quantity is in as-acquired units while the allocation is in
     // sale-date units: re-base across any share splits/consolidations between
     // them (TD 2000/10). Mirrors the live `PUT /sells` path's check.
-    let splits = corporate_action::db_splits_for_listing(pool, ListingId(purchase_listing)).await?;
+    let mut read = read_tx(pool).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut read, ListingId(purchase_listing))
+        .await?
+        .for_parcel(allocation.purchase_trade_id)
+        .into_owned();
+    read.commit().await?;
     let mut sales = vec![corporate_action::UnitsAt::new(
         allocation.quantity_allocated,
         sale_date,

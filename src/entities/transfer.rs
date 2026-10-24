@@ -673,7 +673,7 @@ async fn transfer_ins(
                 "quantity_allocated",
                 UnitsAt::new(alloc.quantity_allocated, body.date),
             ),
-            &inputs.splits,
+            &inputs.splits.for_parcel(parcel.id),
             parcel.date,
         )
         .map_err(TransferError::UnrepresentableMovedQuantity)?;

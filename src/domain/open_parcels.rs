@@ -211,7 +211,7 @@ pub async fn db_acquired_units_by_allocation(
         let units = adjustments::acquired_units_of_sales(
             parcel,
             &sales,
-            splits.get(&listing_id).map_or(&[][..], |v| v),
+            &adjustments::parcel_splits(&splits, listing_id, parcel_id),
             acquired,
         );
         out.extend(
@@ -282,7 +282,8 @@ pub async fn load(
 
     let mut open = Vec::with_capacity(parcels.len());
     for parcel in parcels {
-        let splits = split_events.get(&parcel.listing_id).map_or(&[][..], |v| v);
+        let splits = adjustments::parcel_splits(&split_events, parcel.listing_id, parcel.id);
+        let splits = &*splits;
         // Cost-base arithmetic stays in the parcel's as-acquired units; each
         // sale's allocated quantity is re-based back across any splits
         // between acquisition and that sale.

@@ -48,8 +48,8 @@
 //! against `PUT`/`DELETE /trades` while referenced (`entities::trade`).
 
 use crate::entities::corporate_action::{
-    self, AcquiredUnits, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
-    sold_in_acquired_units, split_adjusted_quantity,
+    self, AcquiredUnits, ActionKind, ListingSplits, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS,
+    UnitsAt, sold_in_acquired_units, split_adjusted_quantity,
 };
 use crate::entities::rights_exercise::{db_held_at_record_date, db_rights_used, entitled_units};
 use crate::entities::trade::TradeType;
@@ -393,7 +393,7 @@ struct Anchoring<'a> {
     record_date: NaiveDate,
     rights_units: Decimal,
     rights_held_units: Decimal,
-    splits: &'a [SplitEvent],
+    splits: &'a ListingSplits,
 }
 
 /// The allocated parcel's units still registered when the record date
@@ -456,15 +456,12 @@ async fn parcel_units_at_record_date(
             ))
         })
         .collect::<Result<Vec<UnitsAt>, sqlx::Error>>()?;
-    let remaining =
-        parcel_qty - sold_in_acquired_units(parcel_qty, sold, anchoring.splits, parcel_date);
-    Ok(split_adjusted_quantity(
-        remaining,
-        anchoring.splits,
-        parcel_date,
-        Some(anchoring.record_date),
+    let splits = anchoring.splits.for_parcel(purchase_trade_id);
+    let remaining = parcel_qty - sold_in_acquired_units(parcel_qty, sold, &splits, parcel_date);
+    Ok(
+        split_adjusted_quantity(remaining, &splits, parcel_date, Some(anchoring.record_date))
+            .quantity(),
     )
-    .quantity())
 }
 
 /// Rights already anchored to a parcel by the action's *stored* sales, in
@@ -637,7 +634,7 @@ async fn execute(
         return Err(SellRightsError::BeforeRecordDate);
     }
 
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut tx, action.listing_id).await?;
 
     // Total cap, shared with the exercise operation: every right used against
     // the action — exercised or sold — comes out of one entitlement.

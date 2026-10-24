@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e7cf5465c7025e26b37463289788999765705b7b94fae9c6957331b62bbb105d # CI, 2026-10-24: unrealised_gains' sell-everything property under exact fractions — three Buys of 220/529/615, transfers of 68% and 35% to account 2, a 1-for-4 bonus issue and a 2-for-3 split; a holding row of 898.9999999999999999999999999 against its parcels' printed remainders summing to 899 (TODO.md, "Unit granularity and registry rounding of fractional entitlements")
+cc d841d284073736717aabea1f8c5f3010683f9e307c23c5ce9af82cd13e47737f # a second instance of the same defect, found by this item's own full-suite run (2026-10-24) — shrinks to amit = false, facts = [Buy { account: 1, units: 523, cents: 5, brokerage: 0 }, Buy { account: 2, units: 20, cents: 5, brokerage: 0 }, Buy { account: 1, units: 744, cents: 5, brokerage: 0 }, Transfer { to_two: false, pct: 35 }, Scrip { new: 2, old: 3 }], gap_days = 23, price_cents = (8170, 8615)

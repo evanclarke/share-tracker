@@ -51,9 +51,10 @@
 //! crystallise a capital loss (the law does not allow rolling over a loss).
 
 use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::entitlement_rounding::ParcelCount;
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::domain::{cost_base, whole_holding};
-use crate::entities::corporate_action::{self, ActionKind};
+use crate::entities::corporate_action::{self, ActionKind, FractionRule};
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
 use crate::entities::{holding_account, rollover};
@@ -156,6 +157,20 @@ pub enum ExchangeError {
     /// exchange dated after today (SCENARIOS S-10), which the 422 names.
     #[error("the exchange's closing Sell was rejected: {0}")]
     Sell(#[source] sell::SellError),
+    /// A holding cannot be rounded onto the replacement listing's grid (a
+    /// parcel left with no units, or a units-received override off it).
+    /// Mapped to `422`.
+    #[error("the exchange's rounding of a holding failed: {0}")]
+    Rounding(#[source] corporate_action::RoundError),
+}
+
+impl From<corporate_action::RoundError> for ExchangeError {
+    fn from(e: corporate_action::RoundError) -> Self {
+        match e {
+            corporate_action::RoundError::Db(err) => ExchangeError::Db(err),
+            other @ corporate_action::RoundError::Holding { .. } => ExchangeError::Rounding(other),
+        }
+    }
 }
 
 impl From<sell::SellError> for ExchangeError {
@@ -221,9 +236,21 @@ async fn execute(
     // splits; AMIT/return-of-capital reductions up to the exchange date).
     let inputs = rollover::CostBaseInputs::load(&mut tx, action.listing_id, action.date).await?;
     let parcels = inputs.open_parcels(&mut tx, action.listing_id).await?;
+    // The registry's rounding of each holding's replacement units onto the
+    // replacement listing's grid (`fraction_rule`), distributed across its
+    // parcels; a holding it leaves unrounded keeps the exact ratio's count.
+    let rounded = corporate_action::db_round_replacements(
+        &mut tx,
+        action_id,
+        terms.fraction_rule,
+        terms.scrip_listing_id,
+        (terms.new_units, terms.old_units),
+        &parcels.iter().map(rollover::converted).collect::<Vec<_>>(),
+    )
+    .await?;
     let mut replacements: Vec<Replacement> = Vec::new();
     for p in &parcels {
-        replacements.push(terms.replacement_for(p, &inputs)?);
+        replacements.push(terms.replacement_for(p, &inputs, rounded.get(&p.parcel.id))?);
     }
     if replacements.is_empty() {
         return Err(ExchangeError::NothingHeld);
@@ -318,6 +345,18 @@ async fn execute(
             rollover::Provenance::ScripAction(action_id),
         )
         .await?;
+        // The rounded count, recorded against the Buy that carries it.
+        if let Some(count) = r.rounded {
+            corporate_action::db_insert_count(
+                &mut tx,
+                action_id,
+                &ParcelCount {
+                    trade_id: buy_id,
+                    ..count
+                },
+            )
+            .await?;
+        }
         replacement_ids.push(buy_id);
     }
 
@@ -362,6 +401,8 @@ struct Terms {
     /// (numerator, denominator) pair and multiplied before dividing, so exact
     /// fractions (e.g. Gunther's 1/3) don't round twice.
     cash_apportionment: Option<(Decimal, Decimal)>,
+    /// How the registry treats a fractional entitlement to replacement units.
+    fraction_rule: FractionRule,
 }
 
 impl Terms {
@@ -373,10 +414,7 @@ impl Terms {
             scrip_cash_per_unit,
             scrip_market_value,
             scrip_cash_currency,
-            // Not yet applied: every rule is computed as `Exact` until the
-            // per-holding rounding lands (TODO.md, "Compute per holding,
-            // store per parcel").
-            fraction_rule: _,
+            fraction_rule,
         } = kind
         else {
             return Err(ExchangeError::NotAScripForScrip);
@@ -397,6 +435,7 @@ impl Terms {
             old_units: *scrip_old_units,
             cash,
             cash_apportionment,
+            fraction_rule: *fraction_rule,
         })
     }
 
@@ -405,6 +444,7 @@ impl Terms {
         &self,
         p: &rollover::RolledParcel,
         inputs: &rollover::CostBaseInputs,
+        rounded: Option<&ParcelCount>,
     ) -> Result<Replacement, ExchangeError> {
         let reduced_cost_base = inputs.carried_cost_base(&p.parcel, p.remaining)?;
 
@@ -425,12 +465,18 @@ impl Terms {
             // date. Checked rather than computed: a ratio greater than one
             // over a very large holding produces a replacement quantity past
             // `Decimal`'s ceiling, and there is no lesser count to write.
-            new_quantity: cost_base::checked_rebased_quantity(
-                ("units held", p.at_date_units.quantity()),
-                ("scrip_new_units", self.new_units),
-                ("scrip_old_units", self.old_units),
-            )
-            .map_err(ExchangeError::UnrepresentableReplacementQuantity)?,
+            // Where the holding was rounded, the count is its share of the
+            // rounded total instead.
+            new_quantity: match rounded {
+                Some(count) => count.after,
+                None => cost_base::checked_rebased_quantity(
+                    ("units held", p.at_date_units.quantity()),
+                    ("scrip_new_units", self.new_units),
+                    ("scrip_old_units", self.old_units),
+                )
+                .map_err(ExchangeError::UnrepresentableReplacementQuantity)?,
+            },
+            rounded: rounded.copied(),
             carried_cost_base,
             currency: p.parcel.currency.clone(),
             fx_rate: p.parcel.fx_rate,
@@ -459,6 +505,9 @@ struct Replacement {
     /// A replacement parcel stays in the account of the parcel it
     /// substitutes.
     holding_account_id: HoldingAccountId,
+    /// The holding's rounding of this parcel's replacement units, where it
+    /// was rounded — stored against the replacement Buy.
+    rounded: Option<ParcelCount>,
 }
 
 /// The two write-time checks: the exchange has not already been applied, and
@@ -566,6 +615,10 @@ impl From<ExchangeError> for ApiError {
                     ApiError::unprocessable("the exchange's parcel allocations are invalid")
                 }
             }
+            ExchangeError::Rounding(e) => match e.detail() {
+                Some(detail) => ApiError::Unprocessable(detail),
+                None => ApiError::internal(e),
+            },
             ExchangeError::Db(err) => err.into(),
         }
     }

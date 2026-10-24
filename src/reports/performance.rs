@@ -447,7 +447,8 @@ async fn accumulate_on(
         }
 
         // Units of this parcel still open at as_of (in as-of units).
-        let splits = split_events.get(&p.listing_id).map_or(&[][..], |v| v);
+        let splits = corporate_action::parcel_splits(&split_events, p.listing_id, p.id);
+        let splits = &*splits;
         let sold = corporate_action::sold_in_acquired_units(
             p.quantity,
             qty_sold

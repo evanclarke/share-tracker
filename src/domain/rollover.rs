@@ -35,7 +35,7 @@ use rust_decimal::Decimal;
 use sqlx::Row;
 
 use crate::domain::adjustments::{
-    self, AcquiredUnits, RocEvent, SplitEvent, UnitsAt, sold_in_acquired_units,
+    self, AcquiredUnits, ListingSplits, RocEvent, UnitsAt, sold_in_acquired_units,
     split_adjusted_quantity,
 };
 use crate::domain::cost_base::{self, ParcelRow};
@@ -44,7 +44,7 @@ use crate::domain::cost_base::{self, ParcelRow};
 /// units, AMIT adjustments (CGT event E10) and return-of-capital payments (G1)
 /// reduce the carried cost base.
 pub struct CostBaseInputs {
-    pub splits: Vec<SplitEvent>,
+    pub splits: ListingSplits,
     roc_events: Vec<RocEvent>,
     amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     /// The operation's own date — the one bound every read here observes: an
@@ -100,7 +100,7 @@ impl CostBaseInputs {
             units,
             self.amit_events.get(&parcel.id).map_or(&[][..], |v| v),
             &self.roc_events,
-            &self.splits,
+            &self.splits.for_parcel(parcel.id),
             // These are the units still *open* at the operation date — the
             // ones a statement for a year ending on or before it covered.
             cost_base::Held::AsAt(Some(self.up_to)),
@@ -129,6 +129,7 @@ impl CostBaseInputs {
 
         let mut open = Vec::with_capacity(parcel_rows.len());
         for parcel in parcel_rows {
+            let splits = self.splits.for_parcel(parcel.id);
             // Cost-base arithmetic stays in as-acquired units; each sale's
             // allocated quantity is re-based back across any splits between
             // acquisition and that sale.
@@ -139,7 +140,7 @@ impl CostBaseInputs {
                     .map_or(&[][..], |v| v)
                     .iter()
                     .copied(),
-                &self.splits,
+                &splits,
                 parcel.date,
             );
             let remaining = parcel.quantity - sold;
@@ -149,7 +150,7 @@ impl CostBaseInputs {
             // A ratio (exchange, entitlement) applies to units as held on the
             // operation's date, so both bases are carried.
             let at_date_units =
-                split_adjusted_quantity(remaining, &self.splits, parcel.date, Some(self.up_to));
+                split_adjusted_quantity(remaining, &splits, parcel.date, Some(self.up_to));
             open.push(RolledParcel {
                 parcel,
                 remaining,

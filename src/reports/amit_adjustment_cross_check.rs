@@ -33,7 +33,7 @@
 
 use crate::domain::tax_year::{fy_start, tax_year_for};
 use crate::domain::{open_parcels, rollover};
-use crate::entities::corporate_action::{self, AcquiredUnits, SplitEvent};
+use crate::entities::corporate_action::{self, AcquiredUnits, ListingSplits};
 use crate::infra::db;
 use crate::infra::decimal::row_dec;
 use crate::infra::extract::Json;
@@ -161,7 +161,7 @@ pub async fn db_amit_adjustment_alerts(
             slot.insert(rollover::source_ancestors(&mut tx, trade_id).await?);
         }
     }
-    let splits = corporate_action::db_share_split_events(&mut *tx).await?;
+    let splits = corporate_action::db_share_split_events(&mut tx).await?;
     // Every sale allocation with its sale date — the "was this parcel already
     // gone before the year began?" input. Every consumption, deliberately: the
     // coverage check's allowance band counts the units that *left the
@@ -220,7 +220,8 @@ pub async fn db_amit_adjustment_alerts(
         let units_held = row_dec(row, "units_held")?;
         let cost_base_adjustment = row_dec(row, "cost_base_adjustment")?;
         let adjustments = by_statement.get(&amma_statement_id).map_or(&[][..], |v| v);
-        let listing_splits = splits.get(&listing_id).map_or(&[][..], |v| v);
+        let no_splits = ListingSplits::default();
+        let listing_splits = splits.get(&listing_id).unwrap_or(&no_splits);
 
         let holding_account_id: HoldingAccountId = row.try_get("holding_account_id")?;
         let units_open_at_year_end = open_at
@@ -233,7 +234,7 @@ pub async fn db_amit_adjustment_alerts(
             .map(|a| {
                 corporate_action::split_adjusted_quantity(
                     a.quantity,
-                    listing_splits,
+                    &listing_splits.for_parcel(a.trade_id),
                     a.trade_date,
                     Some(year_end),
                 )
@@ -290,7 +291,7 @@ pub async fn db_amit_adjustment_alerts(
 /// year-end position no longer includes those units.
 fn disposed_between(
     adjustments: &[AdjustmentRow],
-    splits: &[SplitEvent],
+    splits: &ListingSplits,
     sold: &HashMap<TradeId, Vec<open_parcels::UnitsConsumed>>,
     from: NaiveDate,
     to: NaiveDate,
@@ -304,16 +305,21 @@ fn disposed_between(
         .collect();
     parcels
         .iter()
-        .flat_map(|trade_id| sold.get(trade_id).map_or(&[][..], |v| v))
-        .filter(|c| c.date >= from && c.date <= to)
-        .map(|c| c.quantity.rebased(splits, Some(to)).quantity())
+        .flat_map(|trade_id| {
+            let parcel_splits = splits.for_parcel(*trade_id).into_owned();
+            sold.get(trade_id)
+                .map_or(&[][..], |v| v)
+                .iter()
+                .filter(|c| c.date >= from && c.date <= to)
+                .map(move |c| c.quantity.rebased(&parcel_splits, Some(to)).quantity())
+        })
         .sum()
 }
 
 /// Every problem on one statement's adjustment set, in severity order.
 fn problems_for(
     adjustments: &[AdjustmentRow],
-    splits: &[SplitEvent],
+    splits: &ListingSplits,
     sold: &HashMap<TradeId, Vec<open_parcels::UnitsConsumed>>,
     facts: &StatementFacts,
 ) -> Vec<String> {
@@ -427,7 +433,7 @@ fn problems_for(
                 .iter()
                 .filter(|c| c.date < year_start)
                 .map(|c| c.quantity),
-            splits,
+            &splits.for_parcel(a.trade_id),
             a.trade_date,
         );
         if sold_before_year >= a.trade_quantity {

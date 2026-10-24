@@ -141,7 +141,11 @@ impl HoldingWalks {
 
         for (listing_id, splits) in corporate_action::db_share_split_events(&mut *conn).await? {
             if let Some(l) = listings.get_mut(&listing_id) {
-                l.splits = splits;
+                // The walk compares quantities only to form the
+                // entitled/disqualified ratio, which is basis-invariant, so
+                // the actions as announced serve (no one parcel's stored
+                // count is wanted here).
+                l.splits = splits.announced().into_owned();
             }
         }
 

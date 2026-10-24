@@ -131,29 +131,33 @@
 mod db;
 mod http;
 mod model;
+mod rounding;
 
 /// The cost-base/quantity adjustment events derived from corporate actions
 /// live in `domain::adjustments` — the cost-base pipeline reads them, and
 /// `domain` depends on nothing in `entities` — and are re-exported here so the
 /// entity's callers keep one path to everything about a corporate action.
 pub use crate::domain::adjustments::{
-    AcquiredUnits, PriceBasisEvent, RocEvent, SplitEvent, UnitsAt, acquired_units_of_sales,
-    as_acquired_quantity, checked_as_acquired_quantity, contemporaneous_price,
-    db_demerger_price_statements, db_payment_currency_conflict, db_return_of_capital_events,
-    db_share_split_events, db_splits_for_listing, sold_in_acquired_units, split_adjusted_quantity,
+    AcquiredUnits, ListingSplits, PriceBasisEvent, RocEvent, SplitEvent, UnitsAt,
+    acquired_units_of_sales, as_acquired_quantity, checked_as_acquired_quantity,
+    contemporaneous_price, db_demerger_price_statements, db_payment_currency_conflict,
+    db_return_of_capital_events, db_share_split_events, db_splits_for_listing, parcel_splits,
+    sold_in_acquired_units, split_adjusted_quantity,
 };
 /// The list route's filter type — `api_spec` reads its fields through
 /// `utoipa::IntoParams` so the OpenAPI document's query parameters come from
 /// what axum decodes rather than from prose.
-pub use db::{CorporateActionListQuery, db_get_tx, rebased_quantity_beyond_range};
+pub use db::{
+    CorporateActionListQuery, allocations_fit_parcels, db_get_tx, db_operation_ran,
+    rebased_quantity_beyond_range,
+};
 pub use http::router;
-/// Constructed by name only in tests (production code reads it off a stored
-/// row or a request body), so the re-export is test-gated like `db_upsert`'s.
-#[cfg(test)]
-pub use model::FractionRule;
 pub use model::{
-    ActionKind, CorporateAction, CorporateActionBody, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS,
-    WorthlessEvent,
+    ActionKind, CorporateAction, CorporateActionBody, FractionRule,
+    NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, WorthlessEvent,
+};
+pub use rounding::{
+    Converted, RoundError, db_insert_count, db_recompute_listing, db_round_replacements,
 };
 
 /// Referenced by name only from other modules' tests (production code calls

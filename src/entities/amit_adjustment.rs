@@ -288,8 +288,9 @@ async fn traces_back_to(
     Ok(false)
 }
 
-/// The parcel's trade date and its listing's splits — what re-bases an
-/// allocation (in its sale date's units) back to the parcel's as-acquired ones.
+/// The parcel's trade date and its listing's splits as they re-base it — what
+/// re-bases an allocation (in its sale date's units) back to the parcel's
+/// as-acquired ones.
 async fn trade_date_and_splits(
     conn: &mut sqlx::SqliteConnection,
     trade_id: TradeId,
@@ -299,7 +300,10 @@ async fn trade_date_and_splits(
         .bind(trade_id)
         .fetch_one(&mut *conn)
         .await?;
-    let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id)
+        .await?
+        .for_parcel(trade_id)
+        .into_owned();
     Ok((trade_date, splits))
 }
 

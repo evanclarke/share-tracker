@@ -45,7 +45,7 @@ use crate::domain::listing_identity::RenameHistory;
 use crate::domain::open_parcels;
 use crate::domain::tax_year::{amit_in_tax_year, tax_year_for};
 use crate::entities::closing_price::HeldTimeline;
-use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
+use crate::entities::corporate_action::{ListingSplits, RocEvent, UnitsAt};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::investment_expense::ExpenseType;
 use crate::entities::trade::Trade;
@@ -677,7 +677,7 @@ struct DisposalInputs {
     rights_sales: HashMap<RightsSaleId, (CurrencyCode, Decimal)>,
     amit_events: HashMap<TradeId, Vec<cost_base::AmitReductionEvent>>,
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
-    split_events: HashMap<ListingId, Vec<SplitEvent>>,
+    split_events: HashMap<ListingId, ListingSplits>,
     /// Each Sell allocation's units in its parcel's as-acquired basis, by
     /// `(sale, parcel)` — the walk `realised_gains` costed it through
     /// (`open_parcels::db_acquired_units_by_allocation`), so the itemised
@@ -862,10 +862,12 @@ fn disposal_parcel_rows(
             // — this only turns an invariant violation loud instead of wrong.
             let (adjustments, initial_cost_base_aud) = match (disposal.disposal, buy) {
                 (DisposalId::Sell(sale_id), Some(buy_row)) => {
-                    let splits = inputs
-                        .split_events
-                        .get(&buy_row.listing_id)
-                        .map_or(&[][..], |v| v);
+                    let splits = corporate_action::parcel_splits(
+                        &inputs.split_events,
+                        buy_row.listing_id,
+                        p.purchase_trade_id,
+                    );
+                    let splits = &*splits;
                     let units_acquired =
                         match inputs.acquired_units.get(&(sale_id, p.purchase_trade_id)) {
                             Some(Some(units)) => *units,

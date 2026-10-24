@@ -6,7 +6,7 @@ use crate::domain::adjustments::AcquiredUnits;
 use crate::domain::cost_base::{self, ParcelRow};
 use crate::domain::{cgt_discount, indexation, open_parcels};
 use crate::entities::corporate_action;
-use crate::entities::corporate_action::{RocEvent, SplitEvent, UnitsAt};
+use crate::entities::corporate_action::{ListingSplits, RocEvent, UnitsAt};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
 use crate::infra::decimal::{Money, OptMoney, apportion, mul_div, to_cents};
@@ -427,7 +427,7 @@ struct ReportData {
     /// Return-of-capital payments (CGT event G1) per listing.
     roc_events: HashMap<ListingId, Vec<RocEvent>>,
     /// Share splits/consolidations per listing (quantity re-basing).
-    split_events: HashMap<ListingId, Vec<SplitEvent>>,
+    split_events: HashMap<ListingId, ListingSplits>,
     /// Each allocation's units in its parcel's as-acquired basis, by
     /// allocation id (`open_parcels::db_acquired_units_by_allocation`): the
     /// parcel's sales walked in date order, so the one emptying it is costed
@@ -702,10 +702,8 @@ fn compute_realised_gains(data: &ReportData) -> Result<Vec<RealisedGainLoss>, sq
         // share split/consolidation between them (TD 2000/10) re-bases the
         // allocation back to as-acquired units so the cost-base pro-rating
         // spreads the unchanged total over the converted unit count.
-        let splits = data
-            .split_events
-            .get(&buy.listing_id)
-            .map_or(&[][..], |v| v);
+        let splits = corporate_action::parcel_splits(&data.split_events, buy.listing_id, buy.id);
+        let splits = &*splits;
         let qty_alloc_acquired = match data.acquired_units.get(&alloc.id) {
             Some(units) => *units,
             None => corporate_action::as_acquired_quantity(

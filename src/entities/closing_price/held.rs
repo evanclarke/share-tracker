@@ -7,7 +7,7 @@
 
 use crate::domain::open_parcels;
 use crate::entities::corporate_action;
-use crate::entities::corporate_action::{AcquiredUnits, SplitEvent};
+use crate::entities::corporate_action::{AcquiredUnits, ListingSplits};
 use crate::infra::decimal::parse_dec;
 use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::infra::{date, db};
@@ -27,6 +27,9 @@ struct ParcelHolding {
     /// (an entitlement is paid to a registered holder, not to a security), so
     /// the split has to survive the load.
     holding_account_id: HoldingAccountId,
+    /// The parcel's own trade id — what resolves a rounded action's stored
+    /// count for it ([`ListingSplits::for_parcel`]).
+    trade_id: TradeId,
     acquired: NaiveDate,
     qty: AcquiredUnits,
     /// `(sale date, units sold)`, each already re-based to this parcel's
@@ -76,7 +79,7 @@ pub struct HeldTimeline {
     /// can be expressed in the unit basis of a **past** date rather than only
     /// in each parcel's as-acquired one
     /// ([`HeldTimeline::units_by_account_on`]).
-    splits: HashMap<ListingId, Vec<SplitEvent>>,
+    splits: HashMap<ListingId, ListingSplits>,
 }
 
 impl HeldTimeline {
@@ -110,7 +113,8 @@ impl HeldTimeline {
             let listing_id: ListingId = row.try_get("listing_id")?;
             let acquired: NaiveDate = row.try_get("date")?;
             let qty = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
-            let splits = split_events.get(&listing_id).map_or(&[][..], |v| v);
+            let splits = corporate_action::parcel_splits(&split_events, listing_id, trade_id);
+            let splits = &*splits;
             let sales = qty_sold
                 .get(&trade_id)
                 .map_or(&[][..], |v| v)
@@ -124,6 +128,7 @@ impl HeldTimeline {
                 .collect();
             parcels.entry(listing_id).or_default().push(ParcelHolding {
                 holding_account_id: row.try_get("holding_account_id")?,
+                trade_id,
                 acquired,
                 qty,
                 sales,
@@ -168,7 +173,6 @@ impl HeldTimeline {
         let Some(parcels) = self.parcels.get(&listing_id) else {
             return Vec::new();
         };
-        let splits = self.splits.get(&listing_id).map_or(&[][..], |v| v);
         let mut by_account: HashMap<HoldingAccountId, Decimal> = HashMap::new();
         for p in parcels {
             let remaining = p.remaining_on(held_on);
@@ -178,7 +182,7 @@ impl HeldTimeline {
             *by_account.entry(p.holding_account_id).or_default() +=
                 corporate_action::split_adjusted_quantity(
                     remaining,
-                    splits,
+                    &corporate_action::parcel_splits(&self.splits, listing_id, p.trade_id),
                     p.acquired,
                     Some(unit_basis_at),
                 )

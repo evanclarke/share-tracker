@@ -183,9 +183,22 @@ struct Proto {
     detail: String,
     holding_account_id: Option<HoldingAccountId>,
     quantity: Option<Decimal>,
-    /// `(new, old)` unit re-basing from a split/consolidation/bonus issue.
-    rebase: Option<(Decimal, Decimal)>,
+    /// The unit re-basing from a split/consolidation/bonus issue.
+    rebase: Option<Rebase>,
     amount_aud: Option<Decimal>,
+}
+
+/// A split/consolidation/bonus issue's re-basing of the running balance:
+/// `new` units for every `old` — except the units a rounded action stored a
+/// count for, which become exactly that count.
+#[derive(Debug, Clone, Copy)]
+struct Rebase {
+    new: Decimal,
+    old: Decimal,
+    /// `(units before, units after)` summed over the parcels the action
+    /// stored a count for (`corporate_action_parcel_counts`), or `None` where
+    /// it stored none (an `Exact` rule, or no holding on a grid).
+    stored: Option<(Decimal, Decimal)>,
 }
 
 /// Everything one listing's ledger is assembled from, read on a single
@@ -214,6 +227,9 @@ struct Sources {
     rename_history: RenameHistory,
     /// The portfolio overview's rows for this listing, from the same snapshot.
     holdings: Vec<HoldingOverview>,
+    /// Each rounded split/bonus issue's stored counts, summed: `(units before,
+    /// units after)` by action id.
+    stored_counts: HashMap<i64, (Decimal, Decimal)>,
 }
 
 impl Sources {
@@ -319,7 +335,26 @@ impl Sources {
             .filter(|h| h.listing_id == listing_id)
             .collect();
 
+        let mut stored_counts: HashMap<i64, (Decimal, Decimal)> = HashMap::new();
+        for row in sqlx::query(
+            "SELECT c.corporate_action_id, c.units_before, c.units_after \
+             FROM corporate_action_parcel_counts c \
+             JOIN corporate_actions a ON a.id = c.corporate_action_id \
+             WHERE a.listing_id = ? AND (a.action_type = 'ShareSplit' OR a.action_type = 'BonusIssue')",
+        )
+        .bind(listing_id)
+        .fetch_all(&mut *conn)
+        .await?
+        {
+            let sums = stored_counts
+                .entry(row.try_get("corporate_action_id")?)
+                .or_default();
+            sums.0 += parse_dec("units_before", row.try_get("units_before")?)?;
+            sums.1 += parse_dec("units_after", row.try_get("units_after")?)?;
+        }
+
         Ok(Some(Self {
+            stored_counts,
             trades,
             transfers,
             incomes,
@@ -387,7 +422,11 @@ impl Sources {
                     detail,
                     holding_account_id: None,
                     quantity: None,
-                    rebase,
+                    rebase: rebase.map(|(new, old)| Rebase {
+                        new,
+                        old,
+                        stored: self.stored_counts.get(&a.id).copied(),
+                    }),
                     amount_aud: None,
                 }
             })
@@ -762,8 +801,16 @@ fn ledger(mut rows: Vec<Proto>) -> Vec<ActivityEvent> {
     let mut balance = Balance::ZERO;
     rows.into_iter()
         .map(|r| {
-            if let Some((new, old)) = r.rebase {
-                balance = balance.rebased(new, old);
+            if let Some(rebase) = r.rebase {
+                balance = match rebase.stored {
+                    // The units a rounded action stored a count for become
+                    // exactly that count; the rest re-base by the ratio.
+                    Some((before, after)) => balance
+                        .plus(-before)
+                        .rebased(rebase.new, rebase.old)
+                        .plus(after),
+                    None => balance.rebased(rebase.new, rebase.old),
+                };
             }
             if let Some(q) = r.quantity {
                 balance = balance.plus(q);
@@ -824,6 +871,8 @@ pub(crate) fn trade_event(t: &Trade, fee_sale_ids: &HashSet<TradeId>) -> String 
         Some("demerger")
     } else if t.worthless_action_id.is_some() {
         Some("worthless shares")
+    } else if t.cash_in_lieu_action_id.is_some() {
+        Some("cash in lieu")
     } else if fee_sale_ids.contains(&t.id) {
         Some("transfer network fee")
     } else {

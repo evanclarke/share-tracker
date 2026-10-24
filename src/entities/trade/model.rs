@@ -225,6 +225,15 @@ pub struct Trade {
     /// from the realised-gains report — its nil proceeds recognise the capital
     /// loss (see `docs/ato/worthless-shares.md`).
     pub worthless_action_id: Option<i64>,
+    /// Provenance link from a cash-in-lieu Sell back to its rounded
+    /// corporate action (`None` for every other trade). Set only by
+    /// `POST /corporate_actions/:id/cash_in_lieu` (`entities::cash_in_lieu`):
+    /// the Sell disposes of the fraction the registry paid the holding cash
+    /// for. It is rejected by `PUT /sells` and `PUT`/`DELETE /trades`;
+    /// `DELETE /sells` removes it (the operation's undo); and the action
+    /// cannot be edited or deleted while it exists. Counted by the
+    /// realised-gains report — the cash is capital proceeds on the fraction.
+    pub cash_in_lieu_action_id: Option<i64>,
     /// Provenance link from an inherited-parcel Buy back to its `inheritances`
     /// row (`None` for every other trade). Set only by `PUT /inheritances/:id`
     /// (`entities::inheritance`): the Buy carries the inheritance's cost base

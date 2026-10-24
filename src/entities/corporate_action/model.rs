@@ -2,6 +2,7 @@
 //! (the row/JSON model) and [`CorporateActionBody`] (the PUT body, validated
 //! into an `ActionKind` by [`CorporateActionBody::kind`]).
 
+use crate::domain::entitlement_rounding::Rounding;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{row_dec, row_opt_dec};
 use crate::infra::id::ListingId;
@@ -64,11 +65,11 @@ impl FromStr for WorthlessEvent {
 /// Serialized as its variant name, the value stored in the `fraction_rule`
 /// TEXT column.
 ///
-/// Every rule is stored and validated; the per-holding rounding onto the
-/// holding's unit grid it describes, and the cash-in-lieu disposal, are not
-/// yet applied — every action is computed as [`FractionRule::Exact`] until
-/// they are (TODO.md, "Compute per holding, store per parcel";
-/// `docs/API.md` *Fractional entitlements*).
+/// A non-`Exact` rule is applied once per holding onto the holding's unit grid
+/// (`domain::entitlement_rounding`), and each parcel's resulting count is
+/// stored (`corporate_action_parcel_counts`); a holding with no grid (a NULL
+/// unit scale) keeps the exact count (`docs/API.md` *Fractional
+/// entitlements*).
 #[derive(utoipa::ToSchema, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FractionRule {
     /// The registry holds the exact fractional count the ratio produces —
@@ -87,6 +88,18 @@ pub enum FractionRule {
 }
 
 impl FractionRule {
+    /// The rounding the rule applies to a holding on a unit grid, or `None`
+    /// for `Exact` (no rounding at all).
+    pub(crate) fn rounding(self) -> Option<Rounding> {
+        match self {
+            FractionRule::Exact => None,
+            FractionRule::Down => Some(Rounding::Down),
+            FractionRule::Up => Some(Rounding::Up),
+            FractionRule::Nearest => Some(Rounding::Nearest),
+            FractionRule::CashInLieu => Some(Rounding::CashInLieu),
+        }
+    }
+
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             FractionRule::Exact => "Exact",

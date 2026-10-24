@@ -440,6 +440,40 @@ async fn every_put_route_reports_create_then_replace() {
     );
     checked.push("/tax_year_settings/{tax_year}");
 
+    // The units-received override hangs off a rounded corporate action (no
+    // GET → PUT round-trip case: the action has to exist with a non-Exact
+    // rule first).
+    let pool = test_pool().await;
+    test_support::listing(1).insert(&pool).await;
+    let client = ApiClient::over(router().with_state(pool));
+    client
+        .put_ok(
+            "/corporate_actions/1",
+            &serde_json::json!({
+                "listing_id": 1, "date": "2024-06-03", "action_type": "ShareSplit",
+                "split_new_units": "1", "split_old_units": "3", "fraction_rule": "Down",
+            }),
+        )
+        .await;
+    let received = serde_json::json!({
+        "corporate_action_id": 1, "holding_account_id": 1, "units_received": "33",
+    });
+    assert_eq!(
+        client
+            .put("/entitlement_overrides/1", &received)
+            .await
+            .status,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        client
+            .put("/entitlement_overrides/1", &received)
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    checked.push("/entitlement_overrides/{id}");
+
     // The manual closing price: 201 with the freshly stored row (the body
     // POST /closing_prices/fetch answers), then 204.
     let pool = test_pool().await;
@@ -527,7 +561,7 @@ async fn every_put_route_reports_create_then_replace() {
     );
     assert_eq!(
         PUT_ROUTES.len(),
-        21,
+        22,
         "the table must carry every PUT route entities::router serves"
     );
 }

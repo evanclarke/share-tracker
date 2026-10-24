@@ -18,6 +18,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 
 pub use crate::domain::rollover::{CostBaseInputs, RolledParcel};
+use crate::entities::corporate_action;
 use crate::entities::sell::{AllocationInput, SellBody};
 use crate::entities::trade::{self, Trade};
 
@@ -54,6 +55,18 @@ pub fn closing_sell_body(
         spot_fx_rate: None,
         contract_note_ref: None,
         allocations,
+    }
+}
+
+/// An open parcel as a ratio-driven operation converts it: the input to the
+/// registry's per-holding rounding of the units it is replaced with
+/// (`corporate_action::db_round_replacements`).
+pub fn converted(p: &RolledParcel) -> corporate_action::Converted {
+    corporate_action::Converted {
+        parcel: p.parcel.id,
+        acquired: p.parcel.date,
+        account: p.parcel.holding_account_id,
+        units: p.at_date_units.quantity(),
     }
 }
 

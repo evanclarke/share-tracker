@@ -19,6 +19,7 @@ use proptest::test_runner::TestCaseError;
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
+use std::collections::{BTreeMap, HashMap};
 
 /// Tables an undo is meant to leave changed: the audit trail records the
 /// operation and its undo, and `AUTOINCREMENT` counters never run back.
@@ -47,20 +48,29 @@ enum Op {
     Split {
         new: i64,
         old: i64,
+        rule: FractionRule,
     },
     Bonus {
         units: i64,
         held: i64,
+        rule: FractionRule,
     },
     Scrip {
         new: i64,
         old: i64,
         cash_cents: Option<i64>,
+        rule: FractionRule,
     },
     Demerger {
         new: i64,
         held: i64,
         pct: i64,
+        rule: FractionRule,
+    },
+    /// Pay the newest `CashInLieu` action's fraction to `account`.
+    CashInLieu {
+        account: i64,
+        cents: i64,
     },
     BuyBack {
         pct: i64,
@@ -92,12 +102,14 @@ fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(account, pct, cents)| Op::Sell { account, pct, cents }),
         2 => (any::<bool>(), 1i64..=100).prop_map(|(to_two, pct)| Op::Transfer { to_two, pct }),
         1 => (1i64..=300).prop_map(|cents| Op::ReturnOfCapital { cents }),
-        1 => (1i64..=4, 1i64..=4).prop_map(|(new, old)| Op::Split { new, old }),
-        1 => (1i64..=3, 1i64..=7).prop_map(|(units, held)| Op::Bonus { units, held }),
+        1 => (1i64..=4, 1i64..=4)
+            .prop_map(|(new, old)| Op::Split { new, old, rule: FractionRule::Exact }),
+        1 => (1i64..=3, 1i64..=7)
+            .prop_map(|(units, held)| Op::Bonus { units, held, rule: FractionRule::Exact }),
         1 => (1i64..=3, 1i64..=3, prop::option::of(1i64..=200))
-            .prop_map(|(new, old, cash_cents)| Op::Scrip { new, old, cash_cents }),
+            .prop_map(|(new, old, cash_cents)| Op::Scrip { new, old, cash_cents, rule: FractionRule::Exact }),
         1 => (1i64..=3, 1i64..=5, 1i64..=99)
-            .prop_map(|(new, held, pct)| Op::Demerger { new, held, pct }),
+            .prop_map(|(new, held, pct)| Op::Demerger { new, held, pct, rule: FractionRule::Exact }),
         1 => (1i64..=100, 100i64..=2_000, 0i64..=100)
             .prop_map(|(pct, price_cents, dividend_cents)| Op::BuyBack { pct, price_cents, dividend_cents }),
         1 => any::<bool>().prop_map(|c2| Op::Worthless { c2 }),
@@ -282,22 +294,22 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
             undo: Box::new(move |_| format!("/corporate_actions/{action_id}")),
             undo_may_be_refused: true,
         },
-        Op::Split { new, old } => Step {
+        Op::Split { new, old, rule } => Step {
             method: "PUT",
             path: format!("/corporate_actions/{action_id}"),
             body: Some(json!({
-                "listing_id": 1, "date": on, "action_type": "ShareSplit", "fraction_rule": "Exact",
+                "listing_id": 1, "date": on, "action_type": "ShareSplit", "fraction_rule": rule,
                 "split_new_units": new.to_string(), "split_old_units": old.to_string(),
             })),
             previewable: false,
             undo: Box::new(move |_| format!("/corporate_actions/{action_id}")),
             undo_may_be_refused: true,
         },
-        Op::Bonus { units, held } => Step {
+        Op::Bonus { units, held, rule } => Step {
             method: "PUT",
             path: format!("/corporate_actions/{action_id}"),
             body: Some(json!({
-                "listing_id": 1, "date": on, "action_type": "BonusIssue", "fraction_rule": "Exact",
+                "listing_id": 1, "date": on, "action_type": "BonusIssue", "fraction_rule": rule,
                 "bonus_units": units.to_string(), "bonus_held_units": held.to_string(),
             })),
             previewable: false,
@@ -308,13 +320,14 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
             new,
             old,
             cash_cents,
+            rule,
         } => {
             put_action(
                 pool,
                 action_id,
                 on,
                 ActionKind::ScripForScrip {
-                    fraction_rule: FractionRule::Exact,
+                    fraction_rule: rule,
                     scrip_listing_id: ListingId(2),
                     scrip_new_units: new.into(),
                     scrip_old_units: old.into(),
@@ -333,13 +346,18 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                 undo_may_be_refused: false,
             }
         }
-        Op::Demerger { new, held, pct } => {
+        Op::Demerger {
+            new,
+            held,
+            pct,
+            rule,
+        } => {
             put_action(
                 pool,
                 action_id,
                 on,
                 ActionKind::Demerger {
-                    fraction_rule: FractionRule::Exact,
+                    fraction_rule: rule,
                     demerger_listing_id: ListingId(3),
                     demerger_new_units: new.into(),
                     demerger_held_units: held.into(),
@@ -493,6 +511,26 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                 undo_may_be_refused: false,
             }
         }
+        Op::CashInLieu { account, cents: c } => {
+            let action: Option<i64> = sqlx::query_scalar(
+                "SELECT id FROM corporate_actions WHERE fraction_rule = 'CashInLieu' \
+                 ORDER BY date DESC, id DESC LIMIT 1",
+            )
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+            let action = action?;
+            Step {
+                method: "POST",
+                path: format!("/corporate_actions/{action}/cash_in_lieu"),
+                body: Some(json!({
+                    "holding_account_id": account, "date": on, "proceeds": cents(c),
+                })),
+                previewable: true,
+                undo: Box::new(|created| format!("/sells/{}", created["id"])),
+                undo_may_be_refused: false,
+            }
+        }
         Op::Rename => Step {
             method: "POST",
             path: "/listings/1/renames".into(),
@@ -590,7 +628,145 @@ async fn run(
     Ok(())
 }
 
+/// The non-`Exact` rules, for a strategy to pick from.
+fn rounding_rule() -> impl Strategy<Value = FractionRule> {
+    prop_oneof![
+        Just(FractionRule::Down),
+        Just(FractionRule::Up),
+        Just(FractionRule::Nearest),
+        Just(FractionRule::CashInLieu),
+    ]
+}
+
+/// [`op`]'s world with every ratio-driven action rounded (a non-`Exact`
+/// rule), plus cash-in-lieu payments — run with account 1 on whole units, so
+/// its holdings round and account 2's (no grid) stay exact.
+fn rounded_op() -> impl Strategy<Value = Op> {
+    prop_oneof![
+        3 => (1i64..=2, 1i64..=2_000, 1i64..=5_000)
+            .prop_map(|(account, units, cents)| Op::Buy { account, units, cents }),
+        2 => (1i64..=2, 1i64..=100, 1i64..=5_000)
+            .prop_map(|(account, pct, cents)| Op::Sell { account, pct, cents }),
+        1 => (any::<bool>(), 1i64..=100).prop_map(|(to_two, pct)| Op::Transfer { to_two, pct }),
+        2 => (1i64..=4, 1i64..=4, rounding_rule())
+            .prop_map(|(new, old, rule)| Op::Split { new, old, rule }),
+        2 => (1i64..=3, 1i64..=7, rounding_rule())
+            .prop_map(|(units, held, rule)| Op::Bonus { units, held, rule }),
+        1 => (1i64..=3, 1i64..=3, prop::option::of(1i64..=200), rounding_rule())
+            .prop_map(|(new, old, cash_cents, rule)| Op::Scrip { new, old, cash_cents, rule }),
+        1 => (1i64..=3, 1i64..=5, 1i64..=99, rounding_rule())
+            .prop_map(|(new, held, pct, rule)| Op::Demerger { new, held, pct, rule }),
+        3 => (1i64..=2, 0i64..=500).prop_map(|(account, cents)| Op::CashInLieu { account, cents }),
+    ]
+}
+
+/// One stored count as the invariant reads it: action, account, before,
+/// after, in lieu, the action's rule and the account's scale.
+type StoredCountRow = (i64, i64, String, String, String, String, Option<u32>);
+
+/// One parcel's (before, after, in lieu).
+type ParcelCounts = (Decimal, Decimal, Decimal);
+
+/// The stored-count invariant, over every row a rounded action has stored:
+/// per (action, holding account) the counts, less any cash-in-lieu fraction,
+/// are on the account's grid and sum to the holding's exact count rounded by
+/// the action's rule, and each lies within one grid step of its parcel's
+/// exact share (no units-received override is ever generated here).
+async fn stored_counts_hold(pool: &SqlitePool) -> Result<(), TestCaseError> {
+    let rows: Vec<StoredCountRow> = sqlx::query_as(
+        "SELECT c.corporate_action_id, t.holding_account_id, c.units_before, c.units_after, \
+                c.in_lieu_units, a.fraction_rule, ha.unit_scale \
+         FROM corporate_action_parcel_counts c \
+         JOIN trades t ON t.id = c.trade_id \
+         JOIN corporate_actions a ON a.id = c.corporate_action_id \
+         JOIN holding_accounts ha ON ha.id = t.holding_account_id \
+         ORDER BY c.corporate_action_id, t.holding_account_id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let mut holdings: BTreeMap<(i64, i64), Vec<ParcelCounts>> = BTreeMap::new();
+    let mut rules = HashMap::new();
+    for (action, account, before, after, in_lieu, rule, scale) in rows {
+        let d = |s: &str| s.parse::<Decimal>().unwrap();
+        holdings
+            .entry((action, account))
+            .or_default()
+            .push((d(&before), d(&after), d(&in_lieu)));
+        rules.insert(action, (rule, scale.expect("a stored count has a grid")));
+    }
+    for ((action, account), parcels) in holdings {
+        let (rule, scale) = &rules[&action];
+        let kind = corporate_action::db_get(pool, action)
+            .await
+            .unwrap()
+            .unwrap()
+            .kind;
+        let (new, old) = match kind {
+            ActionKind::ShareSplit {
+                split_new_units,
+                split_old_units,
+                ..
+            } => (split_new_units, split_old_units),
+            ActionKind::BonusIssue {
+                bonus_units,
+                bonus_held_units,
+                ..
+            } => (bonus_held_units + bonus_units, bonus_held_units),
+            ActionKind::ScripForScrip {
+                scrip_new_units,
+                scrip_old_units,
+                ..
+            } => (scrip_new_units, scrip_old_units),
+            ActionKind::Demerger {
+                demerger_new_units,
+                demerger_held_units,
+                ..
+            } => (demerger_new_units, demerger_held_units),
+            other => return Err(TestCaseError::fail(format!("counts stored for {other:?}"))),
+        };
+        let step = Decimal::new(1, *scale);
+        let held: Decimal = parcels.iter().map(|(b, _, _)| *b).sum();
+        let exact = held * new / old;
+        let expected = match rule.as_str() {
+            "Up" => {
+                exact.round_dp_with_strategy(*scale, rust_decimal::RoundingStrategy::AwayFromZero)
+            }
+            "Nearest" => exact.round_dp_with_strategy(
+                *scale,
+                rust_decimal::RoundingStrategy::MidpointAwayFromZero,
+            ),
+            _ => exact.round_dp_with_strategy(*scale, rust_decimal::RoundingStrategy::ToZero),
+        };
+        let mut total = Decimal::ZERO;
+        for (before, after, in_lieu) in &parcels {
+            let on_grid = after - in_lieu;
+            prop_assert_eq!(
+                on_grid,
+                on_grid.round_dp(*scale),
+                "action {} account {}",
+                action,
+                account
+            );
+            prop_assert!(
+                (on_grid - before * new / old).abs() < step,
+                "action {action} account {account}: {on_grid} vs exact {}",
+                before * new / old
+            );
+            total += on_grid;
+        }
+        prop_assert_eq!(total, expected, "action {} account {}", action, account);
+    }
+    Ok(())
+}
+
 async fn world(steps: &[(Op, bool)]) -> Result<(), TestCaseError> {
+    world_on(steps, false).await
+}
+
+/// The world `steps` run in; `rounded` puts account 1 on whole units and
+/// checks the stored-count invariant after every step.
+async fn world_on(steps: &[(Op, bool)], rounded: bool) -> Result<(), TestCaseError> {
     let pool = test_pool().await;
     for (id, ticker) in [(1, "AAA"), (2, "BBB"), (3, "CCC")] {
         test_support::listing(id).ticker(ticker).insert(&pool).await;
@@ -598,6 +774,13 @@ async fn world(steps: &[(Op, bool)]) -> Result<(), TestCaseError> {
     let app = ApiClient::full(&pool);
     app.put_ok("/holding_accounts/2", &json!({ "name": "Second" }))
         .await;
+    if rounded {
+        app.put_ok(
+            "/holding_accounts/1",
+            &json!({ "name": "Default", "unit_scale": 0 }),
+        )
+        .await;
+    }
     drp_enrolment::db_upsert(
         &pool,
         &DrpEnrolment {
@@ -620,6 +803,9 @@ async fn world(steps: &[(Op, bool)]) -> Result<(), TestCaseError> {
     for (n, (op, undo)) in steps.iter().enumerate() {
         if let Some(step) = prepare(&pool, n, op).await {
             run(&pool, &app, step, *undo).await?;
+            if rounded {
+                stored_counts_hold(&pool).await?;
+            }
         }
     }
     Ok(())
@@ -641,6 +827,20 @@ proptest! {
         steps in prop::collection::vec((op(), prop::bool::weighted(0.4)), 1..=10),
     ) {
         test_support::block_on(world(&steps))?;
+    }
+
+    /// The same, with every ratio-driven action rounded onto account 1's
+    /// whole-unit grid (account 2 has none, so its holdings stay exact) and
+    /// cash-in-lieu payments among the operations: each previews exactly as
+    /// it writes and undoes exactly — the stored per-parcel counts included —
+    /// and after every step the stored counts of each rounded holding sum to
+    /// its exact count rounded by the action's rule, on the grid, each within
+    /// one grid step of its parcel's exact share.
+    #[test]
+    fn every_rounded_operation_previews_undoes_and_stores_grid_counts(
+        steps in prop::collection::vec((rounded_op(), prop::bool::weighted(0.4)), 1..=10),
+    ) {
+        test_support::block_on(world_on(&steps, true))?;
     }
 }
 

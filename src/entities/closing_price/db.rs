@@ -279,7 +279,13 @@ pub async fn db_price_basis_events(
     use crate::entities::corporate_action::{self, PriceBasisEvent};
 
     let splits = corporate_action::db_splits_for_listing(&mut *conn, listing_id).await?;
-    let mut events: Vec<PriceBasisEvent> = splits.iter().map(PriceBasisEvent::from).collect();
+    // The provider restates its series by the action as announced, whatever
+    // any one holding was rounded to.
+    let mut events: Vec<PriceBasisEvent> = splits
+        .announced()
+        .iter()
+        .map(PriceBasisEvent::from)
+        .collect();
 
     let statements = corporate_action::db_demerger_price_statements(&mut *conn, listing_id).await?;
     for statement in statements.iter().rev() {

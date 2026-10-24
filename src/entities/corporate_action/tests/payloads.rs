@@ -849,7 +849,12 @@ async fn db_worthless_shares_is_not_a_split_or_payment_event() {
     )
     .await
     .unwrap();
-    assert!(db_share_split_events(&pool).await.unwrap().is_empty());
+    assert!(
+        db_share_split_events(&mut pool.acquire().await.unwrap())
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(db_return_of_capital_events(&pool).await.unwrap().is_empty());
 }
 

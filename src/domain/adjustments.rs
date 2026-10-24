@@ -30,15 +30,19 @@ use crate::domain::cost_base;
 use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::decimal::{Money, mul_div, parse_dec};
-use crate::infra::id::ListingId;
+use crate::infra::id::{ListingId, TradeId};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
+use std::borrow::Cow;
 use std::cmp;
 use std::collections::HashMap;
 use std::iter::Sum;
+#[cfg(test)]
+use std::ops::Deref;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
+use std::sync::Arc;
 
 /// A return-of-capital payment, as consumed by the cost-base reports.
 #[derive(Debug, Clone)]
@@ -362,12 +366,118 @@ fn ratio(new: Decimal, old: Decimal) -> String {
 /// `terms` carries what the action was and how it was announced, which that
 /// normalisation drops; it is for labelling only ([`RebaseTerms`]) and no
 /// arithmetic reads it.
+///
+/// A non-`Exact` action re-bases each parcel by the count **stored** for it
+/// (`corporate_action_parcel_counts`, see [`StoredCount`]) instead of by the
+/// ratio: `stored` carries those counts, and [`ListingSplits::for_parcel`]
+/// resolves them into the parcel's own `new_units`/`old_units`. An event
+/// still carrying them must not reach [`split_ratio`] — it asks *which*
+/// parcel, and only the resolution can answer.
 #[derive(Debug, Clone)]
 pub struct SplitEvent {
     pub date: NaiveDate,
     pub new_units: Decimal,
     pub old_units: Decimal,
     pub terms: RebaseTerms,
+    /// The per-parcel stored counts of a non-`Exact` action that rounded at
+    /// least one holding (`None` for an `Exact` action, and once resolved for
+    /// one parcel).
+    pub stored: Option<Arc<HashMap<TradeId, StoredCount>>>,
+}
+
+/// One parcel's stored count across a non-`Exact` share split or bonus
+/// issue: it held `before` units immediately before the action (in the basis
+/// then in force) and holds `after` — on its holding's unit grid, as the
+/// registry's rounding distributed it (`domain::entitlement_rounding`) —
+/// immediately after. The parcel re-bases across the action by exactly
+/// `after / before`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredCount {
+    /// Units held immediately before the action.
+    pub before: Decimal,
+    /// Units held immediately after it.
+    pub after: Decimal,
+}
+
+/// One listing's quantity re-basing events, sorted by date (then id), as the
+/// loaders return them. Deliberately not a slice: a non-`Exact` action
+/// re-bases each parcel by its own stored count, so the events a conversion
+/// runs over depend on the parcel — [`Self::for_parcel`] is the way to them.
+/// [`Self::announced`] is the escape for the readers that want the action as
+/// announced rather than any one parcel's count (a price's re-basing, a
+/// basis-invariant ratio, a representability bound).
+#[derive(Debug, Clone, Default)]
+pub struct ListingSplits(Vec<SplitEvent>);
+
+impl ListingSplits {
+    /// The events as they re-base parcel `parcel`: a non-`Exact` action's
+    /// stored count for it in place of the ratio (its exact ratio where none
+    /// is stored for it — a holding with no unit grid, or a parcel the action
+    /// did not convert).
+    pub fn for_parcel(&self, parcel: TradeId) -> Cow<'_, [SplitEvent]> {
+        if self.0.iter().all(|e| e.stored.is_none()) {
+            return Cow::Borrowed(&self.0);
+        }
+        Cow::Owned(
+            self.0
+                .iter()
+                .map(|e| {
+                    let mut resolved = SplitEvent {
+                        stored: None,
+                        ..e.clone()
+                    };
+                    if let Some(count) = e.stored.as_ref().and_then(|s| s.get(&parcel)) {
+                        resolved.new_units = count.after;
+                        resolved.old_units = count.before;
+                    }
+                    resolved
+                })
+                .collect(),
+        )
+    }
+
+    /// The events at their announced ratios, ignoring any stored counts — for
+    /// a reader that is not converting one parcel's units: a price series'
+    /// re-basing (the provider divides by the announced ratio), a ratio that is
+    /// basis-invariant, or a representability bound.
+    pub fn announced(&self) -> Cow<'_, [SplitEvent]> {
+        if self.0.iter().all(|e| e.stored.is_none()) {
+            return Cow::Borrowed(&self.0);
+        }
+        Cow::Owned(
+            self.0
+                .iter()
+                .map(|e| SplitEvent {
+                    stored: None,
+                    ..e.clone()
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Test fixtures read a listing's events as the slice they are (the
+/// non-test build has no such view, so production code cannot bypass
+/// [`ListingSplits::for_parcel`]).
+#[cfg(test)]
+impl Deref for ListingSplits {
+    type Target = [SplitEvent];
+    fn deref(&self) -> &[SplitEvent] {
+        &self.0
+    }
+}
+
+/// The events of `listing` in `splits` as they re-base parcel `parcel` (no
+/// events where the listing has none) — [`ListingSplits::for_parcel`] over a
+/// whole-portfolio map.
+pub fn parcel_splits(
+    splits: &HashMap<ListingId, ListingSplits>,
+    listing: ListingId,
+    parcel: TradeId,
+) -> Cow<'_, [SplitEvent]> {
+    splits
+        .get(&listing)
+        .map_or(Cow::Borrowed(&[][..]), |s| s.for_parcel(parcel))
 }
 
 impl SplitEvent {
@@ -391,6 +501,7 @@ impl SplitEvent {
             new_units,
             old_units,
             terms,
+            stored: None,
         }
     }
 
@@ -406,6 +517,7 @@ impl SplitEvent {
                 bonus_units,
                 held_units,
             },
+            stored: None,
         }
     }
 }
@@ -426,55 +538,104 @@ fn split_event_from_row(row: &SqliteRow) -> Result<SplitEvent, sqlx::Error> {
     }
 }
 
-/// All quantity re-basing actions (`ShareSplit` + `BonusIssue`, each expressed as
-/// its equivalent split) keyed by listing, each list sorted by event date
-/// (then id). The reports use these to re-base parcel quantities between unit
-/// bases. Generic over the executor so reports can run it on their read
-/// transaction.
-pub async fn db_share_split_events<'e, E>(
-    executor: E,
-) -> Result<HashMap<ListingId, Vec<SplitEvent>>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
+/// The stored per-parcel counts of every share split / bonus issue (of one
+/// listing, or all), keyed by action id.
+async fn db_stored_counts(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: Option<ListingId>,
+) -> Result<HashMap<i64, HashMap<TradeId, StoredCount>>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT listing_id, action_type, date, split_new_units, split_old_units, \
-                bonus_units, bonus_held_units FROM corporate_actions \
-         WHERE action_type IN ('ShareSplit', 'BonusIssue') ORDER BY listing_id, date, id",
+        "SELECT c.corporate_action_id, c.trade_id, c.units_before, c.units_after \
+         FROM corporate_action_parcel_counts c \
+         JOIN corporate_actions a ON a.id = c.corporate_action_id \
+         WHERE (a.action_type = 'ShareSplit' OR a.action_type = 'BonusIssue') \
+           AND (?1 IS NULL OR a.listing_id = ?1)",
     )
-    .fetch_all(executor)
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
     .await?;
-
-    let mut map: HashMap<ListingId, Vec<SplitEvent>> = HashMap::new();
+    let mut map: HashMap<i64, HashMap<TradeId, StoredCount>> = HashMap::new();
     for row in &rows {
-        let listing_id: ListingId = row.try_get("listing_id")?;
-        map.entry(listing_id)
+        map.entry(row.try_get("corporate_action_id")?)
             .or_default()
-            .push(split_event_from_row(row)?);
+            .insert(
+                row.try_get("trade_id")?,
+                StoredCount {
+                    before: parse_dec("units_before", row.try_get("units_before")?)?,
+                    after: parse_dec("units_after", row.try_get("units_after")?)?,
+                },
+            );
     }
     Ok(map)
 }
 
-/// The quantity re-basing actions (`ShareSplit` + `BonusIssue`) for one listing,
-/// sorted by event date (then id). Generic over the executor so write-time
-/// validators (sells/trades) can run it inside their transaction.
-pub async fn db_splits_for_listing<'e, E>(
-    executor: E,
-    listing_id: ListingId,
-) -> Result<Vec<SplitEvent>, sqlx::Error>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
-{
+/// The re-basing events of the rows `rows` (each carrying `id`), with their
+/// stored counts attached.
+fn events_with_counts(
+    rows: &[SqliteRow],
+    mut counts: HashMap<i64, HashMap<TradeId, StoredCount>>,
+) -> Result<Vec<(ListingId, SplitEvent)>, sqlx::Error> {
+    rows.iter()
+        .map(|row| {
+            let mut event = split_event_from_row(row)?;
+            let id: i64 = row.try_get("id")?;
+            event.stored = counts.remove(&id).map(Arc::new);
+            Ok((row.try_get("listing_id")?, event))
+        })
+        .collect()
+}
+
+/// All quantity re-basing actions (`ShareSplit` + `BonusIssue`, each expressed as
+/// its equivalent split) keyed by listing, each list sorted by event date
+/// (then id), with each non-`Exact` action's stored per-parcel counts. The
+/// reports use these to re-base parcel quantities between unit bases. Read on
+/// the caller's connection so reports can run it on their read transaction.
+pub async fn db_share_split_events(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<HashMap<ListingId, ListingSplits>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT action_type, date, split_new_units, split_old_units, \
+        "SELECT id, listing_id, action_type, date, split_new_units, split_old_units, \
+                bonus_units, bonus_held_units FROM corporate_actions \
+         WHERE action_type IN ('ShareSplit', 'BonusIssue') ORDER BY listing_id, date, id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    let counts = db_stored_counts(&mut *conn, None).await?;
+
+    let mut map: HashMap<ListingId, Vec<SplitEvent>> = HashMap::new();
+    for (listing_id, event) in events_with_counts(&rows, counts)? {
+        map.entry(listing_id).or_default().push(event);
+    }
+    Ok(map
+        .into_iter()
+        .map(|(listing, events)| (listing, ListingSplits(events)))
+        .collect())
+}
+
+/// The quantity re-basing actions (`ShareSplit` + `BonusIssue`) for one listing,
+/// sorted by event date (then id), with their stored per-parcel counts. Read
+/// on the caller's connection so write-time validators (sells/trades) can run
+/// it inside their transaction.
+pub async fn db_splits_for_listing(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: ListingId,
+) -> Result<ListingSplits, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, listing_id, action_type, date, split_new_units, split_old_units, \
                 bonus_units, bonus_held_units FROM corporate_actions \
          WHERE action_type IN ('ShareSplit', 'BonusIssue') AND listing_id = ? \
          ORDER BY date, id",
     )
     .bind(listing_id)
-    .fetch_all(executor)
+    .fetch_all(&mut *conn)
     .await?;
-    rows.iter().map(split_event_from_row).collect()
+    let counts = db_stored_counts(&mut *conn, Some(listing_id)).await?;
+    Ok(ListingSplits(
+        events_with_counts(&rows, counts)?
+            .into_iter()
+            .map(|(_, event)| event)
+            .collect(),
+    ))
 }
 
 /// A conversion ratio between unit bases: `new` units for every `old`. Named
@@ -519,6 +680,10 @@ pub fn split_ratio(splits: &[SplitEvent], from: NaiveDate, up_to: Option<NaiveDa
         if s.date <= from || up_to.is_some_and(|d| s.date > d) {
             continue;
         }
+        debug_assert!(
+            s.stored.is_none(),
+            "a stored-count event reached split_ratio unresolved (ListingSplits::for_parcel)"
+        );
         new *= s.new_units;
         old *= s.old_units;
     }

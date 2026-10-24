@@ -180,7 +180,7 @@ async fn execute(
 
     let qty_sold = open_parcels::db_sales_by_parcel(&mut tx, Some(action.listing_id)).await?;
 
-    let splits = corporate_action::db_splits_for_listing(&mut *tx, action.listing_id).await?;
+    let splits = corporate_action::db_splits_for_listing(&mut tx, action.listing_id).await?;
 
     // Per open parcel, the units still held at the event date (split-adjusted).
     let mut allocations: Vec<AllocationInput> = Vec::new();
@@ -188,6 +188,7 @@ async fn execute(
         let parcel_id: TradeId = row.try_get("id")?;
         let date: NaiveDate = row.try_get("date")?;
         let qty = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
+        let splits = splits.for_parcel(parcel_id);
 
         let sold = sold_in_acquired_units(
             qty,
