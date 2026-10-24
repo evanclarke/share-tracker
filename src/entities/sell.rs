@@ -970,6 +970,7 @@ pub(crate) async fn upsert_sell_in_tx(
         // 2-for-1 split a 100-share parcel covers a 200-share sale.
         let splits = corporate_action::db_splits_for_listing(&mut *tx, purchase_listing).await?;
         let total = corporate_action::sold_in_acquired_units(
+            AcquiredUnits::new(purchase_qty),
             open_parcels::db_parcel_sales(&mut *tx, alloc.purchase_trade_id).await?,
             &splits,
             purchase_date,
@@ -1323,6 +1324,65 @@ mod tests {
             .await
             .unwrap();
         assert!(open.is_empty(), "nothing is left open: {open:?}");
+    }
+
+    /// A parcel whose own count is a full-precision figure — a rollover's
+    /// replacement parcel holds 658.28571428571428571428571429 units after a
+    /// 1-for-7 bonus issue on the original — tripled by a 2-for-1 bonus: the
+    /// schedule shows 1974.8571428571428571428571429, and the shortest
+    /// as-acquired count that re-bases to it is 658.2857142857142857142857143,
+    /// a digit past the parcel, so the Sell of what the schedule shows was
+    /// refused as exceeding it. It empties the parcel, and a split entered
+    /// after it is not refused as leaving the allocations past the parcel.
+    #[tokio::test]
+    async fn the_sell_of_everything_the_schedule_shows_empties_a_full_precision_parcel() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1).await;
+        let bought: Decimal = "658.28571428571428571428571429".parse().unwrap();
+        insert_buy(&pool, 1, ListingId(1), bought).await; // 2024-01-01
+        let bonus = |id, date, units| corporate_action::CorporateAction {
+            id,
+            listing_id: ListingId(1),
+            date,
+            kind: corporate_action::ActionKind::BonusIssue {
+                bonus_units: Decimal::from(units),
+                bonus_held_units: Decimal::ONE,
+            },
+        };
+        corporate_action::db_upsert(
+            &pool,
+            &bonus(1, NaiveDate::from_ymd_opt(2024, 3, 1).unwrap(), 2),
+        )
+        .await
+        .unwrap();
+        let open = open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        let held = open[0].remaining_as_of.quantity();
+        assert_eq!(
+            held,
+            "1974.8571428571428571428571429".parse::<Decimal>().unwrap()
+        );
+
+        let body = sell_body(
+            held,
+            vec![AllocationInput {
+                purchase_trade_id: TradeId(1),
+                quantity_allocated: held,
+            }],
+        );
+        db_upsert_sell(&pool, TradeId(2), &body).await.unwrap();
+        let open = open_parcels::load(&mut pool.acquire().await.unwrap(), None)
+            .await
+            .unwrap();
+        assert!(open.is_empty(), "nothing is left open: {open:?}");
+
+        corporate_action::db_upsert(
+            &pool,
+            &bonus(2, NaiveDate::from_ymd_opt(2024, 9, 2).unwrap(), 1),
+        )
+        .await
+        .unwrap();
     }
 
     /// `docs/API.md` (Fractional entitlements): where the registry pays cash

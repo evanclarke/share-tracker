@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2f630bf28f2c7965b336f216feeb702ac941662042355979c21e4a0e5a71ff37 # shrinks to steps = [(ReturnOfCapital { cents: 1 }, true)]
+cc bc0d4f6ba7d4f79f914ef609921d95777a6411708037fb3d996c9651d3ae569d # shrinks to buys = [(1, 1, 0)], links = [Sell { nth: 0, pct: 1 }, Scrip { nth: 0, new: 1, old: 1, cash_cents: None }], sale_days = 0
+cc 6e9dedf2293ecbfaf3226cecd93764985ab671293c8be2e4ba920d2ad3406ebd # shrinks to buys = [(778, 1, 0)], links = [Transfer { nth: 0, pct: 26 }, Bonus { nth: 0, units: 1, held: 7 }, Demerger { nth: 0, new: 5, held: 1, pct: 1 }, Bonus { nth: 0, units: 2, held: 1 }], sale_days = 0
+cc 0d7e4697d68da74e4474191c1de326fd667aa891a60c2c8fde08f7e337b2367a # shrinks to buys = [(2, 1, 0)], links = [Split { nth: 0, new: 1, old: 3 }, ReturnOfCapital { nth: 0, cents: 58 }], sale_days = 0

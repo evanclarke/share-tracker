@@ -441,8 +441,12 @@ async fn db_write_on(
         }
         // Allocations are in their sale date's units; the parcel's own
         // quantity — and this row's — are as acquired.
-        let carried =
-            corporate_action::sold_in_acquired_units(sales.iter().copied(), &splits, trade_date);
+        let carried = corporate_action::sold_in_acquired_units(
+            corporate_action::AcquiredUnits::new(trade_qty),
+            sales.iter().copied(),
+            &splits,
+            trade_date,
+        );
         let adjustable = (corporate_action::AcquiredUnits::new(trade_qty) - carried)
             .get()
             .max(Decimal::ZERO);
@@ -505,7 +509,12 @@ async fn db_write_on(
             ));
         }
         let held_in_year = (corporate_action::AcquiredUnits::new(trade_qty)
-            - corporate_action::sold_in_acquired_units(gone, &splits, trade_date))
+            - corporate_action::sold_in_acquired_units(
+                corporate_action::AcquiredUnits::new(trade_qty),
+                gone,
+                &splits,
+                trade_date,
+            ))
         .get()
         .max(Decimal::ZERO);
         if adj.quantity > held_in_year {

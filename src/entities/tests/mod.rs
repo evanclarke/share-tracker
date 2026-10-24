@@ -4,6 +4,7 @@
 
 mod delete;
 mod list;
+mod operations;
 mod put;
 
 use super::*;

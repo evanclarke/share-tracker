@@ -524,3 +524,169 @@ async fn every_put_route_reports_create_then_replace() {
         "the table must carry every PUT route entities::router serves"
     );
 }
+
+mod properties {
+    use super::*;
+    use crate::test_support::{table_contents, table_differences};
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use rust_decimal::Decimal;
+    use serde_json::Value;
+
+    /// A replacement for one field of a read body: a decimal at any scale
+    /// (trailing zeros included), or the flipped boolean.
+    #[derive(Clone, Debug)]
+    enum Mutation {
+        Keep,
+        Decimal { mantissa: i64, scale: u32 },
+        Flip,
+    }
+
+    fn mutation() -> impl Strategy<Value = Mutation> {
+        prop_oneof![
+            6 => Just(Mutation::Keep),
+            3 => (0i64..=999_999_999_999_999, 0u32..=18)
+                .prop_map(|(mantissa, scale)| Mutation::Decimal { mantissa, scale }),
+            1 => Just(Mutation::Flip),
+        ]
+    }
+
+    fn is_decimal(v: &Value) -> bool {
+        v.as_str().is_some_and(|s| s.parse::<Decimal>().is_ok())
+    }
+
+    fn mutate(body: &mut Value, mutations: &[Mutation]) {
+        let object = body.as_object_mut().unwrap();
+        let mut fields: Vec<String> = object.keys().cloned().collect();
+        fields.sort();
+        for (field, m) in fields.iter().zip(mutations.iter().cycle()) {
+            let value = &object[field];
+            match m {
+                Mutation::Decimal { mantissa, scale } if is_decimal(value) => {
+                    object[field] = Value::String(Decimal::new(*mantissa, *scale).to_string());
+                }
+                Mutation::Flip if value.is_boolean() => {
+                    object[field] = Value::Bool(!value.as_bool().unwrap());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Every field the write was given reads back as that value: a decimal
+    /// numerically, anything else verbatim.
+    fn differences(written: &Value, read: &Value) -> Vec<String> {
+        written
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter_map(|(field, w)| {
+                let r = read.get(field)?;
+                let same = match (w.as_str(), r.as_str()) {
+                    (Some(a), Some(b)) if is_decimal(w) && is_decimal(r) => {
+                        a.parse::<Decimal>().unwrap() == b.parse::<Decimal>().unwrap()
+                    }
+                    _ => w == r,
+                };
+                (!same).then(|| format!("{field}: wrote {w}, read {r}"))
+            })
+            .collect()
+    }
+
+    async fn round_trip(case: &RoundTrip, mutations: &[Mutation]) -> Result<(), TestCaseError> {
+        let get_path = case.get_path.unwrap_or(case.put_path);
+        let pool = test_pool().await;
+        seed_round_trip_fixtures(&pool).await;
+        let client = ApiClient::over(router().with_state(pool.clone()));
+        client
+            .put(case.put_path, &case.create)
+            .await
+            .expect_status(StatusCode::CREATED);
+
+        let mut body = case.create.clone();
+        mutate(&mut body, mutations);
+        let written = client.put(case.put_path, &body).await;
+        if written.status == StatusCode::UNPROCESSABLE_ENTITY {
+            return Ok(());
+        }
+        prop_assert_eq!(
+            written.status,
+            StatusCode::NO_CONTENT,
+            "PUT {} {}: {}",
+            case.put_path,
+            body,
+            written.text()
+        );
+        let read: Value = client.get_json(get_path).await;
+        let lost = differences(&body, &read);
+        prop_assert!(
+            lost.is_empty(),
+            "PUT {} {} then GET {}: {:?}",
+            case.put_path,
+            body,
+            get_path,
+            lost
+        );
+
+        let mut replay = test_support::writable_body(&read, case.read_only);
+        if let Some(graft) = case.graft.as_object() {
+            let replay = replay.as_object_mut().unwrap();
+            for (key, value) in graft {
+                replay.insert(key.clone(), value.clone());
+            }
+        }
+        // A Sell's PUT replaces its allocation rows, which take fresh ids:
+        // compare them by what they allocate.
+        let contents = || async {
+            let mut contents = table_contents(&pool).await;
+            for row in contents.get_mut("parcel_allocations").unwrap() {
+                *row = row.split_once(',').unwrap().1.to_owned();
+            }
+            contents.get_mut("parcel_allocations").unwrap().sort();
+            contents
+        };
+        let before = contents().await;
+        let stored = client.put(case.put_path, &replay).await;
+        prop_assert_eq!(
+            stored.status,
+            StatusCode::NO_CONTENT,
+            "PUT {} of its own read {}: {}",
+            case.put_path,
+            replay,
+            stored.text()
+        );
+        let changed = table_differences(
+            &before,
+            &contents().await,
+            &["row_history", "sqlite_sequence"],
+        );
+        prop_assert!(
+            changed.is_empty(),
+            "PUT {} of its own read {} changed {:?}",
+            case.put_path,
+            replay,
+            changed
+        );
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(test_support::db_proptest_config())]
+
+        /// Whatever figures (at whatever scale) and flags a write stores,
+        /// the read hands each back as written, and writing that read back
+        /// changes no stored row — the property form of
+        /// `what_a_get_returns_can_be_put_back_unchanged`, over every
+        /// entity it covers.
+        #[test]
+        fn every_written_figure_reads_back_and_a_re_put_changes_nothing(
+            // One entity a case: every one of them each run would cost the
+            // suite seconds; `PROPTEST_CASES` widens a deep run.
+            case in prop::sample::select(round_trip_cases().into_iter().map(|c| c.put_path).collect::<Vec<_>>()),
+            mutations in prop::collection::vec(mutation(), 1..=24),
+        ) {
+            let case = round_trip_cases().into_iter().find(|c| c.put_path == case).unwrap();
+            test_support::block_on(round_trip(&case, &mutations))?;
+        }
+    }
+}

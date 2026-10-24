@@ -33,7 +33,7 @@ use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
@@ -383,12 +383,75 @@ async fn dump_database(pool: &SqlitePool) -> String {
     out
 }
 
+/// Every table's rows, each rendered as its SQL literal tuple and sorted, keyed
+/// by table name — the contents half of [`dump_database`], comparable a table
+/// at a time so a property can say *which* table an undo failed to restore
+/// and set aside the ones an undo is meant to change (`row_history`, which
+/// records it, and `sqlite_sequence`).
+pub async fn table_contents(pool: &SqlitePool) -> BTreeMap<String, Vec<String>> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let mut contents = BTreeMap::new();
+    for table in tables {
+        let (_, mut rows) = row_literals(pool, &table).await;
+        rows.sort();
+        contents.insert(table, rows);
+    }
+    contents
+}
+
+/// Each table (bar `skip`) whose [`table_contents`] differ between `before`
+/// and `after`, with the rows it lost and gained.
+pub fn table_differences(
+    before: &BTreeMap<String, Vec<String>>,
+    after: &BTreeMap<String, Vec<String>>,
+    skip: &[&str],
+) -> Vec<String> {
+    let tables: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    tables
+        .into_iter()
+        .filter(|t| !skip.contains(&t.as_str()) && before.get(*t) != after.get(*t))
+        .map(|t| {
+            let empty = Vec::new();
+            let (b, a) = (
+                before.get(t).unwrap_or(&empty),
+                after.get(t).unwrap_or(&empty),
+            );
+            let lost: Vec<_> = b.iter().filter(|r| !a.contains(r)).collect();
+            let gained: Vec<_> = a.iter().filter(|r| !b.contains(r)).collect();
+            format!("{t}: lost {lost:?}, gained {gained:?}")
+        })
+        .collect()
+}
+
 /// SQLite's own AUTOINCREMENT bookkeeping table.
 const SEQUENCE_TABLE: &str = "sqlite_sequence";
 
 /// Append `table`'s rows as `INSERT` statements, batched so a 160-row seed
 /// calendar costs a handful of statements rather than 160.
 async fn push_rows(pool: &SqlitePool, table: &str, out: &mut String) {
+    let (quoted, rows) = row_literals(pool, table).await;
+
+    const ROWS_PER_STATEMENT: usize = 128;
+    for chunk in rows.chunks(ROWS_PER_STATEMENT) {
+        writeln!(
+            out,
+            "INSERT INTO {} ({}) VALUES {};",
+            quote_ident(table),
+            quoted.join(","),
+            chunk.join(",")
+        )
+        .expect("writing to a String cannot fail");
+    }
+}
+
+/// `table`'s quoted column names, and each row (`rowid` ascending) as the
+/// parenthesised tuple of its columns' SQL literals.
+async fn row_literals(pool: &SqlitePool, table: &str) -> (Vec<String>, Vec<String>) {
     let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
         .bind(table)
         .fetch_all(pool)
@@ -409,18 +472,7 @@ async fn push_rows(pool: &SqlitePool, table: &str, out: &mut String) {
     .fetch_all(pool)
     .await
     .unwrap();
-
-    const ROWS_PER_STATEMENT: usize = 128;
-    for chunk in rows.chunks(ROWS_PER_STATEMENT) {
-        writeln!(
-            out,
-            "INSERT INTO {} ({}) VALUES {};",
-            quote_ident(table),
-            quoted.join(","),
-            chunk.join(",")
-        )
-        .expect("writing to a String cannot fail");
-    }
+    (quoted, rows)
 }
 
 /// A SQLite identifier as a double-quoted literal.

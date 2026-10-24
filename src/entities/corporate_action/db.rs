@@ -6,8 +6,8 @@
 
 use super::model::{ActionKind, CorporateAction};
 use crate::domain::adjustments::{
-    AcquiredUnits, SplitRatio, UnitsAt, as_acquired_quantity, db_payment_currency_conflict,
-    db_splits_for_listing,
+    AcquiredUnits, SplitRatio, UnitsAt, db_payment_currency_conflict, db_splits_for_listing,
+    sold_in_acquired_units,
 };
 use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::domain::{adjustments, cost_base, tax_year};
@@ -262,7 +262,7 @@ impl From<WriteError> for ApiError {
 /// `trade::UpsertError::QuantityBelowAllocated`): a parcel's quantity is in
 /// as-acquired units while each allocation is in its own sale date's units, so
 /// allocations are re-based back across the listing's splits (TD 2000/10)
-/// before comparing — the same [`as_acquired_quantity`] those paths use. A
+/// before comparing — the same [`sold_in_acquired_units`] those paths use. A
 /// corporate-action write is the third way the comparison can move: it changes
 /// the split stream itself rather than either side of the sum.
 async fn allocations_fit_parcels(
@@ -282,9 +282,8 @@ async fn allocations_fit_parcels(
     .fetch_all(&mut *conn)
     .await?;
 
-    // Each parcel's (quantity, allocations consumed so far), in as-acquired
-    // units.
-    let mut consumed: HashMap<TradeId, (AcquiredUnits, AcquiredUnits)> = HashMap::new();
+    // Each parcel's quantity, acquisition date and sale allocations.
+    let mut consumed: HashMap<TradeId, (AcquiredUnits, NaiveDate, Vec<UnitsAt>)> = HashMap::new();
     for row in &rows {
         let parcel_id: TradeId = row.try_get("purchase_trade_id")?;
         let acquired: NaiveDate = row.try_get("acquired")?;
@@ -294,14 +293,15 @@ async fn allocations_fit_parcels(
         )?);
         let sale_date: NaiveDate = row.try_get("sale_date")?;
         let allocated = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-        let entry = consumed
+        consumed
             .entry(parcel_id)
-            .or_insert((parcel_quantity, AcquiredUnits::ZERO));
-        entry.1 += as_acquired_quantity(UnitsAt::new(allocated, sale_date), &splits, acquired);
+            .or_insert((parcel_quantity, acquired, Vec::new()))
+            .2
+            .push(UnitsAt::new(allocated, sale_date));
     }
-    Ok(consumed
-        .values()
-        .all(|&(quantity, total)| total <= quantity))
+    Ok(consumed.into_values().all(|(quantity, acquired, sales)| {
+        sold_in_acquired_units(quantity, sales, &splits, acquired) <= quantity
+    }))
 }
 
 /// The first quantity of `listing_id` that the recorded split stream re-bases

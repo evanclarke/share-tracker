@@ -162,35 +162,29 @@ pub async fn db_upsert(
     // sale-date units: re-base across any share splits/consolidations between
     // them (TD 2000/10). Mirrors the live `PUT /sells` path's check.
     let splits = corporate_action::db_splits_for_listing(pool, ListingId(purchase_listing)).await?;
-    let alloc_acquired = corporate_action::as_acquired_quantity(
-        corporate_action::UnitsAt::new(allocation.quantity_allocated, sale_date),
-        &splits,
-        purchase_date,
-    );
-
-    let already_purchase_allocated = {
-        let rows = sqlx::query(
-            "SELECT pa.quantity_allocated, s.date AS sale_date \
-             FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
-             WHERE pa.purchase_trade_id = ? AND pa.id != ?",
-        )
-        .bind(allocation.purchase_trade_id)
-        .bind(allocation.id)
-        .fetch_all(pool)
-        .await?;
-        let mut total = corporate_action::AcquiredUnits::ZERO;
-        for row in &rows {
-            let qty: Decimal = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
-            let d: NaiveDate = row.try_get("sale_date")?;
-            total += corporate_action::as_acquired_quantity(
-                corporate_action::UnitsAt::new(qty, d),
-                &splits,
-                purchase_date,
-            );
-        }
-        total
-    };
-    if already_purchase_allocated + alloc_acquired > purchase_qty {
+    let mut sales = vec![corporate_action::UnitsAt::new(
+        allocation.quantity_allocated,
+        sale_date,
+    )];
+    let rows = sqlx::query(
+        "SELECT pa.quantity_allocated, s.date AS sale_date \
+         FROM parcel_allocations pa JOIN trades s ON s.id = pa.sale_trade_id \
+         WHERE pa.purchase_trade_id = ? AND pa.id != ?",
+    )
+    .bind(allocation.purchase_trade_id)
+    .bind(allocation.id)
+    .fetch_all(pool)
+    .await?;
+    for row in &rows {
+        let qty: Decimal = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        sales.push(corporate_action::UnitsAt::new(
+            qty,
+            row.try_get("sale_date")?,
+        ));
+    }
+    if corporate_action::sold_in_acquired_units(purchase_qty, sales, &splits, purchase_date)
+        > purchase_qty
+    {
         return Err(UpsertError::PurchaseQuantityExceeded);
     }
 

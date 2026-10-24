@@ -456,7 +456,8 @@ async fn parcel_units_at_record_date(
             ))
         })
         .collect::<Result<Vec<UnitsAt>, sqlx::Error>>()?;
-    let remaining = parcel_qty - sold_in_acquired_units(sold, anchoring.splits, parcel_date);
+    let remaining =
+        parcel_qty - sold_in_acquired_units(parcel_qty, sold, anchoring.splits, parcel_date);
     Ok(split_adjusted_quantity(
         remaining,
         anchoring.splits,

@@ -53,6 +53,11 @@ income drilldown, the disposal schedule's arithmetic, the 45-day walk, period pe
 the five defects it found, including the parcel-level rounding rule every printed disposal now
 shares) is closed and archived in [`DONE/reviews.md`](DONE/reviews.md).
 
+The 2026-10-24 fifth property-test pass (every write operation against its own undo and
+`?dry_run=true` preview, the GET → PUT round trip at random scales, and chains of rollovers, and
+the one defect it found — the Sell emptying a full-precision parcel) is closed and archived in
+[`DONE/reviews.md`](DONE/reviews.md).
+
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
 since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal

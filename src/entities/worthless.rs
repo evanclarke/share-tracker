@@ -190,6 +190,7 @@ async fn execute(
         let qty = AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?);
 
         let sold = sold_in_acquired_units(
+            qty,
             qty_sold
                 .get(&parcel_id)
                 .map_or(&[][..], |v| v)

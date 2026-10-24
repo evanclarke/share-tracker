@@ -421,6 +421,7 @@ fn problems_for(
             continue;
         }
         let sold_before_year = corporate_action::sold_in_acquired_units(
+            a.trade_quantity,
             sold.get(&a.trade_id)
                 .map_or(&[][..], |v| v)
                 .iter()

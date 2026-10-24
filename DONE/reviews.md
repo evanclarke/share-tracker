@@ -8124,3 +8124,46 @@ fixed with a focused regression test:
 Checked and left as designed: the period-performance attribution (`capital + FX + income = R`)
 is a residual by construction, so the property checks the independent identity instead — the
 return against its own printed columns — which holds (2834 tests).
+
+## Property tests, fifth pass: operations against their own undo and preview, and rollover chains (2026-10-24)
+The first four passes covered cost base, allocation, netting, scheduling, the cross-report
+holdings views and the tax documents; none had driven the write operations against the routes that
+undo them, a read body back through its own write at random scales, or a *chain* of rollovers.
+New properties, all of which now hold and stay as regression guards: `entities::tests::operations`'
+`every_operation_previews_and_undoes_exactly` (after any history of buys, sales, transfers,
+returns of capital, splits, bonus issues, scrip exchanges, demergers, buy-back participations,
+worthless-shares recognitions, rights exercises and sales, DRP reinvestments and renames, every
+previewable write's `?dry_run=true` stores nothing and answers what the real write then does, a
+refused write stores nothing and is refused alike by its preview, and undoing a write puts every
+table but `row_history`/`sqlite_sequence` back exactly — the only undo allowed to be refused is a
+corporate action's delete once it has adjusted a parcel, as `docs/API.md` documents);
+`a_rollover_chain_realises_each_original_cost_base_from_its_own_date` (any chain of scrip
+exchanges with or without cash, demergers, transfers, partial sales, splits and bonus issues,
+then a sale of everything left, realises exactly each original parcel's cost base, every unit
+dated from the day the original was bought; with returns of capital along the way, the cost bases
+realised fall short by exactly the cash paid less the G1 gains reported); and `entities::tests::put`'s
+`every_written_figure_reads_back_and_a_re_put_changes_nothing` (the property form of the round-trip
+contract: decimals at any scale and flipped flags, written to any of the seventeen PUT-able
+entities, read back value for value, and writing that read back changes no stored row).
+`test_support::table_contents`/`table_differences` are the shared per-table comparison they use.
+Each was coverage-checked: every operation's success path is reached, and every entity but
+investment expenses (whose apportionment check refuses most random amounts) stores a mutated body.
+One defect found, fixed with a focused regression test:
+- [x] **The Sell of everything the schedule shows was refused for a full-precision parcel.** A
+  rollover's replacement parcel after a 1-for-7 bonus issue holds 658.28571428571428571428571429
+  units; a later 2-for-1 bonus shows them as 1974.8571428571428571428571429, and every count within
+  the parcel's last digit re-bases to that figure, so `as_acquired_quantity`'s shortest-count rule
+  (the third pass's fix) read it back as 658.2857142857142857142857143 — a digit past the parcel,
+  refused as exceeding it, leaving a sliver no Sell could close. `sold_in_acquired_units` now takes
+  the parcel's own count and walks its sales in date order, and a sale stating exactly what the
+  remainder re-bases to on its date consumes exactly that remainder; the Sell, trade, standalone
+  allocation and corporate-action (`allocations_fit_parcels`) checks and every remainder walk go
+  through it. `docs/API.md`'s Fractional entitlements section states the rule
+  (`the_sell_of_everything_the_schedule_shows_empties_a_full_precision_parcel`, which also enters
+  a later bonus issue the old per-allocation check in `allocations_fit_parcels` would have refused)
+
+Checked and left as designed: a corporate action that has already adjusted a parcel refuses its
+delete; an `ON CONFLICT … DO UPDATE` upsert advances its table's `AUTOINCREMENT` counter even when
+it updates; a Sell's re-PUT replaces its allocation rows under fresh ids; and the net-capital-gain
+worksheet's G1 is at the cent, so the chain property bounds that comparison by half a cent per
+parcel paid on (2838 tests).

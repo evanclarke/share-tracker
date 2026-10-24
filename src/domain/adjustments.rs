@@ -925,19 +925,39 @@ pub fn checked_as_acquired_quantity(
     Ok(as_acquired_quantity(qty.1, splits, acquired))
 }
 
-/// Total units sold out of a parcel acquired at `acquired`, re-based to its
+/// Total units sold out of `parcel`, acquired at `acquired`, re-based to its
 /// as-acquired units. Each allocation is expressed in the unit basis of its
 /// own sale date — a post-split sale allocates post-split units against the
 /// pre-split parcel.
+///
+/// The sales are taken in date order, and one stating exactly what the
+/// parcel's remainder re-bases to on its date consumes exactly that
+/// remainder. [`as_acquired_quantity`] alone cannot know it: where the
+/// parcel's own count is itself a full-precision figure (a rollover's
+/// replacement parcel after a bonus issue holds 658.28571428571428571428571429
+/// units), every count within its last digit re-bases to the same rounded
+/// figure, and the shortest of them can lie past the parcel — so the Sell of
+/// everything the open-parcels schedule shows was refused as exceeding it.
 pub fn sold_in_acquired_units(
+    parcel: AcquiredUnits,
     sales: impl IntoIterator<Item = UnitsAt>,
     splits: &[SplitEvent],
     acquired: NaiveDate,
 ) -> AcquiredUnits {
-    sales
-        .into_iter()
-        .map(|qty| as_acquired_quantity(qty, splits, acquired))
-        .sum()
+    let mut sales: Vec<UnitsAt> = sales.into_iter().collect();
+    sales.sort_by_key(|sale| sale.basis);
+    let mut sold = AcquiredUnits::ZERO;
+    for sale in sales {
+        let left = parcel - sold;
+        sold += if left > AcquiredUnits::ZERO
+            && split_adjusted_quantity(left, splits, acquired, sale.basis).quantity == sale.quantity
+        {
+            left
+        } else {
+            as_acquired_quantity(sale, splits, acquired)
+        };
+    }
+    sold
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,7 +1201,10 @@ mod tests {
                     .quantity()
             );
             prop_assert_eq!(as_acquired_quantity(held, &splits, acquired()), bought);
-            prop_assert_eq!(sold_in_acquired_units([held], &splits, acquired()), bought);
+            prop_assert_eq!(
+                sold_in_acquired_units(AcquiredUnits::new(bought), [held], &splits, acquired()),
+                bought
+            );
             // Re-basing runs both ways: back to the acquisition date's basis
             // is the as-acquired count again.
             let back = held.rebased(&splits, Some(acquired()));
@@ -1219,6 +1242,7 @@ mod tests {
             }
             let sold_post: Decimal = sales.iter().sum();
             let sold = sold_in_acquired_units(
+                bought,
                 sales.iter().map(|q| UnitsAt::new(*q, after_all())),
                 &splits,
                 acquired(),

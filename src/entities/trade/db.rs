@@ -680,6 +680,7 @@ async fn write(
     if let Some(id) = id {
         let splits = corporate_action::db_splits_for_listing(&mut *tx, trade.listing_id).await?;
         let allocated_total = corporate_action::sold_in_acquired_units(
+            AcquiredUnits::new(trade.quantity),
             open_parcels::db_parcel_sales(&mut tx, id).await?,
             &splits,
             trade.date,
