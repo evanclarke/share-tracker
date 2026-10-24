@@ -6,3 +6,5 @@
 # everyone who runs the test benefits from these saved cases.
 cc 88c69fb3732d09ddc0b493814e4d763ee7a90b0436d35385ed5dab4ac5cb8766 # shrinks to buys = [(838, 1, 159), (63, 1, 25)], split = None, sells = [([20, 41, 0], 1), ([29, 0, 0], 14287), ([9, 60, 68], 118)]
 cc 9bd7c95256119117564af935b6e4d28cae72bec59584f53d17986a52000559ba # shrinks to buys = [(1, 1, 0), (1231, 1, 0)], split = Some((3, 1)), sells = [([0, 32, 0], 1), ([0, 53, 61], 8984)]
+cc 4c8506b60ab1c608f6e28e3b5cf1a16d2d9dbf5286ae595c83b0afedd73ceff9 # shrinks to buys = [(107, 1, 0), (531, 1, 0), (482, 1, 0)], split = Some((1, 2)), sells = [([34, 47, 27], 1688), ([33, 3, 48], 17231), ([21, 26, 37], 4683)]
+cc 2ec837bbec60271257730119c215b2c0f31c0a309f0b72866a055b2ee1e64ac0 # shrinks to mantissa = 5344009692118, scale = 0, units = [(28157, 8), (37066, 2), (68254, 2), (37225, 6)]

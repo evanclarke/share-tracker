@@ -5056,9 +5056,13 @@ mod tests {
             parcel["cost_base_per_unit_aud"],
             serde_json::json!("44.968603603603603603603603604")
         );
+        // The parcel's proceeds share over its units. The share lies on the
+        // total's grid (`realised_gains::cumulative_share`, 22 places for a
+        // five-digit total) so the shares add back exactly, which leaves this
+        // a few last places from the exact 46.1135907046476761619190404797….
         assert_eq!(
             parcel["proceeds_per_unit_aud"],
-            serde_json::json!("46.11359070464767616191904048")
+            serde_json::json!("46.113590704647676161919040541")
         );
         assert_eq!(parcel["buy_gst_on_brokerage"], serde_json::json!("0.995"));
         assert_eq!(parcel["buy_brokerage"], serde_json::json!("9.95"));

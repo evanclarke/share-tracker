@@ -115,6 +115,19 @@ says registry rounding and cash in lieu are "not modelled". What registries actu
   only — fee dust leaves balances finer than it, and ETH is natively 18 dp. So the key is the
   holding account, with a per-listing override, not (account, exchange)
 
+A live instance (found by CI's random seed, 2026-10-24, and present in v0.32.0):
+`unrealised_gains`' `an_unrealised_gain_is_what_selling_everything_that_day_realises` fails
+intermittently at its `total(&allocs) == row.quantity` assertion after a bonus issue and a split
+that do not divide the holding — a holding row of `898.9999999999999999999999999` against its
+parcels' printed remainders summing to `899.0000000000000000000000000` (seed
+`cc e7cf5465c7025e26b37463289788999765705b7b94fae9c6957331b62bbb105d`: three Buys of 220/529/615,
+transfers of 68% and 35% to account 2, a 1-for-4 bonus issue, a 2-for-3 split), and the reverse
+(`449.50000000000000000000000001` against `449.5`) on another. Each parcel's remainder is a 28-digit
+rounding of a non-terminating count, and a sum of such roundings has no single right last digit, so
+this cannot be fixed inside the exact-fraction model — the per-parcel stored grid counts below are
+what fix it. The seed is deliberately not committed to `proptest-regressions/` (it would fail every
+run until then); add it, and see it pass, as part of closing this section.
+
 The live portfolio's only ratio-driven action is a 1-for-1 demerger, so no stored figure is wrong
 today; this is a model-correctness change. DRP's `residual_handling` (`CarryForward | PayOut`) is
 the precedent: the rule is on the plan, the grid on the holding.

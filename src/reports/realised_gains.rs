@@ -570,6 +570,14 @@ pub async fn db_realised_gains_on(
 ///   …667 contract note), so a disposal's total is the final entitlement.
 /// * **Every share is still the parcel's own pro-rata figure**, so the
 ///   per-parcel rows a UI drills into mean something on their own.
+/// * **The shares add back to the total exactly.** Each running entitlement is
+///   rounded onto one grid per total ([`share_grid_scale`]): the total's own
+///   scale, widened to as many places as 27 significant digits of it leave.
+///   Every entitlement, share and partial sum is then a whole number of that
+///   grid step and in range, so `entitled − entitled_before` and the re-adding
+///   of the shares are exact. Unrounded, an entitlement after a consolidation
+///   could carry a place more than the next one, and three parcels' shares
+///   of a 3468.9373 Sell summed to 3468.9373000000000000000000001.
 ///
 /// Apply it to the exact *total* the report publishes (net proceeds, a rights
 /// sale's cost), never to one component of it: a component apportioned and
@@ -584,12 +592,32 @@ pub(crate) fn cumulative_share(
     let entitled = if units_so_far == units_total {
         total
     } else {
-        mul_div(&[total, units_so_far], units_total)
+        mul_div(&[total, units_so_far], units_total).round_dp(share_grid_scale(total))
     };
     Apportioned {
         share: entitled - entitled_before,
         entitled,
     }
+}
+
+/// The decimal places [`cumulative_share`] rounds every entitlement of `total`
+/// to: as many as 27 significant digits of `total` leave after its integer
+/// digits (one short of `Decimal`'s 28, so a sum of shares cannot carry out of
+/// range), and never fewer than `total`'s own scale, so the total itself lies
+/// on the grid. That scale is the *value's* (trailing zeros normalised away):
+/// the recorded Sell's AUD conversion and the what-if's figure write one total
+/// with different trailing zeros, and must be handed the same grid.
+fn share_grid_scale(total: Decimal) -> u32 {
+    let mut integer_digits = 0u32;
+    let mut whole = total.abs().trunc();
+    while whole >= Decimal::ONE {
+        whole = (whole / Decimal::TEN).trunc();
+        integer_digits += 1;
+    }
+    27u32
+        .saturating_sub(integer_digits)
+        .max(total.normalize().scale())
+        .min(Decimal::MAX_SCALE)
 }
 
 /// One step of [`cumulative_share`]: this allocation's share, and the
@@ -4350,6 +4378,35 @@ mod tests {
         /// take (0 = none), and the sale price in cents.
         fn sells() -> impl Strategy<Value = Vec<(Vec<u32>, i64)>> {
             prop::collection::vec((prop::collection::vec(0u32..=100, 3), 1i64..=20_000), 1..=4)
+        }
+
+        proptest! {
+            /// Whatever the total and however the units fall — including
+            /// counts a non-terminating ratio leaves (n/3, n/7) — the shares
+            /// `cumulative_share` hands out add back to the total exactly, and
+            /// the final entitlement is the total itself.
+            #[test]
+            fn cumulative_shares_add_back_to_the_total_exactly(
+                mantissa in -10_000_000_000_000i64..=10_000_000_000_000,
+                scale in 0u32..=10,
+                units in prop::collection::vec((1i64..=100_000, 1i64..=9), 1..=6),
+            ) {
+                let total = Decimal::new(mantissa, scale);
+                let units: Vec<Decimal> =
+                    units.into_iter().map(|(n, d)| Decimal::from(n) / Decimal::from(d)).collect();
+                let units_total: Decimal = units.iter().sum();
+                let mut so_far = Decimal::ZERO;
+                let mut entitled = Decimal::ZERO;
+                let mut shares = Decimal::ZERO;
+                for u in &units {
+                    so_far += *u;
+                    let step = cumulative_share(total, so_far, units_total, entitled);
+                    shares += step.share;
+                    entitled = step.entitled;
+                }
+                prop_assert_eq!(entitled, total);
+                prop_assert_eq!(shares, total);
+            }
         }
 
         proptest! {
