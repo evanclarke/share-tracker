@@ -640,7 +640,8 @@ async fn create(
 mod tests {
     use super::*;
     use crate::entities::holding_account;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::test_support::{self, ApiClient, dec, test_pool};
     use axum::http::StatusCode;
 
@@ -1200,15 +1201,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
 
         for (id, listing_id, account, year_end) in [
             (1, 1, 1, ymd(2024, 6, 30)),

@@ -443,7 +443,8 @@ fn list_filtering_contract_documented() {
     // classification is stated rather than left to be discovered.
     assert!(section.contains(
         "`/exchanges`, `/currencies`, `/mic_registry`, `/rba_fx_rates`, `/holding_accounts`, \
-         `/cgt_settings` and `/tax_year_settings` are reference or settings tables read whole"
+         `/holding_unit_scales`, `/cgt_settings` and `/tax_year_settings` are reference or \
+         settings tables read whole"
     ));
     // There are no query-ignoring lists any more (`GET /rights_sales?listing_id=3`
     // once answered the whole table): the section must not describe one.
@@ -4565,12 +4566,14 @@ fn fractional_entitlements_documented() {
     assert!(API_MD.contains(
         "a 1-for-3 exchange of 101 units gives 33.666666666666666666666666667 replacement units"
     ));
-    // …and the two that did, now pointing at the shared section.
+    // …and the two that did, now pointing at the shared section — plus the
+    // unit-precision section, whose computed quantities are what land off a
+    // holding's grid.
     assert_eq!(
         API_MD
             .matches("[Fractional entitlements](#fractional-entitlements)")
             .count(),
-        4
+        5
     );
 }
 

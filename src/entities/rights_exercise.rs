@@ -38,6 +38,7 @@ use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action::{
     self, ActionKind, NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, SplitEvent, UnitsAt,
 };
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
@@ -154,6 +155,10 @@ pub enum ExerciseError {
     /// 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
     UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
+    /// The units exercised are finer than their holding's unit scale
+    /// (`holding_unit_scale::db_too_fine`). Mapped to `422` naming the scale.
+    #[error("the units exercised are off their holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
     /// A non-AUD exercise whose month has no imported ATO rate and whose body
     /// states no `fx_rate`: the parcel's cost base has no rate to convert at,
     /// and binding a placeholder 1 would silently cost it at parity via
@@ -212,6 +217,7 @@ impl From<ExerciseError> for ApiError {
                  import that month's RBA rates; exercising without one would cost the parcel \
                  at parity (1 AUD per {currency})"
             )),
+            ExerciseError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             ExerciseError::Db(err) => err.into(),
         }
     }
@@ -476,6 +482,17 @@ async fn execute(
             }
         }
     };
+    // A quantity the taxpayer states must sit on its holding's unit grid.
+    if let Some(too_fine) = holding_unit_scale::db_too_fine(
+        &mut tx,
+        body.holding_account_id,
+        action.listing_id,
+        body.units,
+    )
+    .await?
+    {
+        return Err(ExerciseError::UnitScale(too_fine));
+    }
     let new_id = trade::NewParcel::new(
         trade::ParcelOrigin::RightsExercise(action_id),
         body.date,
@@ -535,7 +552,7 @@ mod tests {
     use crate::entities::{listing, rba_fx_rate, sell};
     use crate::reports::realised_gains::DisposalId;
     use crate::reports::{open_parcels, realised_gains};
-    use crate::test_support::{self, ApiClient, dec, test_pool};
+    use crate::test_support::{self, ApiClient, dec, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -1101,18 +1118,12 @@ mod tests {
     /// parcel lands there, not in the default account.
     #[tokio::test]
     async fn exercise_lands_in_the_chosen_holding_account() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal CHESS".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Personal CHESS"))
+            .await
+            .unwrap();
         insert_buy(&pool, 1, d(2024, 1, 10), "1000", "8.00").await;
         insert_rights_issue(&pool, 10, d(2024, 3, 1)).await;
 

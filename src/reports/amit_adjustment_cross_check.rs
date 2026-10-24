@@ -534,11 +534,13 @@ mod tests {
     use super::*;
     use crate::entities::amit_adjustment_generation::GenerateBody;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::entities::{amit_adjustment_generation, demerger, scrip_exchange};
-    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use crate::test_support::{
+        self, ApiClient, allocate, dec, holding_account_row, test_pool, ymd,
+    };
     use axum::http::StatusCode;
 
     /// The units-held comparison's own sentence (SCENARIOS Z-d) for one
@@ -559,15 +561,9 @@ mod tests {
 
     /// A second holding account, for the transfer and wrong-account cases.
     async fn second_account(pool: &SqlitePool) {
-        holding_account::db_upsert(
-            pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
     }
 
     /// Move `qty` units of parcel `purchase_trade_id` from account 1 to
@@ -1026,15 +1022,9 @@ mod tests {
     async fn db_a_statement_against_an_account_that_held_nothing_is_flagged() {
         let pool = test_pool().await;
         amit_listing(&pool, 1, "HNDQ").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2023, 8, 1))
             .qty(dec("1000"))

@@ -364,12 +364,12 @@ mod tests {
     use crate::domain::open_parcels;
     use crate::entities::amit_adjustment_generation::{self, GenerateBody};
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::entities::{corporate_action, demerger, scrip_exchange};
     use crate::reports::open_parcels::{OpenParcel, db_open_parcels};
-    use crate::test_support::{self, dec, test_pool, ymd};
+    use crate::test_support::{self, dec, holding_account_row, test_pool, ymd};
 
     /// A transfer dated *before* an already-entered AMMA statement's year end
     /// must not fold that statement's reduction into the replacement parcel's
@@ -383,15 +383,9 @@ mod tests {
     async fn a_statement_year_ending_after_the_operation_does_not_reach_the_carried_cost_base() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("AAA").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         // 1,000 units at $10: a $10,000 initial cost base.
         test_support::buy(1, 1)
             .date(ymd(2024, 1, 10))
@@ -474,15 +468,9 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("AAA").insert(&pool).await;
         for (id, name) in [(2, "Broker A"), (3, "Broker B")] {
-            holding_account::db_upsert(
-                &pool,
-                &HoldingAccount {
-                    id: HoldingAccountId(id),
-                    name: name.to_owned(),
-                },
-            )
-            .await
-            .unwrap();
+            holding_account::db_upsert(&pool, &holding_account_row(id, name))
+                .await
+                .unwrap();
         }
         test_support::buy(1, 1)
             .date(ymd(2023, 1, 10))
@@ -640,15 +628,9 @@ mod tests {
     async fn a_transfer_does_not_reinstate_the_entitlement_an_earlier_exchange_denied() {
         let pool = test_pool().await;
         let exchanged = exchanged_across_a_return_of_capital_record_date(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         assert_eq!(listing_2_parcel(&pool).await, (Decimal::ZERO, dec("2000")));
 
         transfer::db_transfer(

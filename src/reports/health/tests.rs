@@ -4,7 +4,6 @@
 use super::*;
 use crate::entities::closing_price::{self, NonTradingReason, PriceSource};
 use crate::entities::exchange::Exchange;
-use crate::entities::holding_account::HoldingAccount;
 use crate::entities::inheritance::{CostBaseRule, Inheritance};
 use crate::entities::interest_income::InterestIncome;
 use crate::entities::investment_expense::{ExpenseType, InvestmentExpense};
@@ -19,7 +18,7 @@ use crate::entities::{
 };
 use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use crate::reports::realised_gains::DisposalId;
-use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
+use crate::test_support::{self, ApiClient, dec, holding_account_row, test_pool, ymd};
 use axum::http::StatusCode;
 use chrono::Duration;
 use rust_decimal::Decimal;
@@ -1757,15 +1756,9 @@ async fn one_reference_across_two_listings_is_a_multi_line_note_not_a_duplicate(
 async fn one_reference_keyed_into_two_accounts_is_still_a_duplicate() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("BHP").insert(&pool).await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
     insert_trade_with_note(&pool, 1, ListingId(1), ymd(2026, 3, 10), Some("CN-8891")).await;
     test_support::buy(2, 1)
         .date(ymd(2026, 3, 10))
@@ -1955,15 +1948,9 @@ async fn statements_differing_in_listing_year_or_account_are_not_duplicates() {
     let pool = test_pool().await;
     amit_listing(&pool, 1, "VDHG").await;
     amit_listing(&pool, 2, "HNDQ").await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
     // Same listing and year, different holding account.
     insert_amma(
         &pool,
@@ -2115,15 +2102,9 @@ async fn income_differing_in_listing_account_date_or_amount_is_not_a_duplicate()
     let pool = test_pool().await;
     test_support::listing(1).ticker("AAA").insert(&pool).await;
     test_support::listing(2).ticker("BBB").insert(&pool).await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
     // Same account, date and amount, different listing.
     insert_dividend(&pool, 1, ListingId(1), ymd(2026, 3, 10), 1, "70").await;
     insert_dividend(&pool, 2, ListingId(2), ymd(2026, 3, 10), 1, "70").await;
@@ -2272,15 +2253,9 @@ async fn duplicated_interest_rows_are_reported_with_their_ids() {
 #[tokio::test]
 async fn interest_differing_in_any_key_field_is_not_a_duplicate() {
     let pool = test_pool().await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
     // Same date and amount, different source: two banks, one day.
     insert_interest(&pool, 1, ymd(2026, 3, 10), dec("250"), Some("ANZ savings")).await;
     insert_interest(&pool, 2, ymd(2026, 3, 10), dec("250"), Some("CBA savings")).await;
@@ -2511,15 +2486,9 @@ async fn ess_statements_differing_in_any_key_field_are_not_duplicates() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("AAA").insert(&pool).await;
     test_support::listing(2).ticker("BBB").insert(&pool).await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
     insert_ess(&pool, 1, ListingId(1), ymd(2026, 3, 10), "100", "10").await;
     // Same account, taxing point and figures, different listing.
     insert_ess(&pool, 2, ListingId(2), ymd(2026, 3, 10), "100", "10").await;
@@ -2811,15 +2780,9 @@ async fn each_vest_parcel_a_sale_draws_on_is_named_separately() {
 async fn a_holding_account_transfer_inside_the_window_is_not_a_disposal() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("ICE").insert(&pool).await;
-    holding_account::db_upsert(
-        &pool,
-        &holding_account::HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "ICE Employee Plan".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+        .await
+        .unwrap();
     let taxing_point = ymd(2024, 3, 1);
     let vest = ess_vest(&pool, 1, ListingId(1), taxing_point).await;
     let group = transfer::db_transfer(
@@ -2975,15 +2938,9 @@ async fn inheritances_from_one_death_that_differ_are_not_reported() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("INHA").insert(&pool).await;
     test_support::listing(2).ticker("INHB").insert(&pool).await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Broker".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+        .await
+        .unwrap();
 
     insert_inheritance(&pool, 1, ListingId(1), 1, "100", "3000").await;
     // A second parcel of the same listing from the same death, in a
@@ -3344,15 +3301,9 @@ async fn operation_written_closing_sells_are_never_flagged() {
     )
     .await
     .unwrap();
-    holding_account::db_upsert(
-        &pool,
-        &holding_account::HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Broker".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO transfers (id, listing_id, date, from_account_id, to_account_id, \
                                     fee_sale_trade_id) \
@@ -3666,15 +3617,9 @@ async fn a_holding_bought_on_the_ex_date_is_not_entitled_and_raises_nothing() {
 async fn each_holding_account_is_asked_separately() {
     let pool = test_pool().await;
     test_support::listing(1).ticker("ABC").insert(&pool).await;
-    holding_account::db_upsert(
-        &pool,
-        &holding_account::HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
     test_support::buy(1, 1)
         .date(ymd(2024, 1, 10))
         .qty(dec("100"))

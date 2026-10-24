@@ -47,7 +47,7 @@ Enrol holdings in a Dividend Reinvestment Plan over dated enrolment periods (enr
 
 ### Holding accounts
 
-The same listing can be held in several accounts of the one taxpayer at once (e.g. RSU-vested shares in an employer share-plan account that cannot DRP alongside DRP-enrolled shares in a personal broker account); trades, income, AMMA statements, and DRP enrolment periods each carry a holding account, every write defaults to the seeded default account so single-account users never see the dimension, and the holdings reports show the same listing once per account
+The same listing can be held in several accounts of the one taxpayer at once (e.g. RSU-vested shares in an employer share-plan account that cannot DRP alongside DRP-enrolled shares in a personal broker account); trades, income, AMMA statements, and DRP enrolment periods each carry a holding account, every write defaults to the seeded default account so single-account users never see the dimension, and the holdings reports show the same listing once per account. Each account can state its **unit precision** — the decimal places its custodian holds a quantity to (whole units at a CHESS broker, 3 dp in a share plan, unconstrained for a crypto wallet), with a per-listing override for the odd holding that differs — and a typed quantity finer than that is refused with the scale named, rather than stored as a sliver no register holds ([Unit precision](API.md#unit-precision))
 
 ### Transfers between holding accounts
 

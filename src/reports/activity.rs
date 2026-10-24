@@ -1014,7 +1014,8 @@ mod tests {
     use super::*;
     use crate::entities::drp_enrolment::ResidualHandling;
     use crate::entities::exchange::Exchange;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::investment_expense::ExpenseType;
     use crate::entities::listing_rename::RenameBody;
     use crate::entities::sell::AllocationInput;
@@ -1145,15 +1146,9 @@ mod tests {
     async fn db_transfer_collapses_to_one_row() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Personal"))
+            .await
+            .unwrap();
         test_support::buy(1, 1).qty(dec("100")).insert(&pool).await; // 2024-01-01, account 1
         transfer::db_transfer(
             &pool,
@@ -2199,7 +2194,7 @@ mod tests {
                 test_support::block_on(async move {
                     let pool = test_pool().await;
                     insert_listing(&pool, 1, "PRP").await;
-                    holding_account::db_upsert(&pool, &HoldingAccount { id: HoldingAccountId(2), name: "Second".into() })
+                    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
                         .await
                         .unwrap();
                     let dates = record(&pool, &steps).await?;

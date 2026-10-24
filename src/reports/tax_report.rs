@@ -2175,7 +2175,8 @@ mod tests {
     use crate::domain::adjustments::AcquiredUnits;
     use crate::entities::amit_adjustment_generation::GenerateBody;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::listing_rename::RenameBody;
     use crate::entities::sell::{AllocationInput, SellBody};
     use crate::entities::{
@@ -3319,15 +3320,9 @@ mod tests {
     async fn amma_missing_asks_each_holding_account_for_its_own_statement() {
         let pool = test_support::test_pool().await;
         listing_amit(&pool, 1, "AMT").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2023, 1, 3))
             .qty(dec("100"))

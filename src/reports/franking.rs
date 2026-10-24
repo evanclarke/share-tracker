@@ -390,7 +390,8 @@ pub async fn db_franked_dividends(
 mod tests {
     use super::*;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::TransferBody;
     use crate::entities::{demerger, holding_account, listing, trade, transfer};
@@ -1059,15 +1060,9 @@ mod tests {
             1000,
         )
         .await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".into(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         // Ex-dividend 14 Mar; the whole holding moves accounts on 1 Apr, 30
         // days into the window.
         transfer::db_transfer(

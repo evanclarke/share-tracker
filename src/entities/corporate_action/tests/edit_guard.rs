@@ -2,6 +2,7 @@
 //! over-consumed parcel.
 
 use super::*;
+use crate::test_support::holding_account_row;
 
 // Write-time state check: an edit stays possible, but not into an
 // over-consumed parcel
@@ -208,15 +209,9 @@ async fn api_editing_a_split_into_an_over_consumed_parcel_returns_422() {
 async fn events_back_dated_over_a_rollover_are_refused_naming_it() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "AAA").await;
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Broker".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+        .await
+        .unwrap();
     test_support::buy(1, 1)
         .date(d(2023, 1, 10))
         .qty(Decimal::from(100))

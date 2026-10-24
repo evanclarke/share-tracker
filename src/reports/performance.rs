@@ -722,7 +722,7 @@ async fn performance_handler(
 mod tests {
     use super::*;
     use crate::entities::{listing, trade};
-    use crate::test_support::{self, ApiClient, test_pool};
+    use crate::test_support::{self, ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
@@ -1061,15 +1061,9 @@ mod tests {
         use crate::entities::{holding_account, sell as sell_mod, transfer};
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE", "XASX", "AUD").await;
-        holding_account::db_upsert(
-            &pool,
-            &holding_account::HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         buy(&pool, 1, 1, d(2023, 1, 3), 100, 10).await; // 1,000 into account 1
         transfer::db_transfer(
             &pool,

@@ -984,7 +984,8 @@ async fn realised_gains_handler(
 mod tests {
     use super::*;
     use crate::entities::demerger::Demerge;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::listing_rename::RenameBody;
     use crate::entities::scrip_exchange::Exchange;
     use crate::entities::sell::AllocationInput;
@@ -2173,15 +2174,9 @@ mod tests {
     async fn db_a_transfer_does_not_change_an_earlier_sells_realised_gain() {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "VDHG").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
         // 1,000 units at $10; a real Sell of 400 at $12 on 2025-03-03.
         insert_buy(

@@ -16,7 +16,6 @@ mod storage;
 use super::*;
 use crate::domain::adjustments::{RolloverOrigin, SplitRatio};
 use crate::domain::open_parcels;
-use crate::entities::holding_account::HoldingAccount;
 use crate::entities::sell::{AllocationInput, SellBody, SellError};
 use crate::entities::transfer::TransferBody;
 use crate::entities::{holding_account, listing, sell, transfer};

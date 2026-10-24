@@ -519,7 +519,7 @@ mod tests {
     use crate::entities::sell::SellBody;
     use crate::entities::trade::TradeType;
     use crate::reports::{open_parcels, realised_gains};
-    use crate::test_support::{self, ApiClient, test_pool};
+    use crate::test_support::{self, ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -1592,19 +1592,13 @@ mod tests {
     /// them.
     #[tokio::test]
     async fn replacements_stay_in_each_parcels_holding_account() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1, "HEAD").await;
         insert_listing(&pool, 2, "DEMERGED").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 2")

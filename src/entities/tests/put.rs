@@ -144,7 +144,14 @@ fn round_trip_cases() -> Vec<RoundTrip> {
                 "amit": true, "preference": false, "price_symbol": "RTT.AX",
             }),
         ),
-        RoundTrip::new("/holding_accounts/3", json!({ "name": "Third" })),
+        RoundTrip::new(
+            "/holding_accounts/3",
+            json!({ "name": "Third", "unit_scale": 2 }),
+        ),
+        RoundTrip::new(
+            "/holding_unit_scales/1",
+            json!({ "holding_account_id": 1, "listing_id": 1, "unit_scale": 4 }),
+        ),
         RoundTrip::new(
             "/trades/10",
             json!({
@@ -386,7 +393,7 @@ async fn every_put_route_reports_create_then_replace() {
 
     let mut checked: Vec<&str> = Vec::new();
 
-    // The sixteen upserts whose create body `round_trip_cases` supplies:
+    // The seventeen upserts whose create body `round_trip_cases` supplies:
     // PUT the same body twice — 201 then 204.
     for case in round_trip_cases() {
         let pool = test_pool().await;
@@ -520,7 +527,7 @@ async fn every_put_route_reports_create_then_replace() {
     );
     assert_eq!(
         PUT_ROUTES.len(),
-        20,
+        21,
         "the table must carry every PUT route entities::router serves"
     );
 }

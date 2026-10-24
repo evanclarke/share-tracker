@@ -1549,7 +1549,7 @@ mod tests {
         }
         assert_eq!(
             (checked_post, checked_put),
-            (12, 4),
+            (13, 4),
             "the split between server-assigned and keyed creates changed — re-check \
              that each entity's form branch still matches its route"
         );

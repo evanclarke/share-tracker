@@ -13,6 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
+use crate::entities::holding_unit_scale::{self, Holding, ScaleError};
 use crate::infra::db;
 use crate::infra::db::write_tx;
 use crate::infra::extract::Json;
@@ -38,6 +39,10 @@ pub fn default_holding_account_id() -> HoldingAccountId {
 pub struct HoldingAccount {
     pub id: HoldingAccountId,
     pub name: String,
+    /// Decimal places a quantity held here may carry (`0` = whole units);
+    /// `null` = unconstrained, e.g. a crypto wallet. A per-listing override
+    /// (`entities::holding_unit_scale`) takes precedence for its listing.
+    pub unit_scale: Option<u32>,
 }
 
 #[derive(utoipa::ToSchema, Debug, Deserialize)]
@@ -45,13 +50,20 @@ pub struct HoldingAccount {
 pub struct HoldingAccountBody {
     /// Account name, unique, e.g. `Employer share plan`.
     pub name: String,
+    /// Decimal places (0–28) a quantity held in this account may carry —
+    /// `0` for a whole-unit register, `3` for a share plan holding units to
+    /// 3 dp. Omitted or `null` leaves it unconstrained (a crypto wallet). A
+    /// finer quantity is refused `422`; a scale below a quantity the account
+    /// already holds is refused too.
+    #[serde(default)]
+    pub unit_scale: Option<u32>,
 }
 
 impl CrudEntity for HoldingAccount {
     type Key = HoldingAccountId;
     type Filter = NoFilter;
     const TABLE: &'static str = "holding_accounts";
-    const COLUMNS: &'static str = "id, name";
+    const COLUMNS: &'static str = "id, name, unit_scale";
     const NOUN: &'static str = "holding account";
 }
 
@@ -92,14 +104,16 @@ pub async fn db_get(
     http::crud_get(pool, id).await
 }
 
-/// Why a holding-account write failed. The entity's only write-time invariant
-/// is the UNIQUE `name`, which the database enforces, so the upsert path's
-/// whole error set is the `sqlx::Error` its long-standing signature answers
-/// with; `VanishedAfterCreate` is the create path's alone.
+/// Why a holding-account write failed: the UNIQUE `name`, which the database
+/// enforces, and the unit scale (`holding_unit_scale::check_new_scale`) — out
+/// of range, or below a quantity the account already holds.
+/// `VanishedAfterCreate` is the create path's alone.
 #[derive(thiserror::Error, Debug)]
 pub enum UpsertError {
     #[error("holding account write failed: {0}")]
     Db(#[from] sqlx::Error),
+    #[error("the account's unit scale was refused: {0}")]
+    Scale(#[source] ScaleError),
     /// A create committed but the row could not be read back. Not reachable in
     /// practice — the row is committed and unread only if something deletes it
     /// in the same instant — but a create that answers with no row would be
@@ -109,12 +123,27 @@ pub enum UpsertError {
     VanishedAfterCreate,
 }
 
+impl From<ScaleError> for UpsertError {
+    fn from(e: ScaleError) -> Self {
+        match e {
+            ScaleError::Db(err) => UpsertError::Db(err),
+            other @ (ScaleError::OutOfRange(_) | ScaleError::BelowHeld { .. }) => {
+                UpsertError::Scale(other)
+            }
+        }
+    }
+}
+
 impl From<UpsertError> for ApiError {
     fn from(e: UpsertError) -> Self {
         match e {
             // A duplicate name violates the UNIQUE constraint → 422 with the
             // offending constraint named.
             UpsertError::Db(err) => err.into(),
+            UpsertError::Scale(scale) => match scale.detail() {
+                Some(detail) => ApiError::unprocessable(detail),
+                None => ApiError::internal(scale),
+            },
             // A create that cannot read back its own committed row is a server
             // fault, not the caller's.
             err @ UpsertError::VanishedAfterCreate => ApiError::internal(err),
@@ -127,13 +156,13 @@ impl From<UpsertError> for ApiError {
 /// The one statement is shared by both callers: `id = Some` is the
 /// long-standing `PUT /holding_accounts/:id` upsert, and `id = None` is the
 /// `POST /holding_accounts` create, which leaves the id to the database. The
-/// error is the plain `sqlx::Error` the upsert has always answered with, since
-/// the UNIQUE `name` is the only validation and the database applies it.
+/// UNIQUE `name` is the database's to apply; the unit scale is checked here,
+/// on the write's own transaction, against what the account already holds.
 async fn write(
     pool: &SqlitePool,
     id: Option<HoldingAccountId>,
     account: &HoldingAccount,
-) -> Result<Upserted<HoldingAccount>, sqlx::Error> {
+) -> Result<Upserted<HoldingAccount>, UpsertError> {
     // A create (`id` is `None`) binds a NULL id, so the database — not the
     // caller — picks the new row's id (`infra::db::insert_with_optional_id`,
     // SCENARIOS U-a). `holding_accounts` is the one table here that is not
@@ -141,15 +170,23 @@ async fn write(
     // *highest* id can be re-issued; see
     // `post_holding_account_lands_on_an_unheld_id_and_never_overwrites`.
     let query = db::insert_with_optional_id(
-        "INSERT INTO holding_accounts (id, name) VALUES (?, ?) \
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+        "INSERT INTO holding_accounts (id, name, unit_scale) VALUES (?, ?, ?) \
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, unit_scale = excluded.unit_scale",
         id.map(|id| id.0),
     );
     let mut tx = write_tx(pool).await?;
     // The create-vs-replace decision is made inside the write's own
     // `BEGIN IMMEDIATE` transaction (CLAUDE.md, "Data integrity").
     let outcome = http::Upsert::of(http::crud_exists_opt::<HoldingAccount, _>(&mut *tx, id).await?);
-    let result = query.bind(&account.name).execute(&mut *tx).await?;
+    // A new account holds nothing, so only a replace can meet a stored
+    // quantity finer than the scale asked for; the range is checked either way.
+    holding_unit_scale::check_new_scale(&mut tx, id.map(Holding::Account), account.unit_scale)
+        .await?;
+    let result = query
+        .bind(&account.name)
+        .bind(account.unit_scale)
+        .execute(&mut *tx)
+        .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the
     // explicit one it was handed. Either way the created row is read back
     // by the id it actually holds.
@@ -162,7 +199,7 @@ async fn write(
 pub async fn db_upsert(
     pool: &SqlitePool,
     account: &HoldingAccount,
-) -> Result<http::Upserted<HoldingAccount>, sqlx::Error> {
+) -> Result<http::Upserted<HoldingAccount>, UpsertError> {
     write(pool, Some(account.id), account).await
 }
 
@@ -239,6 +276,7 @@ fn holding_account_from_body(id: HoldingAccountId, body: HoldingAccountBody) -> 
     HoldingAccount {
         id,
         name: body.name,
+        unit_scale: body.unit_scale,
     }
 }
 
@@ -300,7 +338,7 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{ApiClient, test_pool};
+    use crate::test_support::{ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -322,15 +360,9 @@ mod tests {
     #[tokio::test]
     async fn db_insert_retrieve_and_rename() {
         let pool = test_pool().await;
-        db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".into(),
-            },
-        )
-        .await
-        .unwrap();
+        db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         assert_eq!(
             db_get(&pool, HoldingAccountId(2))
                 .await
@@ -340,15 +372,9 @@ mod tests {
             "ICE Employee Plan"
         );
 
-        db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal CHESS".into(),
-            },
-        )
-        .await
-        .unwrap();
+        db_upsert(&pool, &holding_account_row(2, "Personal CHESS"))
+            .await
+            .unwrap();
         assert_eq!(
             db_get(&pool, HoldingAccountId(2))
                 .await
@@ -363,39 +389,21 @@ mod tests {
     #[tokio::test]
     async fn db_duplicate_name_is_rejected() {
         let pool = test_pool().await;
-        db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Plan".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let err = db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(3),
-                name: "Plan".into(),
-            },
-        )
-        .await
-        .unwrap_err();
+        db_upsert(&pool, &holding_account_row(2, "Plan"))
+            .await
+            .unwrap();
+        let err = db_upsert(&pool, &holding_account_row(3, "Plan"))
+            .await
+            .unwrap_err();
         assert!(matches!(ApiError::from(err), ApiError::Unprocessable(_)));
     }
 
     #[tokio::test]
     async fn db_delete_unused_account_and_missing_account() {
         let pool = test_pool().await;
-        db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Plan".into(),
-            },
-        )
-        .await
-        .unwrap();
+        db_upsert(&pool, &holding_account_row(2, "Plan"))
+            .await
+            .unwrap();
         assert_eq!(
             db_delete(&pool, HoldingAccountId(2)).await.unwrap(),
             DeleteOutcome::Deleted

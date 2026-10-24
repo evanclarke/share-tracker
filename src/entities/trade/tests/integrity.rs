@@ -3,6 +3,7 @@
 //! be deleted, shrunk, or moved out from under it.
 
 use super::*;
+use crate::test_support::holding_account_row;
 
 /// Link an AMIT adjustment covering `qty` units of trade `trade_id`
 /// (listing 1), creating the AMMA statement it hangs off.
@@ -17,16 +18,10 @@ async fn insert_amit_adjustment_covering(pool: &SqlitePool, trade_id: TradeId, q
 
 /// A second holding account, so a parcel has somewhere to be moved to.
 async fn insert_second_account(pool: &SqlitePool) {
-    use crate::entities::holding_account::{self, HoldingAccount};
-    holding_account::db_upsert(
-        pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "ICE Employee Plan".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    use crate::entities::holding_account::{self};
+    holding_account::db_upsert(pool, &holding_account_row(2, "ICE Employee Plan"))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

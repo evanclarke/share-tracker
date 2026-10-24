@@ -16,7 +16,6 @@ mod validation;
 
 use super::*;
 use crate::entities::corporate_action::{ActionKind, CorporateAction};
-use crate::entities::holding_account::HoldingAccount;
 use crate::entities::{closing_price, corporate_action, demerger, holding_account, scrip_exchange};
 use crate::infra;
 use crate::infra::date;

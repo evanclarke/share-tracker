@@ -107,6 +107,7 @@ use crate::domain::cost_base::{Term, UnrepresentableCost, UnrepresentableQuantit
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action;
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::trade::ParcelOrigin;
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
@@ -432,11 +433,16 @@ pub enum UpsertError {
     /// (`corporate_action::rebased_quantity_beyond_range`). Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
     UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
+    /// The inherited quantity is finer than its holding's unit scale
+    /// (`holding_unit_scale::db_too_fine`). Mapped to `422` naming the scale.
+    #[error("the inherited quantity is off its holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
 }
 
 impl From<UpsertError> for ApiError {
     fn from(e: UpsertError) -> Self {
         match e {
+            UpsertError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             UpsertError::QuantityNotPositive => {
                 ApiError::unprocessable("the inherited quantity must be greater than zero")
             }
@@ -786,6 +792,17 @@ async fn write(
         Term::Amount("lpr_expenditure", inh.lpr_expenditure),
     ])
     .map_err(UpsertError::UnrepresentableCostBase)?;
+    // A quantity the taxpayer states must sit on its holding's unit grid.
+    if let Some(too_fine) = holding_unit_scale::db_too_fine(
+        &mut tx,
+        inh.holding_account_id,
+        inh.listing_id,
+        inh.quantity,
+    )
+    .await?
+    {
+        return Err(UpsertError::UnitScale(too_fine));
+    }
     // An edit keeps the linked Buy's id (`NewParcel::write` rewrites that row
     // in place); a first entry is written fresh, with an id the database has
     // never issued (SCENARIOS U-a).
@@ -994,7 +1011,8 @@ mod tests {
     use super::*;
     use crate::domain;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::sell::{self, AllocationInput, SellBody};
     use crate::entities::trade::{self, TradeType};
     use crate::entities::{corporate_action, holding_account, rba_fx_rate};
@@ -2407,15 +2425,9 @@ mod tests {
         let pool = test_pool().await;
         insert_listing(&pool, 1, "AUD").await;
         insert_listing(&pool, 2, "AUD").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
 
         for (id, listing_id, account, date) in [
             (1, 1, 1, ymd(2025, 1, 10)),

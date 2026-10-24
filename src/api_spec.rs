@@ -52,6 +52,7 @@ use crate::entities::ess_statement::{EssStatement, EssStatementBody};
 use crate::entities::exchange::{Exchange, ExchangeBody};
 use crate::entities::exchange_holiday::{ExchangeHoliday, ExchangeHolidayBody};
 use crate::entities::holding_account::{HoldingAccount, HoldingAccountBody};
+use crate::entities::holding_unit_scale::{HoldingUnitScale, HoldingUnitScaleBody};
 use crate::entities::income::{Income, IncomeBody};
 use crate::entities::inheritance::{Inheritance, InheritanceBody};
 use crate::entities::interest_income::{InterestIncome, InterestIncomeBody};
@@ -282,6 +283,7 @@ const TAGS: &[(&str, &str)] = &[
     ("/exchange_holidays", "Exchange holidays"),
     ("/listings", "Listings"),
     ("/holding_accounts", "Holding accounts"),
+    ("/holding_unit_scales", "Holding accounts"),
     ("/rba_fx_rates", "RBA FX rates"),
     ("/mic_registry", "MIC registry"),
     ("/currencies", "Currencies"),
@@ -890,6 +892,7 @@ components!(
     AmmaStatementBody,
     AmitAdjustmentBody,
     HoldingAccountBody,
+    HoldingUnitScaleBody,
     InheritanceBody,
     DrpEnrolmentBody,
     EssStatementBody,
@@ -928,6 +931,7 @@ components!(
     AmmaStatement,
     AmitAdjustment,
     HoldingAccount,
+    HoldingUnitScale,
     Inheritance,
     DrpEnrolment,
     EssStatement,

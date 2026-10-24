@@ -132,7 +132,7 @@ The live portfolio's only ratio-driven action is a 1-for-1 demerger, so no store
 today; this is a model-correctness change. DRP's `residual_handling` (`CarryForward | PayOut`) is
 the precedent: the rule is on the plan, the grid on the holding.
 
-- [ ] **Account unit precision.** Add `unit_scale` to `holding_accounts` (INTEGER, nullable: the
+- [x] **Account unit precision.** Add `unit_scale` to `holding_accounts` (INTEGER, nullable: the
   number of decimal places a quantity held there may carry; NULL = unconstrained, for crypto
   wallets), plus an optional per-(account, listing) override table for the odd holding that
   differs. A Buy/Sell/DRP/transfer/allocation quantity finer than its holding's scale is refused
@@ -142,6 +142,14 @@ the precedent: the rule is on the plan, the grid on the holding.
   pair for `holding_accounts` (new column), and a staleness-trigger classification for the
   override table. Useful on its own (it catches mistyped quantities) but does not by itself stop
   the defect class
+  *Done 2026-10-24 (migration 0053, `entities::holding_unit_scale`).* Two corrections to the
+  item as written: `holding_accounts` was never audited (0013 scoped it out as identity-only), so
+  there was no trigger pair to re-create — neither it nor the new `holding_unit_scales` override
+  joins `row_history`, since a scale changes no stored figure, only which writes are accepted; and
+  the check applies to quantities the taxpayer **states** (trades, Sells and their allocations incl.
+  transfer/buy-back ones, transfer-ins against the destination, ESS vest, inheritance, rights
+  exercise, DRP reinvestment), not to the quantities a scrip exchange/demerger/worthless recognise
+  computes — those are this section's later items' to round
 - [ ] **A fraction rule on every ratio-driven action.** Add `fraction_rule` to `corporate_actions`
   (`Exact | Down | Up | Nearest | CashInLieu`, CHECK-constrained, typed enum in `model.rs`; required
   for the four ratio-driven types, absent for the rest). Existing rows migrate to `Exact`, so no

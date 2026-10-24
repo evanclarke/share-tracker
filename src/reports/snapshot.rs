@@ -1332,7 +1332,7 @@ mod tests {
     /// an omission. The snapshotted reports are the price-dependent three
     /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
     /// (un-snapshotted) tax summary read is therefore exempt.
-    const STALENESS_EXEMPT_TABLES: [(&str, &str); 23] = [
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 24] = [
         (
             "attachments",
             "documents are provenance, not financial facts; no snapshotted report reads them \
@@ -1383,7 +1383,13 @@ mod tests {
         (
             "holding_accounts",
             "identity only: an account names where a parcel sits and carries no figure a report \
-             computes with",
+             computes with — its `unit_scale` decides only which quantity writes are accepted \
+             (0053_unit_scale.sql)",
+        ),
+        (
+            "holding_unit_scales",
+            "a per-listing unit-scale override decides only which quantity writes are accepted; \
+             it changes no stored figure and no report reads it (0053_unit_scale.sql)",
         ),
         (
             "inheritances",
@@ -3854,12 +3860,13 @@ mod tests {
         use super::*;
         use crate::entities::corporate_action::{ActionKind, CorporateAction};
         use crate::entities::exchange_holiday::{self, ExchangeHoliday};
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::{self, AllocationInput, SellBody};
         use crate::entities::transfer::{self, TransferBody};
         use crate::entities::{income, trade};
         use crate::infra::id::TradeId;
         use crate::reports::open_parcels;
+        use crate::test_support::holding_account_row;
         use chrono::{Datelike, Weekday};
         use proptest::prelude::*;
 
@@ -4224,7 +4231,7 @@ mod tests {
                 test_support::block_on(async move {
                     let pool = test_pool().await;
                     insert_second_aud_exchange(&pool).await;
-                    holding_account::db_upsert(&pool, &HoldingAccount { id: HoldingAccountId(2), name: "Second".into() })
+                    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
                         .await
                         .unwrap();
                     insert_listing(&pool, 1, "DUAL", Some("XASX"), "AUD").await;

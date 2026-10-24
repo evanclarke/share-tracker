@@ -86,6 +86,7 @@ use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::domain::whole_holding;
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action;
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::{WriteMode, write_tx};
@@ -143,6 +144,10 @@ pub enum VestError {
     /// (`corporate_action::rebased_quantity_beyond_range`). Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
     UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
+    /// The vested quantity is finer than its holding's unit scale
+    /// (`holding_unit_scale::db_too_fine`). Mapped to `422` naming the scale.
+    #[error("the vested quantity is off its holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
 }
 
 pub fn router() -> OpenApiRouter<SqlitePool> {
@@ -231,6 +236,12 @@ async fn execute(
             })?,
     };
 
+    // A quantity the taxpayer states must sit on its holding's unit grid.
+    if let Some(too_fine) =
+        holding_unit_scale::db_too_fine(&mut tx, holding_account_id, listing_id, quantity).await?
+    {
+        return Err(VestError::UnitScale(too_fine));
+    }
     // The cost-base-reset Buy: market value at the taxing point, dated and
     // settled on that date, in the statement's currency. ESS-vested units are
     // issued by the plan, not market-settled, so settlement is the trade date.
@@ -303,6 +314,7 @@ impl From<VestError> for ApiError {
             // The same body every parcel-creating path answers for this fact.
             VestError::BackDatedOverWholeHolding(e) => ApiError::Unprocessable(e.message()),
             VestError::UnrepresentableRebasedQuantity(e) => ApiError::Unprocessable(e.message()),
+            VestError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             VestError::Db(err) => err.into(),
         }
     }
@@ -312,7 +324,8 @@ impl From<VestError> for ApiError {
 mod tests {
     use super::*;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::sell::{AllocationInput, SellBody};
     use crate::entities::trade::TradeType;
     use crate::entities::transfer::TransferBody;
@@ -345,6 +358,39 @@ mod tests {
             })
             .insert(pool)
             .await;
+    }
+
+    /// A vested quantity finer than the account's unit scale is refused
+    /// naming it, and nothing is written; within the scale it vests.
+    #[tokio::test]
+    async fn a_vest_finer_than_the_unit_scale_is_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "AUD").await;
+        insert_statement(&pool, 1, "100.5", "6", "AUD").await;
+        sqlx::query("UPDATE holding_accounts SET unit_scale = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let err = db_vest(&pool, 1).await.unwrap_err();
+        assert!(
+            matches!(&err, VestError::UnitScale(t) if t.scale == 0 && t.quantity == test_support::dec("100.5")),
+            "{err:?}"
+        );
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 0);
+
+        sqlx::query("UPDATE holding_accounts SET unit_scale = 1 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            db_vest(&pool, 1).await.unwrap().quantity,
+            test_support::dec("100.5")
+        );
     }
 
     #[tokio::test]
@@ -481,15 +527,9 @@ mod tests {
         insert_statement(&pool, 1, "100", "6", "AUD").await; // taxing point 2024-09-01
         let vest = db_vest(&pool, 1).await.unwrap();
 
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         let moved = transfer::db_transfer(
             &pool,
             1,

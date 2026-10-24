@@ -959,7 +959,8 @@ async fn delete(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::{ess_vest, holding_account, listing};
     use crate::infra::date;
     use crate::test_support::{self, ApiClient, test_pool, ymd};
@@ -1785,15 +1786,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
 
         for (id, listing_id, account, taxing_point) in [
             (1, 1, 1, ymd(2024, 3, 15)),

@@ -369,7 +369,7 @@ mod tests {
     use crate::infra::id::ListingId;
     use crate::reports::realised_gains::DisposalId;
     use crate::reports::{open_parcels, portfolio, realised_gains};
-    use crate::test_support::{self, ApiClient, dec, test_pool};
+    use crate::test_support::{self, ApiClient, dec, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -873,18 +873,12 @@ mod tests {
     /// invariant).
     #[tokio::test]
     async fn participation_acts_in_the_chosen_holding_account() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal CHESS".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Personal CHESS"))
+            .await
+            .unwrap();
         insert_buy(&pool, 1, d(2020, 10, 1), "1000", "5.00").await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
             .execute(&pool)
@@ -946,18 +940,12 @@ mod tests {
     /// over-allocation), not a collapsed generic message.
     #[tokio::test]
     async fn api_sell_side_rejections_carry_their_own_422_bodies() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal CHESS".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Personal CHESS"))
+            .await
+            .unwrap();
         insert_buy(&pool, 1, d(2020, 1, 15), "10000", "6.00").await;
         insert_buyback(&pool, 10, d(2024, 7, 1)).await;
 

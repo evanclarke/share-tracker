@@ -693,12 +693,14 @@ mod tests {
         AmitReductionEvent, Whereabouts, db_cost_base_reduction_events,
     };
     use crate::domain::open_parcels;
-    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::entities::{demerger, scrip_exchange};
     use crate::reports;
-    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use crate::test_support::{
+        self, ApiClient, allocate, dec, holding_account_row, test_pool, ymd,
+    };
     use axum::http::StatusCode;
     use std::collections::HashMap;
 
@@ -743,15 +745,9 @@ mod tests {
     async fn a_transfers_closing_sell_is_not_a_disposal_in_the_held_spill_split() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("VDHG").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2024, 1, 10))
             .qty(dec("1000"))
@@ -890,15 +886,9 @@ mod tests {
     async fn a_view_before_a_rollover_still_sees_its_units_in_the_parcel() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("VDHG").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2023, 8, 1))
             .qty(dec("100"))
@@ -1068,18 +1058,12 @@ mod tests {
     /// one AMMA statement per holder account).
     #[tokio::test]
     async fn db_holding_account_mismatch_rejected() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_test_listing(&pool, 1, "XASX", "VAF").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         insert_buy_trade(&pool, 1, ListingId(1), Decimal::from(100)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
             .execute(&pool)
@@ -1578,20 +1562,14 @@ mod tests {
     /// Move `quantity` units of parcel `trade_id` to holding account 2,
     /// returning the replacement parcel's id.
     async fn transfer_out(pool: &SqlitePool, trade_id: TradeId, quantity: Decimal) -> i64 {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
 
         // Idempotent: several tests move a parcel into the same second account.
-        holding_account::db_upsert(
-            pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         // Dated after the default statement fixture's 2024-06-30 year end:
         // the ordering in which an already-entered adjustment legitimately
         // folds into the carried cost base (a statement whose year end
@@ -2060,18 +2038,12 @@ mod tests {
             .await;
         let exchanged = exchange_out(&pool, 10, ymd(2025, 3, 1)).await;
         // Second hop: the replacement parcel moves to holding account 2.
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         let moved = transfer::db_transfer(
             &pool,
             1,

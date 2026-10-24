@@ -200,7 +200,7 @@ async fn every_list_route_refuses_an_unknown_parameter() {
         checked += 1;
     }
     assert_eq!(
-        checked, 27,
+        checked, 28,
         "every query-decoding list route must be driven here"
     );
 }

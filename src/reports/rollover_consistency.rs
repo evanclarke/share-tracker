@@ -475,24 +475,18 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<RolloverAlert
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::holding_account::{self};
     use crate::entities::sell::AllocationInput;
     use crate::entities::transfer::{self, TransferBody};
     use crate::entities::{corporate_action as ca, demerger, scrip_exchange, trade};
-    use crate::test_support::{self, ApiClient, dec, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, dec, holding_account_row, test_pool, ymd};
 
     async fn pool_with_transfer() -> (SqlitePool, i64) {
         let pool = test_pool().await;
         test_support::listing(1).ticker("AAA").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2023, 1, 10))
             .qty(dec("100"))
@@ -666,15 +660,9 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).ticker("HEAD").insert(&pool).await;
         test_support::listing(2).ticker("SPUN").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         let parcels = [
             ("558", "10.73", "1.72", "379"),
             ("1284", "29.50", "14.10", "873"),
@@ -907,15 +895,9 @@ mod tests {
     async fn db_a_transfer_that_leaves_units_behind_is_not_flagged() {
         let pool = test_pool().await;
         test_support::listing(1).ticker("AAA").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2023, 1, 10))
             .qty(dec("100"))

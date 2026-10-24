@@ -575,7 +575,7 @@ mod tests {
     use crate::entities::trade::TradeType;
     use crate::entities::{listing, rba_fx_rate};
     use crate::reports::{open_parcels, realised_gains};
-    use crate::test_support::{self, ApiClient, test_pool};
+    use crate::test_support::{self, ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -1141,6 +1141,38 @@ mod tests {
         assert_eq!(parcels[0].remaining_cost_base, dec("1010"));
     }
 
+    /// The fraction a non-dividing ratio computes is the corporate action's
+    /// figure, not a typing slip, so a whole-unit account's unit scale does
+    /// not refuse it (`holding_unit_scale`'s module doc): the exchange lands,
+    /// replacement and closing Sell exactly as computed.
+    #[tokio::test]
+    async fn the_unit_scale_does_not_refuse_a_computed_fraction() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "OLD").await;
+        insert_listing(&pool, 2, "NEW").await;
+        insert_buy(&pool, 1, ListingId(1), d(2022, 1, 10), "101", "10").await;
+        sqlx::query("UPDATE holding_accounts SET unit_scale = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        insert_scrip_terms(
+            &pool,
+            10,
+            ListingId(1),
+            ListingId(2),
+            d(2024, 3, 1),
+            "1",
+            "3",
+        )
+        .await;
+
+        let ex = db_exchange(&pool, 10).await.unwrap();
+        assert_eq!(
+            ex.replacements[0].quantity,
+            dec("33.666666666666666666666666667")
+        );
+    }
+
     /// A second exchange chains the deemed acquisition date from the first —
     /// the discount clock always runs from the original acquisition.
     #[tokio::test]
@@ -1402,19 +1434,13 @@ mod tests {
     /// substitutes.
     #[tokio::test]
     async fn replacements_stay_in_each_parcels_holding_account() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1, "OLD").await;
         insert_listing(&pool, 2, "NEW").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         // One parcel per account.
         insert_buy(&pool, 1, ListingId(1), d(2020, 10, 1), "1000", "1.50").await;
         insert_buy(&pool, 2, ListingId(1), d(2023, 3, 1), "500", "2.00").await;

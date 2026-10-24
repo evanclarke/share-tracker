@@ -12,6 +12,7 @@
 use crate::app;
 use crate::entities::corporate_action::{ActionKind, CorporateAction, WorthlessEvent};
 use crate::entities::distribution_event::test_support::DistributionStub;
+use crate::entities::holding_account::HoldingAccount;
 use crate::entities::listing::SecurityType;
 use crate::entities::{
     amit_adjustment, amma, closing_price, corporate_action, ess_statement, income, listing,
@@ -931,6 +932,18 @@ pub fn writable_body(read: &serde_json::Value, also: &[&str]) -> serde_json::Val
         object.remove(*field);
     }
     body
+}
+
+/// Holding-account fixture: account `id` named `name`, with no unit scale
+/// (unconstrained) — write it with `holding_account::db_upsert`. Every test
+/// that needs a second account builds it here, so a new column is defaulted
+/// once.
+pub fn holding_account_row(id: i64, name: impl Into<String>) -> HoldingAccount {
+    HoldingAccount {
+        id: HoldingAccountId(id),
+        name: name.into(),
+        unit_scale: None,
+    }
 }
 
 /// Listing fixture: ASX-listed AUD ETF `T{id}` named `Test {id}`.
@@ -2159,7 +2172,7 @@ mod tests {
         let from_migrations: Vec<(i64, String, bool, String)> =
             sqlx::query_as(recorded).fetch_all(&migrated).await.unwrap();
         assert_eq!(from_cache, from_migrations, "_sqlx_migrations differs");
-        assert_eq!(from_cache.len(), 52, "every migration is recorded");
+        assert_eq!(from_cache.len(), 53, "every migration is recorded");
 
         // Spelled out separately because it is the one piece of state a
         // schema-only cache would silently lose, and two tests in

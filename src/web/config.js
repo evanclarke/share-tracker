@@ -76,8 +76,22 @@ export const ENTITIES = [
     slug: 'holding_accounts', title: 'Holding Accounts', menu: 'Reference Data', api: '/holding_accounts',
     desc: 'Where holdings sit within the one taxpayer (e.g. an employer share-plan account vs a personal broker account). The same listing can be held in several accounts at once, each with its own DRP enrolment; move parcels between them with a Transfer. Account 1 is the seeded default every write falls back to.',
     keyFields: [int('id', 'ID', { auto: true })],
-    fields: [txt('name', 'Name', { required: true })],
-    columns: ['id', 'name'],
+    fields: [
+      txt('name', 'Name', { required: true }),
+      int('unit_scale', 'Unit scale (decimal places)', { hint: 'How many decimal places the custodian holds a quantity to: 0 for whole units (a CHESS broker), e.g. 3 for a share plan. Blank = unconstrained (a crypto wallet). A finer quantity is refused; a Unit Scale Override sets a different scale for one listing.' }),
+    ],
+    columns: ['id', 'name', 'unit_scale'],
+  },
+  {
+    slug: 'holding_unit_scales', title: 'Unit Scale Overrides', menu: 'Reference Data', api: '/holding_unit_scales',
+    desc: 'A per-listing exception to a holding account’s unit scale — e.g. one listing’s DRP units held to 3 decimal places in an otherwise whole-unit account. A blank scale makes just that holding unconstrained. Deleting the override falls back to the account’s scale.',
+    keyFields: [int('id', 'ID', { auto: true })],
+    fields: [
+      fk('holding_account_id', 'Holding account', 'holdingAccounts', { required: true, default: '1' }),
+      fk('listing_id', 'Listing', 'listings', { required: true }),
+      int('unit_scale', 'Unit scale (decimal places)', { hint: 'Blank = unconstrained for this holding.' }),
+    ],
+    columns: ['id', 'holding_account_id', 'listing_id', 'unit_scale'],
   },
   {
     slug: 'currencies', title: 'Currencies', menu: 'Reference Data', api: '/currencies', readonly: true,

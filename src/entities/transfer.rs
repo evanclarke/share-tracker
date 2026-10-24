@@ -37,6 +37,7 @@ use crate::domain::cost_base::{ParcelRow, UnrepresentableQuantity};
 use crate::domain::whole_holding;
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::entities::corporate_action::{UnitsAt, checked_as_acquired_quantity};
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
 use crate::entities::trade::{self, Trade};
@@ -193,6 +194,12 @@ pub enum TransferError {
     /// arithmetic, which is what says the quantity asked for is impossible.
     #[error("the moved quantity is beyond the representable range: {0}")]
     UnrepresentableMovedQuantity(#[source] UnrepresentableQuantity),
+    /// A moved quantity is finer than the **destination** holding's unit
+    /// scale (`holding_unit_scale::db_too_fine`): the receiving custodian
+    /// could not hold it. The source side is the transfer-out Sell's own
+    /// check (`sell::SellError::UnitScale`). Mapped to `422` naming the scale.
+    #[error("a moved quantity is off the destination holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
     /// A network-fee disposal on a non-AUD listing whose transfer month has
     /// no imported ATO rate, with no `fee_fx_rate` in the body: the fee Sell
     /// is a real disposal in the gains reports, and binding a placeholder 1
@@ -265,6 +272,7 @@ impl From<TransferError> for ApiError {
             // basis at all → 422 quoting the arithmetic, the same wording every
             // beyond-the-range refusal answers with.
             TransferError::UnrepresentableMovedQuantity(e) => ApiError::Unprocessable(e.message()),
+            TransferError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             TransferError::MissingFeeFxRate { currency, month } => {
                 ApiError::unprocessable(format!(
                     "the network fee is disposed of in {currency} but no ATO/RBA rate has been \
@@ -307,6 +315,11 @@ impl From<TransferError> for ApiError {
                     sell::SellError::AllocationNotPositive => ApiError::unprocessable(
                         "each parcel's units to move must be a positive quantity",
                     ),
+                    // A moved (or fee) quantity finer than the source holding's
+                    // unit scale: the same body every quantity write answers.
+                    sell::SellError::UnitScale(too_fine) => {
+                        ApiError::unprocessable(too_fine.detail())
+                    }
                     // The one amounts rejection a transfer can reach
                     // (SCENARIOS S-10): its date is the user's own, and the
                     // parcels it creates are dated by it.
@@ -536,6 +549,17 @@ async fn write(
     // brokerage column, price 0) and acquisition date.
     let mut transfer_in_ids = Vec::with_capacity(transfer_ins.len());
     for t in &transfer_ins {
+        // The destination custodian must be able to hold what arrives.
+        if let Some(too_fine) = holding_unit_scale::db_too_fine(
+            &mut tx,
+            body.to_account_id,
+            body.listing_id,
+            t.quantity,
+        )
+        .await?
+        {
+            return Err(TransferError::UnitScale(too_fine));
+        }
         // Each Buy takes the id its own INSERT was given.
         let buy_id = rollover::insert_replacement_buy(
             &mut tx,
@@ -905,7 +929,7 @@ mod tests {
     use super::*;
     use crate::domain::open_parcels;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::{self, HoldingAccount};
+    use crate::entities::holding_account::{self};
     use crate::entities::listing::SecurityType;
     use crate::entities::sell::{SellBody, SellError};
     use crate::entities::trade::TradeType;
@@ -913,22 +937,16 @@ mod tests {
     use crate::infra::date;
     use crate::reports::realised_gains;
     use crate::reports::realised_gains::DisposalId;
-    use crate::test_support::{self, ApiClient, dec};
+    use crate::test_support::{self, ApiClient, dec, holding_account_row};
     use axum::http::StatusCode;
 
     async fn test_pool() -> SqlitePool {
         let pool = test_support::test_pool().await;
         // Account 1 ('Default') is seeded; 2 is the employer plan the RSU
         // scenario transfers out of.
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         pool
     }
 
@@ -1431,6 +1449,59 @@ mod tests {
             trade::db_upsert(&pool, &edited).await,
             Err(trade::UpsertError::TransferTrade)
         ));
+    }
+
+    /// Unit precision on both sides of a move: a share plan holding 3 dp
+    /// moving units to a whole-unit broker. A moved quantity finer than the
+    /// **destination** account's scale is refused naming it (the broker
+    /// could not hold 40.125 units), and one finer than the source's is
+    /// refused by the transfer-out Sell's own check; nothing is stored.
+    #[tokio::test]
+    async fn a_moved_quantity_is_held_to_both_accounts_unit_scales() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "ICE").await;
+        insert_vest(&pool, 1, d(2023, 3, 1), "100.125", "120").await;
+        sqlx::query("UPDATE holding_accounts SET unit_scale = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE holding_accounts SET unit_scale = 3 WHERE id = 2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let client = client(&pool);
+        let json = |q: &str| {
+            serde_json::json!({
+                "listing_id": 1, "date": "2024-06-03", "from_account_id": 2,
+                "to_account_id": 1,
+                "allocations": [ { "purchase_trade_id": 1, "quantity_allocated": q } ],
+            })
+        };
+
+        let resp = client.post("/transfers", &json("40.125")).await;
+        let (status, text) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+        assert!(
+            text.contains("holding account Default") && text.contains("unit_scale is 0"),
+            "names the destination's scale: {text}"
+        );
+        let resp = client.post("/transfers", &json("40.1255")).await;
+        let (status, text) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+        assert!(
+            text.contains("holding account ICE Employee Plan") && text.contains("unit_scale is 3"),
+            "names the source's scale: {text}"
+        );
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 1, "a refused transfer stores nothing");
+
+        client
+            .post("/transfers", &json("40"))
+            .await
+            .expect_status(StatusCode::CREATED);
     }
 
     /// A partial transfer splits the parcel: the moved units carry exactly

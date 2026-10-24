@@ -14,6 +14,7 @@ use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::domain::whole_holding::BackDatedParcel;
 use crate::domain::{open_parcels, whole_holding};
 use crate::entities::corporate_action::AcquiredUnits;
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::{closing_price, corporate_action};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db;
@@ -325,6 +326,11 @@ pub enum UpsertError {
     /// by `reports::health`'s non-blocking `non_trading_day_trades` alert.
     #[error("the trade is dated on a non-trading day: {0}")]
     NonTradingDay(String),
+    /// The quantity carries more decimal places than its holding's unit
+    /// scale allows (`holding_unit_scale::db_too_fine`) — most often a
+    /// mistyped figure. Mapped to `422` naming the scale.
+    #[error("the quantity is off its holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
     /// The settlement date could not be resolved on the write's own
     /// transaction (see [`Settlement::resolve_on`]): a checked business-day
     /// step that left `NaiveDate`'s range
@@ -789,6 +795,20 @@ async fn write(
         return Err(UpsertError::NonTradingDay(shut.describe(trade.date)));
     }
 
+    // The quantity must sit on its holding's unit grid (the account's
+    // `unit_scale`, or the pair's override). After the write, like the rules
+    // above, so an unknown account or listing meets its foreign key first.
+    if let Some(too_fine) = holding_unit_scale::db_too_fine(
+        &mut tx,
+        trade.holding_account_id,
+        trade.listing_id,
+        trade.quantity,
+    )
+    .await?
+    {
+        return Err(UpsertError::UnitScale(too_fine));
+    }
+
     // A scrip-for-scrip exchange, demerger, or worthless-shares recognise of
     // this listing that has already run consumed every parcel open at its own
     // date, and cannot reach back for one entered afterwards: a Buy/DRP dated
@@ -949,6 +969,7 @@ impl From<UpsertError> for ApiError {
                 ApiError::unprocessable(spot_fx_rate_detail(&detail))
             }
             UpsertError::Amounts(detail) => ApiError::unprocessable(amounts_detail(&detail)),
+            UpsertError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             UpsertError::NonTradingDay(what) => ApiError::unprocessable(format!(
                 "the trade is dated on a day its exchange did not trade — {what}. The trade date \
                  is the CGT event date, so it sets the discount clock, the financial year and the \

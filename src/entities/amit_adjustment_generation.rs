@@ -615,7 +615,9 @@ mod tests {
     use crate::entities::scrip_exchange;
     use crate::infra::http;
     use crate::reports::amit_adjustment_cross_check;
-    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use crate::test_support::{
+        self, ApiClient, allocate, dec, holding_account_row, test_pool, ymd,
+    };
     use crate::{domain, reports};
     use axum::http::StatusCode;
 
@@ -1006,18 +1008,12 @@ mod tests {
     /// they are all there is, the statement is refused).
     #[tokio::test]
     async fn db_only_the_statements_holding_account_is_covered() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         amit_listing(&pool, 1, "HNDQ").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2024, 2, 1))
             .qty(dec("100"))
@@ -1393,7 +1389,7 @@ mod tests {
     /// parcel's own acquisition date.
     #[tokio::test]
     async fn db_a_rollover_after_the_year_end_generates_against_the_replacement() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
 
@@ -1406,15 +1402,9 @@ mod tests {
             .insert(&pool)
             .await;
         amma(&pool, 6, ListingId(1), ymd(2024, 6, 30), "100").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         // Moved in August, after the year end but before the statement was
         // entered — the common order, since the statement arrives in spring.
         transfer::db_transfer(
@@ -1656,21 +1646,15 @@ mod tests {
     /// the replacement carries the original's cost base and acquisition date.
     #[tokio::test]
     async fn db_a_parcel_transferred_mid_year_is_covered_in_its_new_account() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
 
         let pool = test_pool().await;
         amit_listing(&pool, 1, "HNDQ").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         test_support::buy(1, 1)
             .date(ymd(2023, 8, 1))
             .qty(dec("100"))
@@ -1737,7 +1721,7 @@ mod tests {
     /// to another account in August 2024 — after the year end, before the
     /// statement was entered. Returns the transfer's replacement parcel id.
     async fn partial_transfer_after_the_year_end(pool: &SqlitePool) -> TradeId {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
 
@@ -1757,15 +1741,9 @@ mod tests {
             })
             .insert(pool)
             .await;
-        holding_account::db_upsert(
-            pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         transfer::db_transfer(
             pool,
             1,
@@ -1906,16 +1884,13 @@ mod tests {
         (from, to): (i64, i64),
         units: &str,
     ) -> TradeId {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::AllocationInput;
         use crate::entities::transfer::{self, TransferBody};
         for account in [from, to] {
             holding_account::db_upsert(
                 pool,
-                &HoldingAccount {
-                    id: HoldingAccountId(account),
-                    name: format!("Account {account}"),
-                },
+                &holding_account_row(account, format!("Account {account}")),
             )
             .await
             .unwrap();
@@ -2021,7 +1996,7 @@ mod tests {
 
     mod properties {
         use super::*;
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::sell::{self, AllocationInput, SellBody};
         use crate::entities::transfer::{self, TransferBody};
         use crate::infra::db::WriteMode;
@@ -2112,7 +2087,7 @@ mod tests {
                     for id in [2, 3] {
                         holding_account::db_upsert(
                             &pool,
-                            &HoldingAccount { id: HoldingAccountId(id), name: format!("Account {id}") },
+                            &holding_account_row(id, format!("Account {id}")),
                         )
                         .await
                         .unwrap();

@@ -1605,7 +1605,8 @@ async fn what_if_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::sell::AllocationInput;
     use crate::entities::{
         amma, cgt_settings, corporate_action, demerger, holding_account, rba_fx_rate,
@@ -3581,15 +3582,9 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         insert_trade(
             &pool,
             1,
@@ -3660,15 +3655,9 @@ mod tests {
 
         let pool = test_pool().await;
         insert_listing(&pool, 1, "RAP").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
         insert_trade(
             &pool,
             1,
@@ -5524,16 +5513,10 @@ mod tests {
     /// A second holding account, so a listing can be held in two places at
     /// once.
     async fn insert_second_account(pool: &SqlitePool) {
-        use crate::entities::holding_account::{self, HoldingAccount};
-        holding_account::db_upsert(
-            pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        use crate::entities::holding_account::{self};
+        holding_account::db_upsert(pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
     }
 
     /// 2,000 units of TSTG open in the default account and 5,000 in a second

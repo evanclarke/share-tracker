@@ -1,6 +1,7 @@
 //! The create entry point (`POST /trades`), and the list's filters.
 
 use super::*;
+use crate::test_support::holding_account_row;
 
 /// `POST /trades` allocates its own id — the create that makes the whole
 /// `max(id) + 1` dance unnecessary (SCENARIOS U-a).
@@ -169,15 +170,9 @@ async fn the_list_narrows_by_listing_account_and_date_range() {
             .insert(&pool)
             .await;
     }
-    holding_account::db_upsert(
-        &pool,
-        &HoldingAccount {
-            id: HoldingAccountId(2),
-            name: "Second".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+        .await
+        .unwrap();
 
     for (id, listing_id, account, date) in [
         (1, 1, 1, ymd(2024, 6, 3)),

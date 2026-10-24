@@ -99,6 +99,7 @@ use crate::domain::whole_holding::BackDatedParcel;
 use crate::domain::{cost_base, whole_holding};
 use crate::entities::corporate_action;
 use crate::entities::drp_enrolment::{self, ResidualHandling};
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::income::{Income, IncomeType};
 use crate::entities::trade::{self, Trade};
 use crate::infra::currency::CurrencyCode;
@@ -251,6 +252,12 @@ pub enum ReinvestError {
     /// Mapped to 422.
     #[error("this parcel's quantity re-bases beyond the representable range: {0}")]
     UnrepresentableRebasedQuantity(#[source] UnrepresentableQuantity),
+    /// The reinvested units are finer than their holding's unit scale
+    /// (`holding_unit_scale::db_too_fine`). Reachable only on the
+    /// stated-units branch: the registry default allots whole units, which
+    /// every scale holds. Mapped to `422` naming the scale.
+    #[error("the reinvested units are off their holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
 }
 
 impl From<ReinvestError> for ApiError {
@@ -326,6 +333,7 @@ impl From<ReinvestError> for ApiError {
             ReinvestError::UnrepresentableRebasedQuantity(e) => {
                 ApiError::Unprocessable(e.message())
             }
+            ReinvestError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             ReinvestError::Db(err) => err.into(),
         }
     }
@@ -633,6 +641,13 @@ async fn execute(
 
     let fx_rate = body.fx_rate.unwrap_or(Decimal::ONE);
 
+    // The allotment must sit on its holding's unit grid — a stated figure
+    // the taxpayer typed, or the registry default's whole units.
+    if let Some(too_fine) =
+        holding_unit_scale::db_too_fine(&mut tx, holding_account_id, listing_id, quantity).await?
+    {
+        return Err(ReinvestError::UnitScale(too_fine));
+    }
     let new_id = trade::NewParcel::new(
         trade::ParcelOrigin::DrpReinvestment,
         date,
@@ -789,7 +804,8 @@ async fn unreinvest(
 mod tests {
     use super::*;
     use crate::entities::corporate_action::{ActionKind, CorporateAction};
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::sell::{AllocationInput, SellBody};
     use crate::entities::trade::TradeType;
     use crate::entities::{
@@ -905,15 +921,9 @@ mod tests {
     /// A second holding account (e.g. an employer share plan) for the
     /// per-account tests.
     async fn insert_account(pool: &SqlitePool, id: i64, name: &str) {
-        holding_account::db_upsert(
-            pool,
-            &HoldingAccount {
-                id: HoldingAccountId(id),
-                name: name.to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(pool, &holding_account_row(id, name))
+            .await
+            .unwrap();
     }
 
     /// Open-ended enrolment from 2024-01-01 in a specific holding account.
@@ -2205,6 +2215,47 @@ mod tests {
         let trade: Trade = resp.json();
         assert_eq!(trade.trade_type, TradeType::DRP);
         assert_eq!(trade.quantity, "0.500".parse::<Decimal>().unwrap());
+    }
+
+    /// A stated allotment finer than the holding's unit scale is refused
+    /// naming it — a whole-unit account cannot have been allotted 0.500 —
+    /// while a per-listing override for a plan that allots to 3 dp accepts
+    /// the same reinvestment.
+    #[tokio::test]
+    async fn api_reinvest_units_finer_than_the_unit_scale_are_refused() {
+        let pool = test_pool().await;
+        insert_listing(&pool, 1, "USD").await;
+        enrol(&pool, ListingId(1), ResidualHandling::CarryForward).await;
+        insert_distribution(
+            &pool,
+            1,
+            ListingId(1),
+            "68.47".parse().unwrap(),
+            Decimal::ZERO,
+        )
+        .await;
+        sqlx::query("UPDATE holding_accounts SET unit_scale = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let reinvest = r#"{"reinvestment_price":"136.94","units":"0.500"}"#;
+
+        let resp = client(&pool).post_raw("/income/1/reinvest", reinvest).await;
+        let (status, text) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+        assert!(text.contains("unit_scale is 0 (whole units)"), "{text}");
+
+        sqlx::query(
+            "INSERT INTO holding_unit_scales (holding_account_id, listing_id, unit_scale) \
+             VALUES (1, 1, 3)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        client(&pool)
+            .post_raw("/income/1/reinvest", reinvest)
+            .await
+            .expect_status(StatusCode::CREATED);
     }
 
     /// The units/cash mismatch rejection carries both figures so the user can

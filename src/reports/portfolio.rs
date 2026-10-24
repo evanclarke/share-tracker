@@ -265,7 +265,9 @@ mod tests {
         amit_adjustment, amma, corporate_action, demerger, rba_fx_rate, scrip_exchange, trade,
     };
     use crate::infra::date;
-    use crate::test_support::{self, ApiClient, allocate, dec, test_pool, ymd};
+    use crate::test_support::{
+        self, ApiClient, allocate, dec, holding_account_row, test_pool, ymd,
+    };
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -1366,18 +1368,12 @@ mod tests {
     /// each with its own quantity and cost base.
     #[tokio::test]
     async fn db_same_listing_in_two_accounts_reports_as_two_holdings() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1, "ICE").await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         // 100 @ $10 in the default account, 50 @ $12 in the plan account.
         insert_buy(
             &pool,

@@ -1361,7 +1361,8 @@ mod tests {
     use crate::domain::franking_credit;
     use crate::entities::drp_enrolment::DrpEnrolment;
     use crate::entities::drp_reinvestment::ReinvestBody;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::{drp_enrolment, drp_reinvestment, holding_account};
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
@@ -1874,15 +1875,9 @@ mod tests {
         let pool = test_pool().await;
         test_support::listing(1).insert(&pool).await;
         test_support::listing(2).ticker("XYZ").insert(&pool).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Broker"))
+            .await
+            .unwrap();
         drp_enrolment::db_upsert(
             &pool,
             &DrpEnrolment {
@@ -3250,15 +3245,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
 
         for (id, listing_id, account, date) in [
             (1, 1, 1, ymd(2024, 6, 3)),

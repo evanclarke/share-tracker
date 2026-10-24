@@ -14,6 +14,7 @@
 
 use crate::domain::open_parcels;
 use crate::entities::corporate_action::AcquiredUnits;
+use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::trade::{self, Trade, TradeType};
 use crate::entities::{closing_price, corporate_action};
 use crate::infra::currency::CurrencyCode;
@@ -260,6 +261,16 @@ pub enum SellError {
     /// `trade::SettlementError`).
     #[error("the settlement date could not be derived: {0}")]
     Settlement(#[from] trade::SettlementError),
+    /// The Sell's quantity, or one allocation's, carries more decimal places
+    /// than its holding's unit scale allows
+    /// (`holding_unit_scale::db_too_fine`). Checked for every Sell whose
+    /// quantities the taxpayer states — a plain Sell, a transfer-out, a
+    /// buy-back participation — and not for the closing Sell of a scrip
+    /// exchange, demerger or worthless recognise, which consumes whatever each
+    /// parcel holds (see the module doc of `holding_unit_scale`). Mapped to
+    /// `422` naming the scale.
+    #[error("a Sell quantity is off its holding's unit grid: {0}")]
+    UnitScale(#[source] TooFine),
 }
 
 impl From<SellError> for ApiError {
@@ -312,6 +323,7 @@ impl From<SellError> for ApiError {
             ),
             // The cross-check rejection says what the Sell nets to, so a typo
             // is findable without re-deriving the figure by hand.
+            SellError::UnitScale(too_fine) => ApiError::unprocessable(too_fine.detail()),
             SellError::NotASell { id, existing } => ApiError::unprocessable(format!(
                 "trade {id} is a {existing:?}, not a Sell — this endpoint only writes Sells, so \
                  the upsert would rewrite that parcel as a disposal in place. Edit it with \
@@ -901,6 +913,22 @@ pub(crate) async fn upsert_sell_in_tx(
         });
     }
 
+    // A quantity the taxpayer states must sit on its holding's unit grid; a
+    // whole-holding closing Sell consumes whatever each parcel holds, which a
+    // non-dividing ratio can leave off it, so it is not refused for that.
+    let stated = !provenance.is_some_and(SellProvenance::closes_whole_holding);
+    if stated
+        && let Some(too_fine) = holding_unit_scale::db_too_fine(
+            &mut *tx,
+            body.holding_account_id,
+            body.listing_id,
+            body.quantity,
+        )
+        .await?
+    {
+        return Err(SellError::UnitScale(too_fine));
+    }
+
     // Replace this sale's allocations wholesale.
     sqlx::query("DELETE FROM parcel_allocations WHERE sale_trade_id = ?")
         .bind(id)
@@ -946,6 +974,17 @@ pub(crate) async fn upsert_sell_in_tx(
         }
         if purchase_date > body.date {
             return Err(SellError::PurchaseAfterSale);
+        }
+        if stated
+            && let Some(too_fine) = holding_unit_scale::db_too_fine(
+                &mut *tx,
+                purchase_account,
+                purchase_listing,
+                alloc.quantity_allocated,
+            )
+            .await?
+        {
+            return Err(SellError::UnitScale(too_fine));
         }
         let purchase_qty: Decimal = purchase_row
             .try_get::<String, _>("quantity")?
@@ -1051,7 +1090,7 @@ mod tests {
     use super::*;
     use crate::domain::open_parcels;
     use crate::infra::date;
-    use crate::test_support::{self, ApiClient, test_pool};
+    use crate::test_support::{self, ApiClient, holding_account_row, test_pool};
     use axum::http::StatusCode;
 
     /// Client over this module's own routes.
@@ -1692,18 +1731,12 @@ mod tests {
     /// back), while the same Sell entered in the parcel's account succeeds.
     #[tokio::test]
     async fn db_allocation_in_different_account_is_rejected() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         // The parcel sits in the employer-plan account.
         insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
@@ -1738,18 +1771,12 @@ mod tests {
 
     #[tokio::test]
     async fn api_allocation_in_different_account_returns_422() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
         sqlx::query("UPDATE trades SET holding_account_id = 2 WHERE id = 1")
             .execute(&pool)
@@ -2789,19 +2816,13 @@ mod tests {
     /// (`docs/API.md`, Sells).
     #[tokio::test]
     async fn a_holding_split_across_accounts_needs_one_sell_per_account() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         for (id, name) in [(2, "Broker B"), (3, "Broker C")] {
-            holding_account::db_upsert(
-                &pool,
-                &HoldingAccount {
-                    id: HoldingAccountId(id),
-                    name: name.to_owned(),
-                },
-            )
-            .await
-            .unwrap();
+            holding_account::db_upsert(&pool, &holding_account_row(id, name))
+                .await
+                .unwrap();
         }
         for account in 1..=3i64 {
             test_support::buy(account, 1)
@@ -3363,21 +3384,15 @@ mod tests {
     /// is now refused for what it actually is.
     #[tokio::test]
     async fn api_put_sell_over_a_transfer_in_buy_is_refused_as_a_buy() {
-        use crate::entities::holding_account::{self, HoldingAccount};
+        use crate::entities::holding_account::{self};
         use crate::entities::transfer::{self, TransferBody};
 
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
         insert_buy(&pool, 1, ListingId(1), Decimal::from(100)).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
         let group = transfer::db_transfer(
             &pool,
             1,

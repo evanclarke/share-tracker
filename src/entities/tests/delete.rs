@@ -37,6 +37,10 @@ const DELETE_ROUTES: &[(&str, &str)] = &[
         "no exchange holiday on that date for that exchange",
     ),
     ("/holding_accounts/9999", "no holding account with that id"),
+    (
+        "/holding_unit_scales/9999",
+        "no unit-scale override with that id",
+    ),
     ("/income/9999", "no income with that id"),
     ("/income/9999/reinvest", "no distribution with that id"),
     ("/inheritances/9999", "no inheritance with that id"),

@@ -609,7 +609,8 @@ impl From<UpsertError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::entities::trade::{ParcelOrigin, Residuals};
     use crate::entities::{holding_account, listing};
     use crate::test_support::{self, ApiClient, test_pool};
@@ -1109,15 +1110,9 @@ mod tests {
     async fn db_same_listing_may_be_enrolled_per_account() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "ICE Employee Plan".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "ICE Employee Plan"))
+            .await
+            .unwrap();
 
         db_upsert(
             &pool,
@@ -1165,15 +1160,9 @@ mod tests {
     async fn db_unenrolment_only_settles_the_periods_accounts_trades() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal CHESS".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Personal CHESS"))
+            .await
+            .unwrap();
         // An in-period DRP trade, but in account 2 — as is the distribution
         // that funded it (a reinvestment lands in its distribution's account).
         insert_drp_trade(&pool, 10, ListingId(1), "2024-06-30", "5", "0").await;
@@ -1417,15 +1406,9 @@ mod tests {
     async fn db_delete_allowed_when_no_reinvestment_falls_in_the_period() {
         let pool = test_pool().await;
         insert_listing(&pool, 1).await;
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Personal CHESS".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Personal CHESS"))
+            .await
+            .unwrap();
         db_upsert(
             &pool,
             &period(
@@ -1718,15 +1701,9 @@ mod tests {
                 .insert(&pool)
                 .await;
         }
-        holding_account::db_upsert(
-            &pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
 
         for (id, listing_id, account, start) in [
             (1, 1, 1, ymd(2024, 1, 1)),

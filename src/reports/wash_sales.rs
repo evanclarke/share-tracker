@@ -195,7 +195,7 @@ mod tests {
     use crate::entities::transfer::TransferBody;
     use crate::entities::{holding_account, transfer};
     use crate::reports::realised_gains::DisposalId;
-    use crate::test_support::{self, ApiClient, allocate, test_pool, ymd};
+    use crate::test_support::{self, ApiClient, allocate, holding_account_row, test_pool, ymd};
     use axum::http::StatusCode;
 
     async fn insert_listing(pool: &SqlitePool, id: i64, ticker: &str) {
@@ -305,15 +305,9 @@ mod tests {
     async fn db_repurchase_in_another_account_is_flagged() {
         let pool = test_pool().await;
         loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
-        holding_account::db_upsert(
-            &pool,
-            &holding_account::HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second broker"))
+            .await
+            .unwrap();
         test_support::buy(3, 1)
             .date(ymd(2025, 6, 16))
             .account(2)
@@ -434,15 +428,9 @@ mod tests {
     async fn db_transfer_in_buy_is_not_a_reacquisition() {
         let pool = test_pool().await;
         loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
-        holding_account::db_upsert(
-            &pool,
-            &holding_account::HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second broker".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second broker"))
+            .await
+            .unwrap();
         // A second parcel, transferred to account 2 five days after the loss
         // Sell: the transfer-in Buy lands inside the window.
         test_support::buy(3, 1)
@@ -488,15 +476,9 @@ mod tests {
         let pool = test_pool().await;
         // The ordinary loss Sell (trade 2, loss $500) on 2025-06-10.
         loss_sale_fixture(&pool, ymd(2025, 6, 10)).await;
-        holding_account::db_upsert(
-            &pool,
-            &holding_account::HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second wallet".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(&pool, &holding_account_row(2, "Second wallet"))
+            .await
+            .unwrap();
         // A second parcel: 100 @ $15. Transferring 50 units two days after
         // the loss Sell burns a 10-unit network fee worth $10/unit — a fee
         // disposal realising a $50 loss (10 × ($15 − $10)).

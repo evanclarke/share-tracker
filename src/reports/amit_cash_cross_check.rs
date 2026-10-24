@@ -172,7 +172,8 @@ async fn report(State(pool): State<SqlitePool>) -> Result<Json<Vec<AmitCashAlert
 mod tests {
     use super::*;
     use crate::entities::holding_account;
-    use crate::entities::holding_account::HoldingAccount;
+    use crate::test_support::holding_account_row;
+
     use crate::test_support::{self, ApiClient, test_pool, ymd};
     use axum::http::StatusCode;
 
@@ -217,15 +218,9 @@ mod tests {
 
     /// A second holding account to pay a distribution into.
     async fn second_account(pool: &SqlitePool) {
-        holding_account::db_upsert(
-            pool,
-            &HoldingAccount {
-                id: HoldingAccountId(2),
-                name: "Second".to_owned(),
-            },
-        )
-        .await
-        .unwrap();
+        holding_account::db_upsert(pool, &holding_account_row(2, "Second"))
+            .await
+            .unwrap();
     }
 
     async fn insert_cash_in(

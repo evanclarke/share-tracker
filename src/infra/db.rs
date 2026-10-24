@@ -3228,6 +3228,125 @@ mod tests {
         }
     }
 
+    /// 0053 seeds each account's `unit_scale` from the finest quantity it
+    /// already holds — trade quantities and the allocations drawn on its
+    /// parcels, trailing zeros dropped — so no stored row lands off its new
+    /// grid; an account holding any Crypto listing, and an empty one, stay
+    /// NULL (unconstrained). No row is lost or changed.
+    #[tokio::test]
+    async fn migration_0053_seeds_unit_scale_from_the_finest_quantity_held() {
+        let pool = pool_migrated_below(53).await;
+        for (id, name) in [(2, "Plan"), (3, "Wallet"), (4, "Empty"), (5, "Mixed")] {
+            sqlx::query("INSERT INTO holding_accounts (id, name) VALUES (?, ?)")
+                .bind(id)
+                .bind(name)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (1, 'XASX', 'BHP', 'BHP Group', 'Share', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO listings (id, exchange_mic, ticker, name, security_type, currency) \
+             VALUES (2, NULL, 'BTC', 'Bitcoin', 'Crypto', 'AUD')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Account 1: whole-unit trades padded with zeros, and one allocation
+        // to 1 dp drawn on its parcel — the allocation decides the scale.
+        // Account 2: a share plan's 3 dp DRP. Account 3: crypto dust.
+        // Account 5: shares and crypto together.
+        for (id, trade_type, listing, quantity, account) in [
+            (1, "Buy", 1, "100.000", 1),
+            (2, "Sell", 1, "40", 1),
+            (3, "DRP", 1, "12.3450", 2),
+            (4, "Buy", 1, "7", 2),
+            (5, "Buy", 2, "0.00012345", 3),
+            (6, "Buy", 1, "10", 5),
+            (7, "Buy", 2, "1.5", 5),
+        ] {
+            sqlx::query(
+                "INSERT INTO trades (id, trade_type, date, settlement_date, listing_id, \
+                                     average_price, quantity, currency, brokerage_currency, \
+                                     holding_account_id) \
+                 VALUES (?, ?, '2024-01-05', '2024-01-09', ?, '1', ?, 'AUD', 'AUD', ?)",
+            )
+            .bind(id)
+            .bind(trade_type)
+            .bind(listing)
+            .bind(quantity)
+            .bind(account)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO parcel_allocations (sale_trade_id, purchase_trade_id, quantity_allocated) \
+             VALUES (2, 1, '39.5'), (2, 1, '0.50')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let quantities_before: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, quantity FROM trades ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+
+        apply_migration(&pool, 53).await;
+
+        let scales: Vec<(i64, Option<i64>)> =
+            sqlx::query_as("SELECT id, unit_scale FROM holding_accounts ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            scales,
+            [(1, Some(1)), (2, Some(3)), (3, None), (4, None), (5, None)],
+            "seeded from the finest quantity held; crypto-holding and empty accounts unconstrained"
+        );
+        let quantities_after: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, quantity FROM trades ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(quantities_before, quantities_after, "no trade row changed");
+
+        // The override table exists, empty, one row per pair, and both
+        // tables refuse a scale out of range.
+        let overrides: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM holding_unit_scales")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(overrides, 0);
+        sqlx::query(
+            "INSERT INTO holding_unit_scales (holding_account_id, listing_id, unit_scale) \
+             VALUES (1, 1, 3)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for bad in [
+            "INSERT INTO holding_unit_scales (holding_account_id, listing_id, unit_scale) \
+             VALUES (1, 1, 2)",
+            "INSERT INTO holding_unit_scales (holding_account_id, listing_id, unit_scale) \
+             VALUES (2, 1, 29)",
+            "UPDATE holding_accounts SET unit_scale = -1 WHERE id = 1",
+            "UPDATE holding_accounts SET unit_scale = 2.5 WHERE id = 1",
+        ] {
+            assert!(
+                sqlx::query(bad).execute(&pool).await.is_err(),
+                "{bad} must be refused"
+            );
+        }
+    }
+
     #[test]
     fn migrations_do_not_drop_tables_or_columns() {
         let migrations_dir = path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");

@@ -22,6 +22,7 @@ pub mod ess_vest;
 pub mod exchange;
 pub mod exchange_holiday;
 pub mod holding_account;
+pub mod holding_unit_scale;
 pub mod income;
 pub mod inheritance;
 pub mod interest_income;
@@ -54,6 +55,7 @@ pub fn router() -> OpenApiRouter<SqlitePool> {
         .merge(listing::router())
         .merge(listing_rename::router())
         .merge(holding_account::router())
+        .merge(holding_unit_scale::router())
         .merge(currencies::router())
         .merge(mic_registry::router())
         .merge(rba_fx_rate::router())
