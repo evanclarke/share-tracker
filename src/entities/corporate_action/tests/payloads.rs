@@ -457,6 +457,7 @@ async fn api_scrip_for_scrip_round_trip() {
             scrip_cash_per_unit: None,
             scrip_market_value: None,
             scrip_cash_currency: None,
+            record_date: None,
         }
     );
 }
@@ -490,6 +491,7 @@ async fn api_scrip_for_scrip_cash_component_round_trip() {
             scrip_cash_per_unit: Some("10.005".parse().unwrap()),
             scrip_market_value: Some("20.105".parse().unwrap()),
             scrip_cash_currency: Some("AUD".into()),
+            record_date: None,
         }
     );
 }
@@ -640,6 +642,7 @@ async fn api_demerger_round_trip() {
             demerger_close_price: None,
             demerger_close_sourced_from: None,
             demerger_close_reason: None,
+            record_date: None,
         }
     );
 }
@@ -764,6 +767,7 @@ async fn api_demerger_stated_close_round_trips_and_rejects_a_partial_one() {
             demerger_close_price: Some("24.90".parse().unwrap()),
             demerger_close_sourced_from: Some("nyse.com daily close".to_owned()),
             demerger_close_reason: Some("the provider adjusts the pre-demerger series".to_owned()),
+            record_date: None,
         },
         "the provenance is stored trimmed, beside the two sides of the factor"
     );

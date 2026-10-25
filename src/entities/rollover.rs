@@ -65,6 +65,7 @@ pub fn converted(p: &RolledParcel) -> corporate_action::Converted {
     corporate_action::Converted {
         parcel: p.parcel.id,
         acquired: p.parcel.date,
+        settled: p.parcel.settlement_date,
         account: p.parcel.holding_account_id,
         units: p.at_date_units.quantity(),
         exact: p.at_date_exact,

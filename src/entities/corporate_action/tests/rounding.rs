@@ -1,6 +1,9 @@
 //! A non-`Exact` share split or bonus issue rounds each holding onto its
 //! unit grid and stores each parcel's count (`rounding.rs`, migration 0055),
-//! recomputed by every write that moves a fact it rests on (migration 0057).
+//! recomputed by every write that moves a fact it rests on (migration 0057);
+//! a non-`Exact` scrip-for-scrip exchange or demerger rounds its replacement
+//! units the same way, each holding as registered at its record date
+//! (migration 0059).
 
 use super::*;
 use crate::entities::trade;
@@ -893,6 +896,226 @@ async fn a_split_record_date_is_stored_either_side_of_its_date() {
         .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
 }
 
+/// A scrip-for-scrip exchange (action 8) of listing 1 into listing 2 on
+/// 2024-06-07, by `rule`, `new` for `old`, with an optional record date.
+fn exchange_json(rule: &str, (new, old): (&str, &str), record: Option<&str>) -> Value {
+    let mut body = json!({
+        "listing_id": 1, "date": "2024-06-07", "action_type": "ScripForScrip",
+        "fraction_rule": rule, "scrip_listing_id": 2,
+        "scrip_new_units": new, "scrip_old_units": old,
+    });
+    if let Some(record) = record {
+        body["record_date"] = json!(record);
+    }
+    body
+}
+
+/// A demerger (action 8) of listing 2 out of listing 1 on 2024-06-07, by
+/// `rule`, `new` for every `held`, with an optional record date.
+fn demerger_json(rule: &str, (new, held): (&str, &str), record: Option<&str>) -> Value {
+    let mut body = json!({
+        "listing_id": 1, "date": "2024-06-07", "action_type": "Demerger",
+        "fraction_rule": rule, "demerger_listing_id": 2,
+        "demerger_new_units": new, "demerger_held_units": held,
+        "demerger_cost_base_pct": "40",
+    });
+    if let Some(record) = record {
+        body["record_date"] = json!(record);
+    }
+    body
+}
+
+/// Run the exchange or demerger recorded as action 8 and answer (closing
+/// Sell's quantity, each listing-2 replacement Buy's quantity in the source
+/// parcels' date order).
+async fn run_operation(app: &ApiClient, demerger: bool) -> (Decimal, Vec<Decimal>) {
+    let (path, key) = if demerger {
+        ("/corporate_actions/8/demerge", "demerged_replacements")
+    } else {
+        ("/corporate_actions/8/exchange", "replacements")
+    };
+    let created: Value = app
+        .post_empty(path)
+        .await
+        .expect_status(StatusCode::CREATED)
+        .json();
+    let quantity = |v: &Value| dec(v["quantity"].as_str().unwrap());
+    (
+        quantity(&created["sell"]),
+        created[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(quantity)
+            .collect(),
+    )
+}
+
+/// Undo the operation recorded as action 8 (its closing Sell's delete removes
+/// the whole group).
+async fn undo_operation(app: &ApiClient, pool: &SqlitePool) {
+    let sell: i64 = sqlx::query_scalar(
+        "SELECT id FROM trades WHERE trade_type = 'Sell' \
+         AND (scrip_action_id = 8 OR demerger_action_id = 8)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    app.delete(format!("/sells/{sell}"))
+        .await
+        .expect_status(StatusCode::NO_CONTENT);
+}
+
+/// A Buy traded before an exchange or demerger but settling after its record
+/// date was on no register when the registry rounded the holding: its
+/// replacement units are converted on their own, as the settlement
+/// obligation it is — the split/bonus rule. The operation still consumes it:
+/// every parcel open on its date by trade date. Two 50-unit parcels, 1-for-3,
+/// rounded down: with no record date the holding is 100 → 33, as 17 + 16;
+/// with the second parcel settling after the record date, the registered
+/// holding is 50 → 16 and the late parcel 50 → 16 alone. An `Exact`
+/// operation ignores the record date.
+#[tokio::test]
+async fn an_exchange_or_demerger_converts_a_buy_settling_after_its_record_date_on_its_own() {
+    for demerger in [false, true] {
+        let pool = test_pool().await;
+        let app = whole_unit_holding(&pool, &["50"]).await;
+        insert_listing(&pool, 2, "NEW").await;
+        test_support::buy(2, 1)
+            .qty(dec("50"))
+            .date(d(2024, 5, 31))
+            .settlement(d(2024, 6, 5))
+            .insert(&pool)
+            .await;
+        let action = |rule, record| {
+            if demerger {
+                demerger_json(rule, ("1", "3"), record)
+            } else {
+                exchange_json(rule, ("1", "3"), record)
+            }
+        };
+        let cases = [
+            ("Down", None, ["17", "16"]),
+            ("Down", Some("2024-06-04"), ["16", "16"]),
+            ("Down", Some("2024-06-05"), ["17", "16"]),
+            ("Up", Some("2024-06-04"), ["17", "17"]),
+        ];
+        for (rule, record, expected) in cases {
+            app.put_ok("/corporate_actions/8", &action(rule, record))
+                .await;
+            let (sold, replacements) = run_operation(&app, demerger).await;
+            assert_eq!(sold, dec("100"), "every open parcel is consumed");
+            assert_eq!(
+                replacements,
+                expected.map(dec),
+                "{rule} with record date {record:?}, demerger {demerger}"
+            );
+            undo_operation(&app, &pool).await;
+        }
+        // Exact: the record date changes nothing.
+        app.put_ok("/corporate_actions/8", &action("Exact", Some("2024-06-04")))
+            .await;
+        let (_, replacements) = run_operation(&app, demerger).await;
+        let third = dec("50") / dec("3");
+        assert_eq!(replacements, [third, third]);
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT rollover_record_date FROM corporate_actions WHERE id = 8")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some("2024-06-04"));
+    }
+}
+
+/// A Sell traded before an exchange or demerger but settling after its record
+/// date still had its units on the seller's register: they are rounded with
+/// the holding, and the sale delivers its own converted count out of it.
+/// Parcels of 50 and 50, 2 sold from the first; 1-for-3 rounded down. By
+/// trade date the holding is 98 → 32 (16 + 16); on the register it is 100 →
+/// 33, of which the 2-unit obligation delivers none (2/3 rounded down), so
+/// the parcels share 33 — 16 and 17, each within a unit of its pro-rata
+/// share. The closing Sell consumes the 98 units open either way, and the
+/// preview and undo of the operation are exact.
+#[tokio::test]
+async fn an_exchange_or_demerger_rounds_a_sell_settling_after_its_record_date_with_the_holding() {
+    for demerger in [false, true] {
+        let pool = test_pool().await;
+        let app = whole_unit_holding(&pool, &["50", "50"]).await;
+        insert_listing(&pool, 2, "NEW").await;
+        let mut sale = sell_json("2024-05-31", &[(1, "2")]);
+        sale["settlement_date"] = json!("2024-06-05");
+        app.post("/sells", &sale)
+            .await
+            .expect_status(StatusCode::CREATED);
+        let action = |record| {
+            if demerger {
+                demerger_json("Down", ("1", "3"), record)
+            } else {
+                exchange_json("Down", ("1", "3"), record)
+            }
+        };
+        let path = if demerger {
+            "/corporate_actions/8/demerge"
+        } else {
+            "/corporate_actions/8/exchange"
+        };
+        let key = if demerger {
+            "demerged_replacements"
+        } else {
+            "replacements"
+        };
+        for (record, expected) in [
+            (None, ["16", "16"]),
+            (Some("2024-06-04"), ["16", "17"]),
+            (Some("2024-06-05"), ["16", "16"]),
+        ] {
+            app.put_ok("/corporate_actions/8", &action(record)).await;
+            let trades_before: Vec<(i64, String)> =
+                sqlx::query_as("SELECT id, quantity FROM trades ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            let created = app.assert_dry_run_previews(&pool, path, None).await;
+            let quantity = |v: &Value| dec(v["quantity"].as_str().unwrap());
+            assert_eq!(quantity(&created["sell"]), dec("98"));
+            let replacements: Vec<Decimal> = created[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(quantity)
+                .collect();
+            assert_eq!(replacements, expected.map(dec), "record date {record:?}");
+            undo_operation(&app, &pool).await;
+            let trades_after: Vec<(i64, String)> =
+                sqlx::query_as("SELECT id, quantity FROM trades ORDER BY id")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(trades_after, trades_before, "the undo restores every trade");
+            assert!(stored(&pool).await.is_empty(), "the undo drops its counts");
+        }
+    }
+}
+
+/// A record date is stored on an exchange and a demerger, either side of the
+/// operation's date, and read back as the payload's `record_date`.
+#[tokio::test]
+async fn an_exchange_or_demerger_record_date_is_stored_either_side_of_its_date() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50"]).await;
+    insert_listing(&pool, 2, "NEW").await;
+    for record in ["2024-06-03", "2024-06-10"] {
+        for body in [
+            exchange_json("Down", ("1", "3"), Some(record)),
+            demerger_json("Down", ("1", "3"), Some(record)),
+        ] {
+            app.put_ok("/corporate_actions/8", &body).await;
+            let action: Value = app.get_json("/corporate_actions/8").await;
+            assert_eq!(action["record_date"], record);
+        }
+    }
+}
+
 mod properties {
     use super::*;
     use crate::reports::unrealised_gains::tests::properties::{fact, realise_everything};
@@ -1209,6 +1432,204 @@ mod properties {
         .await
     }
 
+    /// A history every trade of which is dated before an exchange or demerger
+    /// on `day(EX)` (one dated on or after it is refused): Buys and Sells as
+    /// in [`world`], their settlement lags carrying some past the record date
+    /// and some past the operation itself.
+    fn operation_world() -> impl Strategy<Value = World> {
+        prop::collection::vec((0usize..EX, 5i64..=200, 0i64..=6), 1..=4).prop_flat_map(|buys| {
+            let n = buys.len();
+            let sells = prop::collection::vec((0..n, 0usize..EX, 1i64..=60, 0i64..=6), 0..=3);
+            (Just(buys), sells).prop_map(|(buys, sells)| World { buys, sells })
+        })
+    }
+
+    /// The trades table, for comparing a state across an operation's undo.
+    async fn trade_rows(pool: &SqlitePool) -> Vec<(i64, i64, String)> {
+        sqlx::query_as("SELECT id, listing_id, quantity FROM trades ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A rounded exchange or demerger dated `day(EX)` over a [`operation_world`]
+    /// history, against the same independent model of the register as
+    /// [`check`]: the closing Sell consumes every parcel open on the
+    /// operation's date by trade date; a parcel settled after the record date
+    /// has its replacement converted alone by the rule; the registered
+    /// parcels' replacements sum to the register's rounded total less each
+    /// straddling Sell's own rounded count, each whole, positive and within a
+    /// unit of its pro-rata share. The operation's `?dry_run=true` preview is
+    /// exactly the write, and its undo restores every trade and drops every
+    /// stored count, after which running it again writes the same counts.
+    async fn operation_straddling(
+        world: World,
+        record: Option<i64>,
+        (new, old): (i64, i64),
+        rule: Rule,
+        demerger: bool,
+    ) -> Result<(), TestCaseError> {
+        let pool = test_pool().await;
+        let app = whole_unit_holding(&pool, &[]).await;
+        insert_listing(&pool, 2, "NEW").await;
+        let date = day(EX);
+        let record = record.map(|r| date + chrono::Duration::days(r));
+        let mut settled = Vec::new();
+        for (i, (buy_day, qty, lag)) in world.buys.iter().enumerate() {
+            let traded = day(*buy_day);
+            let settlement = traded + chrono::Duration::days(*lag);
+            test_support::buy(i64::try_from(i).unwrap() + 1, 1)
+                .qty(Decimal::from(*qty))
+                .date(traded)
+                .settlement(settlement)
+                .insert(&pool)
+                .await;
+            settled.push(settlement);
+        }
+        let mut left: Vec<i64> = world.buys.iter().map(|b| b.1).collect();
+        let mut sells = Vec::new();
+        for (parcel, sale_day, qty, lag) in world.sells {
+            let qty = qty.min(left[parcel]);
+            if qty == 0 {
+                continue;
+            }
+            let traded = day(sale_day.max(world.buys[parcel].0));
+            let settlement = traded + chrono::Duration::days(lag);
+            let mut body = sell_json(
+                &traded.to_string(),
+                &[(i64::try_from(parcel).unwrap() + 1, &qty.to_string())],
+            );
+            body["settlement_date"] = json!(settlement.to_string());
+            app.post("/sells", &body)
+                .await
+                .expect_status(StatusCode::CREATED);
+            left[parcel] -= qty;
+            sells.push((parcel, qty, settlement));
+        }
+
+        let (new_s, old_s) = (new.to_string(), old.to_string());
+        let mut action = if demerger {
+            demerger_json(rule.name(), (&new_s, &old_s), None)
+        } else {
+            exchange_json(rule.name(), (&new_s, &old_s), None)
+        };
+        action["date"] = json!(date.to_string());
+        if let Some(r) = record {
+            action["record_date"] = json!(r.to_string());
+        }
+        app.put_ok("/corporate_actions/8", &action).await;
+        let (path, key) = if demerger {
+            ("/corporate_actions/8/demerge", "demerged_replacements")
+        } else {
+            ("/corporate_actions/8/exchange", "replacements")
+        };
+        let preview = app.post_empty(format!("{path}?dry_run=true")).await;
+        if preview.status == StatusCode::UNPROCESSABLE_ENTITY {
+            // Only the documented refusals: a parcel rounded to nothing, or
+            // every parcel sold before the operation.
+            let text = preview.text();
+            prop_assert!(
+                text.contains("with no units") || text.contains("is held at the"),
+                "{text}"
+            );
+            return Ok(());
+        }
+        prop_assert_eq!(preview.status, StatusCode::OK, "{}", preview.text());
+        let before = trade_rows(&pool).await;
+        let created = app.assert_dry_run_previews(&pool, path, None).await;
+
+        // The model: the parcels open on the operation's date, in the order
+        // the operation writes their replacements (acquisition date, id).
+        let registered = |s: NaiveDate| record.is_none_or(|r| s <= r);
+        let mut open: Vec<usize> = (0..world.buys.len()).filter(|&i| left[i] > 0).collect();
+        open.sort_by_key(|&i| (world.buys[i].0, i));
+        let quantity = |v: &Value| dec(v["quantity"].as_str().unwrap());
+        prop_assert_eq!(
+            quantity(&created["sell"]),
+            Decimal::from(open.iter().map(|&i| left[i]).sum::<i64>())
+        );
+        let replacements: Vec<Decimal> = created[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(quantity)
+            .collect();
+        prop_assert_eq!(replacements.len(), open.len());
+        let count: HashMap<usize, Decimal> = open.iter().copied().zip(replacements).collect();
+        let in_lieu: Decimal = stored(&pool).await.iter().map(|r| dec(&r.4)).sum();
+
+        let mut register = 0i64;
+        let mut pending: Vec<i64> = Vec::new();
+        let mut held: Vec<usize> = Vec::new();
+        for i in 0..world.buys.len() {
+            if !registered(settled[i]) {
+                if left[i] > 0 {
+                    prop_assert_eq!(
+                        count[&i],
+                        Decimal::from(rule.obligation().round(left[i] * new, old)),
+                        "straddling Buy {} converted alone",
+                        i + 1
+                    );
+                }
+                continue;
+            }
+            register += left[i];
+            for (_, qty, sold_settled) in sells.iter().filter(|s| s.0 == i) {
+                if !registered(*sold_settled) {
+                    register += qty;
+                    pending.push(*qty);
+                }
+            }
+            if left[i] > 0 {
+                held.push(i);
+            }
+        }
+        let target = rule.round(register * new, old)
+            - pending
+                .iter()
+                .map(|p| rule.obligation().round(p * new, old))
+                .sum::<i64>();
+        let sum_units: i64 = held.iter().map(|&i| left[i]).sum();
+        let mut on_grid_total = Decimal::ZERO;
+        for &i in &held {
+            // The cash-in-lieu fraction rides on at most one registered parcel.
+            let on_grid = count[&i].trunc();
+            prop_assert!(on_grid > Decimal::ZERO, "parcel {} emptied", i + 1);
+            on_grid_total += on_grid;
+            let (num, den) = if pending.is_empty() {
+                (left[i] * new, old)
+            } else {
+                (left[i] * target, sum_units)
+            };
+            let scaled = on_grid * Decimal::from(den) - Decimal::from(num);
+            prop_assert!(
+                scaled.abs() < Decimal::from(den),
+                "parcel {}: {on_grid} vs {num}/{den}",
+                i + 1
+            );
+        }
+        if !held.is_empty() {
+            prop_assert_eq!(on_grid_total, Decimal::from(target));
+        }
+        if rule != Rule::CashInLieu {
+            prop_assert_eq!(in_lieu, Decimal::ZERO);
+        }
+
+        // Undo, then run it again: the same counts.
+        let counts_first = stored(&pool).await.len();
+        undo_operation(&app, &pool).await;
+        prop_assert_eq!(trade_rows(&pool).await, before);
+        prop_assert!(stored(&pool).await.is_empty());
+        let (_, again) = run_operation(&app, demerger).await;
+        prop_assert_eq!(
+            again,
+            open.iter().map(|i| count[i]).collect::<Vec<_>>(),
+            "a re-run after the undo differs"
+        );
+        prop_assert_eq!(stored(&pool).await.len(), counts_first);
+        Ok(())
+    }
+
     proptest! {
         #![proptest_config(test_support::db_proptest_config())]
 
@@ -1255,6 +1676,28 @@ mod properties {
             edit in (0usize..4, 0i64..=6),
         ) {
             test_support::block_on(straddling(world, record, (new, old), rule, edit))?;
+        }
+        /// Trades straddling a rounded scrip-for-scrip exchange's or
+        /// demerger's record date — a Buy settling after it, a Sell traded
+        /// before the operation but settling after it — against an
+        /// independent model of the register (see [`operation_straddling`]),
+        /// with its preview and undo. The record date falls up to three days
+        /// either side of the operation's date, or is absent.
+        #[test]
+        fn a_rounded_exchange_or_demerger_rounds_the_register_at_its_record_date(
+            world in operation_world(),
+            record in prop::option::of(-5i64..=3),
+            new in 1i64..=4,
+            old in 1i64..=4,
+            rule in prop_oneof![
+                Just(Rule::Down),
+                Just(Rule::Up),
+                Just(Rule::Nearest),
+                Just(Rule::CashInLieu),
+            ],
+            demerger in any::<bool>(),
+        ) {
+            test_support::block_on(operation_straddling(world, record, (new, old), rule, demerger))?;
         }
     }
 }

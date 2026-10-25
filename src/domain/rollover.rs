@@ -25,9 +25,8 @@
 //! re-implements.
 
 use crate::domain::open_parcels;
-#[cfg(test)]
-use crate::infra::id::HoldingAccountId;
-use crate::infra::id::{ListingId, TradeId};
+use crate::infra::decimal::parse_dec;
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use std::collections::{HashMap, HashSet};
 
 use chrono::NaiveDate;
@@ -162,6 +161,72 @@ impl CostBaseInputs {
         }
         Ok(open)
     }
+
+    /// Every allocation of a Sell **straddling** an operation's record date:
+    /// traded before the operation (every trade of the listing is), settled
+    /// after `record_date`, drawn from a parcel registered by it (settled on
+    /// or before it). Those units were still on the seller's register when
+    /// the registry rounded the holding, and leave it as a settlement
+    /// obligation of their own (`entitlement_rounding::Register`). Each is in
+    /// the operation date's unit basis, as the exact fraction it is. Empty
+    /// with no record date: the timetable's register, every trade dated
+    /// before the operation, which is what the open parcels already are.
+    pub async fn straddling_sales(
+        &self,
+        conn: &mut sqlx::SqliteConnection,
+        listing_id: ListingId,
+        record_date: Option<NaiveDate>,
+    ) -> Result<Vec<StraddlingSale>, sqlx::Error> {
+        let Some(record_date) = record_date else {
+            return Ok(Vec::new());
+        };
+        let rows = sqlx::query(
+            "SELECT pa.sale_trade_id, pa.purchase_trade_id, p.holding_account_id, s.date, \
+                    pa.quantity_allocated \
+             FROM parcel_allocations pa \
+             JOIN trades s ON s.id = pa.sale_trade_id \
+             JOIN trades p ON p.id = pa.purchase_trade_id \
+             WHERE p.listing_id = ? AND p.settlement_date <= ? AND s.settlement_date > ? \
+               AND s.date < ? \
+             ORDER BY pa.sale_trade_id, pa.purchase_trade_id",
+        )
+        .bind(listing_id)
+        .bind(record_date)
+        .bind(record_date)
+        .bind(self.up_to)
+        .fetch_all(&mut *conn)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let parcel: TradeId = row.try_get("purchase_trade_id")?;
+                let sold = UnitsAt::new(
+                    parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+                    row.try_get("date")?,
+                );
+                let splits = self.splits.for_parcel(parcel);
+                let to = Some(self.up_to);
+                Ok(StraddlingSale {
+                    sale: row.try_get("sale_trade_id")?,
+                    account: row.try_get("holding_account_id")?,
+                    units: sold
+                        .rebased_fraction(&splits, to)
+                        .unwrap_or_else(|| Fraction::whole(sold.rebased(&splits, to).quantity())),
+                })
+            })
+            .collect()
+    }
+}
+
+/// One allocation of a Sell straddling an operation's record date
+/// ([`CostBaseInputs::straddling_sales`]).
+#[derive(Debug, Clone, Copy)]
+pub struct StraddlingSale {
+    /// The Sell.
+    pub sale: TradeId,
+    /// The account whose register still held the units.
+    pub account: HoldingAccountId,
+    /// The units, in the operation date's basis, exact.
+    pub units: Fraction,
 }
 
 /// One open parcel a rollover is about to substitute.
@@ -602,6 +667,7 @@ mod tests {
                     scrip_cash_per_unit: None,
                     scrip_market_value: None,
                     scrip_cash_currency: None,
+                    record_date: None,
                 },
             },
         )
@@ -692,6 +758,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )

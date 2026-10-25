@@ -1617,6 +1617,7 @@ async fn insert_demerger(
                     .map(|_| "nyse.com daily close".to_owned()),
                 demerger_close_reason: stated_close
                     .map(|_| "the provider adjusts the pre-demerger series".to_owned()),
+                record_date: None,
             },
         },
     )
@@ -2866,6 +2867,7 @@ async fn a_scrip_exchange_closing_sell_is_flagged_as_a_takeover_or_restructure()
                 scrip_cash_per_unit: None,
                 scrip_market_value: None,
                 scrip_cash_currency: None,
+                record_date: None,
             },
         },
     )

@@ -216,6 +216,7 @@ async fn execute(
         demerger_held_units: held_units,
         demerger_cost_base_pct: cost_base_pct,
         fraction_rule,
+        record_date,
         // The stated pre-demerger close is a price-series fact, read only by
         // the closing-price re-base; the demerge operation ignores it.
         ..
@@ -248,13 +249,24 @@ async fn execute(
     // the demerged listing's grid (`fraction_rule`), distributed across its
     // parcels; a holding it leaves unrounded keeps the exact ratio's count.
     // The head parcels keep their own units, so only this leg rounds.
+    // The holding rounded is its register at the record date (Sells
+    // straddling it delivered out of it, Buys settled after it converted on
+    // their own); the head parcels consumed are every one open on the
+    // demerger date regardless.
+    let straddling = inputs
+        .straddling_sales(&mut tx, action.listing_id, record_date)
+        .await?;
     let rounded = corporate_action::db_round_replacements(
         &mut tx,
-        action_id,
-        fraction_rule,
-        demerger_listing_id,
-        (new_units, held_units),
-        &parcels.iter().map(rollover::converted).collect::<Vec<_>>(),
+        &corporate_action::Replacing {
+            action_id,
+            rule: fraction_rule,
+            destination: demerger_listing_id,
+            ratio: (new_units, held_units),
+            record_date,
+            parcels: &parcels.iter().map(rollover::converted).collect::<Vec<_>>(),
+            straddling: &straddling,
+        },
     )
     .await?;
 
@@ -665,6 +677,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )
@@ -1925,6 +1938,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )

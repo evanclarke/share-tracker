@@ -146,6 +146,7 @@ fn scrip(
             scrip_cash_per_unit: None,
             scrip_market_value: None,
             scrip_cash_currency: None,
+            record_date: None,
         },
     }
 }
@@ -173,6 +174,7 @@ fn demerger(
             demerger_close_price: None,
             demerger_close_sourced_from: None,
             demerger_close_reason: None,
+            record_date: None,
         },
     }
 }

@@ -6462,9 +6462,24 @@ fn a_rounded_split_rounds_the_register_at_its_record_date_documented() {
     assert!(API_MD.contains("a **straddling Sell**'s units were still on the seller's register"));
     assert!(API_MD.contains("**Without a `record_date`** the register is the timetable's"));
     assert!(!API_MD.contains("Which units a rounded action converts is decided by trade date"));
-    assert!(known_limitations().contains(
-        "**A rounded scrip exchange or demerger converts the parcels open on its date**"
-    ));
     assert!(SCHEMA_MD.contains("├── rebase_record_date TEXT (date, nullable, 0058)"));
     assert!(FEATURES_MD.contains("to the units on the register at its optional record date"));
+}
+
+/// Doc pin (TODO "Unit granularity and registry rounding of fractional
+/// entitlements", *Register by record date for rounded scrip exchanges and
+/// demergers*, 2026-10-25): a rounded exchange or demerger rounds its register
+/// at its record date too, still consuming every parcel open on its date, and
+/// the narrowed Known limitation that said it converted by trade date is gone.
+#[test]
+fn a_rounded_exchange_or_demerger_rounds_the_register_at_its_record_date_documented() {
+    assert!(
+        API_MD.contains("**A `ScripForScrip` or `Demerger` rounds its register the same way.**")
+    );
+    assert!(API_MD.contains("**consumes every parcel open on its `date` by trade date**"));
+    assert!(API_MD.contains("a **Sell traded before the operation but settling after it**"));
+    assert!(!known_limitations().contains(
+        "**A rounded scrip exchange or demerger converts the parcels open on its date**"
+    ));
+    assert!(SCHEMA_MD.contains("├── rollover_record_date TEXT (date, nullable, 0059)"));
 }

@@ -325,6 +325,7 @@ async fn insert_demerger(
                     .map(|_| "nyse.com daily close".to_owned()),
                 demerger_close_reason: stated_close
                     .map(|_| "the provider adjusts the pre-demerger series".to_owned()),
+                record_date: None,
             },
         },
     )

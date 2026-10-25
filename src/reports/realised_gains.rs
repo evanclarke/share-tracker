@@ -3022,6 +3022,7 @@ mod tests {
                     scrip_cash_per_unit: None,
                     scrip_market_value: None,
                     scrip_cash_currency: None,
+                    record_date: None,
                 },
             },
         )
@@ -3100,6 +3101,7 @@ mod tests {
                     scrip_cash_per_unit: Some(Decimal::from(10)),
                     scrip_market_value: Some(Decimal::from(20)),
                     scrip_cash_currency: Some("AUD".into()),
+                    record_date: None,
                 },
             },
         )
@@ -3330,6 +3332,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )
@@ -4087,6 +4090,7 @@ mod tests {
                     scrip_cash_per_unit: Some("10000000000".parse().unwrap()),
                     scrip_market_value: Some("1000000000000".parse().unwrap()),
                     scrip_cash_currency: Some("AUD".into()),
+                    record_date: None,
                 },
             },
         )

@@ -859,6 +859,25 @@ pub struct Fraction {
 }
 
 impl Fraction {
+    /// A count that is already a terminating decimal, as the fraction
+    /// `count / 1`.
+    pub fn whole(count: Decimal) -> Self {
+        Self {
+            num: count,
+            den: Decimal::ONE,
+        }
+    }
+
+    /// The exact sum of `fractions` (over their common denominator), or
+    /// `None` where that sum is past `Decimal`'s range.
+    pub fn sum(fractions: &[Fraction]) -> Option<Fraction> {
+        let (nums, den) = Self::over_common_denominator(fractions)?;
+        let num = nums
+            .iter()
+            .try_fold(Decimal::ZERO, |acc, n| acc.checked_add(*n))?;
+        Some(Fraction { num, den })
+    }
+
     /// The counts `fractions` over one common denominator: each count's
     /// numerator on that denominator, and the denominator — so a sum of the
     /// counts, and any ratio applied to it, is exact (`num / den` summed
@@ -1009,6 +1028,22 @@ impl UnitsAt {
             quantity: rebase(self.quantity, splits, self.basis, to),
             basis: to,
         }
+    }
+
+    /// [`Self::rebased`] as the exact fraction it divides out — for a caller
+    /// that rounds the count itself (`domain::entitlement_rounding`'s
+    /// register), where a 28-digit rounding of a non-terminating count would
+    /// round onto the wrong side of a grid point. `None` where the product is
+    /// past `Decimal`'s range.
+    pub fn rebased_fraction(
+        self,
+        splits: &[SplitEvent],
+        to: Option<NaiveDate>,
+    ) -> Option<Fraction> {
+        times_ratio(
+            Fraction::whole(self.quantity),
+            rebase_ratio(splits, self.basis, to),
+        )
     }
 }
 

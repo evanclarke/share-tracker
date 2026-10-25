@@ -217,6 +217,7 @@ async fn db_insert_and_retrieve_scrip_for_scrip_preserves_terms() {
             scrip_cash_per_unit: None,
             scrip_market_value: None,
             scrip_cash_currency: None,
+            record_date: None,
         }
     );
 }
@@ -257,6 +258,7 @@ async fn db_insert_and_retrieve_demerger_preserves_terms() {
             demerger_close_price: None,
             demerger_close_sourced_from: None,
             demerger_close_reason: None,
+            record_date: None,
         }
     );
 }

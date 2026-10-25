@@ -353,6 +353,7 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                     scrip_cash_per_unit: cash_cents.map(|c| Decimal::new(c, 2)),
                     scrip_market_value: cash_cents.map(|_| Decimal::new(250, 2)),
                     scrip_cash_currency: cash_cents.map(|_| "AUD".into()),
+                    record_date: None,
                 },
             )
             .await;
@@ -385,6 +386,7 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             )
             .await;
@@ -1300,6 +1302,7 @@ async fn chain(
                         scrip_cash_per_unit: cash_cents.map(|c| Decimal::new(c, 2)),
                         scrip_market_value: cash_cents.map(|_| Decimal::new(375, 2)),
                         scrip_cash_currency: cash_cents.map(|_| "AUD".into()),
+                        record_date: None,
                     },
                 )
                 .await;
@@ -1352,6 +1355,7 @@ async fn chain(
                         demerger_close_price: None,
                         demerger_close_sourced_from: None,
                         demerger_close_reason: None,
+                        record_date: None,
                     },
                 )
                 .await;

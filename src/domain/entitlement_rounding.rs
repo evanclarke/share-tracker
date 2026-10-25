@@ -256,38 +256,39 @@ fn exact_units(parcels: &[ParcelBefore]) -> (Vec<Decimal>, Decimal) {
         .unwrap_or_else(|| (parcels.iter().map(|p| p.units).collect(), Decimal::ONE))
 }
 
-/// What the register held for one holding at a share split's or bonus issue's
-/// **record date**, where that differs from its parcels' units before the
-/// action — the input [`round_registered_holding`] rounds.
+/// What the register held for one holding at a ratio-driven action's **record
+/// date**, where that differs from its parcels' units before the action —
+/// the input [`round_registered_holding`] rounds.
 ///
-/// The parcels a re-base converts are the ones **traded** before the action's
-/// date (a trade on or after it is stated in the post-action basis), net of
-/// the sales traded before it. The register at the record date is read off
-/// **settlement** dates instead (CLAUDE.md, Financial correctness). The two
-/// differ only by a trade that straddles them; a Sell traded before the
-/// action's date but settling after the record date still had its units on
-/// the register when the holding was rounded, and delivers its own count out
-/// of the rounded holding afterwards.
+/// The parcels a re-base converts (a share split, a bonus issue) or an
+/// operation consumes (a scrip-for-scrip exchange, a demerger) are the ones
+/// **traded** before the action's date (a trade on or after it is stated in
+/// the post-action basis, or refused), net of the sales traded before it. The
+/// register at the record date is read off **settlement** dates instead
+/// (CLAUDE.md, Financial correctness). The two differ only by a trade that
+/// straddles them; a Sell traded before the action's date but settling after
+/// the record date still had its units on the register when the holding was
+/// rounded, and delivers its own count out of the rounded holding afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Register {
-    /// Units of the holding on the register at the record date, in the basis
-    /// in force immediately before the action: its registered parcels' units
-    /// before the action plus every straddling Sell's below.
-    pub units: Decimal,
-    /// Each straddling Sell's units, in the same basis — a settlement
-    /// obligation the clearing house converts on its own, delivered out of
-    /// the holding's rounded count ([`Rounding::for_obligation`]).
-    pub delivered: Vec<Decimal>,
+    /// Each straddling Sell's units, in the basis in force immediately before
+    /// the action, as the exact fraction they are (a sale re-based across an
+    /// earlier exact split need not terminate) — a settlement obligation the
+    /// clearing house converts on its own, delivered out of the holding's
+    /// rounded count ([`Rounding::for_obligation`]). The register's own units
+    /// are the holding's parcels' plus these.
+    pub delivered: Vec<Fraction>,
 }
 
 /// [`round_holding`] for a holding whose register at the record date differs
 /// from its parcels' units before the action, because Sells traded before the
 /// action settled after the record date ([`Register`]).
 ///
-/// The **register** is what the issuer's rule rounds: the holding's total is
-/// `register.units × new / old` rounded onto the grid by `rule` — or
-/// `units_received`, which states the register's figure. Each straddling Sell
-/// is a settlement obligation converted on its own, `units × new / old`
+/// The **register** is what the issuer's rule rounds: its units are the
+/// parcels' units before the action plus every straddling Sell's, and the
+/// holding's total is that × `new / old` rounded onto the grid by `rule` —
+/// or `units_received`, which states the register's figure. Each straddling
+/// Sell is a settlement obligation converted on its own, `units × new / old`
 /// rounded by [`Rounding::for_obligation`], and delivered out of that total;
 /// what is left is the parcels' count after the action, distributed across
 /// them as [`round_holding`] distributes an override — each parcel's share its
@@ -295,6 +296,12 @@ pub struct Register {
 /// stability and the same tie-breaks. A cash-in-lieu fraction is the
 /// register's (the registry pays the registered holder for the whole
 /// holding's fraction), carried on one parcel as for [`round_holding`].
+///
+/// Every figure is computed from exact counts, as [`round_holding`]'s are:
+/// the parcels' ([`ParcelBefore::exact`]) and the deliveries' fractions are
+/// put over one common denominator before any is summed or rounded, so a
+/// register that does not terminate (a holding left exact by an earlier
+/// split) rounds as the count it is, not as a sum of 28-digit roundings.
 ///
 /// A total the deliveries leave with nothing for a parcel that still holds
 /// units is refused [`RoundingError::ParcelEmptied`], as any rounding that
@@ -316,21 +323,52 @@ pub fn round_registered_holding(
     if parcels.is_empty() || held <= Decimal::ZERO {
         return Ok(vec![]);
     }
+    // The parcels' exact units and the deliveries', as numerators over one
+    // common denominator `den`.
+    let mut fractions: Vec<Fraction> = parcels
+        .iter()
+        .map(|p| p.exact.unwrap_or(Fraction::whole(p.units)))
+        .collect();
+    fractions.extend(register.delivered.iter().copied());
+    let (nums, den) = Fraction::over_common_denominator(&fractions).unwrap_or_else(|| {
+        // Past `Decimal`'s range on one denominator: the 28-digit roundings
+        // over 1, no worse than before.
+        let rounded = fractions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| match parcels.get(i) {
+                Some(p) => p.units,
+                None if f.den == Decimal::ONE => f.num,
+                None => f.num / f.den,
+            })
+            .collect();
+        (rounded, Decimal::ONE)
+    });
+    let (parcel_nums, delivered_nums) = nums.split_at(parcels.len());
+    let sum = |xs: &[Decimal]| {
+        xs.iter()
+            .try_fold(Decimal::ZERO, |acc, n| acc.checked_add(*n))
+            .ok_or_else(overflow)
+    };
+    let held = sum(parcel_nums)?;
+    let register_units = held
+        .checked_add(sum(delivered_nums)?)
+        .ok_or_else(overflow)?;
+    let old = old.checked_mul(den).ok_or_else(overflow)?;
     let registered = match units_received {
         Some(received) => checked_received(received, scale)?,
-        None => rounded_total(register.units, new, old, scale, rule)?,
+        None => rounded_total(register_units, new, old, scale, rule)?,
     };
     let mut total = registered;
-    for &units in &register.delivered {
+    for &units in delivered_nums {
         let delivered = rounded_total(units, new, old, scale, rule.for_obligation())?;
         total = total.checked_sub(delivered).ok_or_else(overflow)?;
     }
     if total <= Decimal::ZERO {
         return Err(RoundingError::ParcelEmptied(parcels[0].trade_id));
     }
-    let in_lieu = in_lieu_fraction(register.units, registered, new, old, scale, rule)?;
-    let units: Vec<Decimal> = parcels.iter().map(|p| p.units).collect();
-    distribute(parcels, &units, total, (total, held), scale, in_lieu)
+    let in_lieu = in_lieu_fraction(register_units, registered, new, old, scale, rule)?;
+    distribute(parcels, parcel_nums, total, (total, held), scale, in_lieu)
 }
 
 impl Rounding {
@@ -875,8 +913,7 @@ mod tests {
         // 100. 1-for-3, rounded down: the register is 33, the 2-unit
         // obligation delivers 0, and the parcels share 33 pro rata.
         let register = Register {
-            units: d("100"),
-            delivered: vec![d("2")],
+            delivered: vec![Fraction::whole(d("2"))],
         };
         let counts = round_registered_holding(
             &[parcel(1, 1, "48"), parcel(2, 2, "50")],
@@ -921,8 +958,7 @@ mod tests {
     fn deliveries_that_leave_nothing_for_a_parcel_are_refused() {
         // A register of 7 rounds to 2; two 3-unit obligations deliver 1 each.
         let register = Register {
-            units: d("7"),
-            delivered: vec![d("3"), d("3")],
+            delivered: vec![Fraction::whole(d("3")), Fraction::whole(d("3"))],
         };
         assert_eq!(
             round_registered_holding(
@@ -936,6 +972,31 @@ mod tests {
             ),
             Err(RoundingError::ParcelEmptied(TradeId(1)))
         );
+    }
+
+    #[test]
+    fn a_register_that_does_not_terminate_rounds_as_the_exact_count() {
+        // A third of 1000 units held and two thirds sold by Sells that settle
+        // after the record date: the register is exactly 1000, though its
+        // three 28-digit roundings (333.33…33 each) sum to 999.99…99. Rounded
+        // down 1-for-1 the register is 1000, each obligation delivers 333,
+        // and the parcel keeps 334 — summing the roundings made it 999 and
+        // left the parcel 333.
+        let third = Fraction {
+            num: d("1000"),
+            den: d("3"),
+        };
+        let held = ParcelBefore {
+            exact: Some(third),
+            ..parcel(1, 1, "333.3333333333333333333333333")
+        };
+        let register = Register {
+            delivered: vec![third, third],
+        };
+        let counts =
+            round_registered_holding(&[held], &register, d("1"), d("1"), 0, Rounding::Down, None)
+                .unwrap();
+        assert_eq!(afters(&counts), [d("334")]);
     }
 
     fn absorbable(free: &[(Decimal, bool)], rest: Decimal, step: Decimal) -> bool {
@@ -1147,9 +1208,10 @@ mod tests {
                 .collect();
             let held: Decimal = parcels.iter().map(|p| p.units).sum();
             let register = Register {
-                units: held + delivered.iter().map(|d| Decimal::from(*d)).sum::<Decimal>(),
-                delivered: delivered.iter().map(|d| Decimal::from(*d)).collect(),
+                delivered: delivered.iter().map(|d| Fraction::whole(Decimal::from(*d))).collect(),
             };
+            let register_units =
+                held + delivered.iter().map(|d| Decimal::from(*d)).sum::<Decimal>();
             let (new, old) = (Decimal::from(new), Decimal::from(old));
             let round = |x: Decimal, rule: Rounding| match rule {
                 Rounding::Down | Rounding::CashInLieu => x.floor(),
@@ -1158,11 +1220,10 @@ mod tests {
                     x.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
                 }
             };
-            let target = round(register.units * new / old, rule)
-                - register
-                    .delivered
+            let target = round(register_units * new / old, rule)
+                - delivered
                     .iter()
-                    .map(|d| round(*d * new / old, rule.for_obligation()))
+                    .map(|d| round(Decimal::from(*d) * new / old, rule.for_obligation()))
                     .sum::<Decimal>();
             let result = round_registered_holding(&parcels, &register, new, old, 0, rule, None);
             let Ok(counts) = result else {

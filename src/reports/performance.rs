@@ -1158,6 +1158,7 @@ mod tests {
                     scrip_cash_per_unit: Some(Decimal::from(2)),
                     scrip_market_value: Some(Decimal::from(18)),
                     scrip_cash_currency: Some("AUD".into()),
+                    record_date: None,
                 },
             },
         )

@@ -1512,6 +1512,7 @@ mod tests {
                     scrip_cash_per_unit: None,
                     scrip_market_value: None,
                     scrip_cash_currency: None,
+                    record_date: None,
                 },
             },
         )

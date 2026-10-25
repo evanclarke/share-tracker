@@ -269,6 +269,19 @@ pub enum ActionKind {
         /// How the registry treats a fractional entitlement (see
         /// [`FractionRule`]).
         fraction_rule: FractionRule,
+        /// Optional record date — when the register closed to fix who holds
+        /// the units the exchange converts. Read only under a non-`Exact`
+        /// [`FractionRule`]: the holding rounded is the units **registered**
+        /// at it (Buys settled on or before it, Sells settled after it), and
+        /// a trade straddling it and the action's `date` is converted as its
+        /// own settlement obligation, as for a share split (`docs/API.md`
+        /// *Fractional entitlements*). It never changes which parcels the
+        /// operation consumes — every one open on `date`. It may fall on
+        /// either side of `date`. `None` reads the register the market
+        /// timetable leaves: every trade dated before `date`. Informational
+        /// on an `Exact` action.
+        #[serde(default)]
+        record_date: Option<NaiveDate>,
     },
     Demerger {
         /// The demerged entity's listing (must differ from the action's own
@@ -316,6 +329,19 @@ pub enum ActionKind {
         /// How the registry treats a fractional entitlement (see
         /// [`FractionRule`]).
         fraction_rule: FractionRule,
+        /// Optional record date — when the register closed to fix who holds
+        /// the units the demerger converts. Read only under a non-`Exact`
+        /// [`FractionRule`]: the holding rounded is the units **registered**
+        /// at it (Buys settled on or before it, Sells settled after it), and
+        /// a trade straddling it and the action's `date` is converted as its
+        /// own settlement obligation, as for a share split (`docs/API.md`
+        /// *Fractional entitlements*). It never changes which parcels the
+        /// operation consumes — every one open on `date`. It may fall on
+        /// either side of `date`. `None` reads the register the market
+        /// timetable leaves: every trade dated before `date`. Informational
+        /// on an `Exact` action.
+        #[serde(default)]
+        record_date: Option<NaiveDate>,
     },
     WorthlessShares {
         /// Which CGT event the loss is recognised under (see [`WorthlessEvent`]).
@@ -449,6 +475,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
                 scrip_market_value: row_opt_dec(row, "scrip_market_value")?,
                 scrip_cash_currency: row.try_get("scrip_cash_currency")?,
                 fraction_rule: fraction_rule(row)?,
+                record_date: row.try_get("rollover_record_date")?,
             }),
             "Demerger" => Ok(ActionKind::Demerger {
                 demerger_listing_id: row.try_get("demerger_listing_id")?,
@@ -460,6 +487,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
                 demerger_close_sourced_from: row.try_get("demerger_close_sourced_from")?,
                 demerger_close_reason: row.try_get("demerger_close_reason")?,
                 fraction_rule: fraction_rule(row)?,
+                record_date: row.try_get("rollover_record_date")?,
             }),
             "WorthlessShares" => Ok(ActionKind::WorthlessShares {
                 worthless_event: row
@@ -543,9 +571,11 @@ pub struct CorporateActionBody {
     currency: Option<CurrencyCode>,
     /// `ReturnOfCapital` (optional): the date entitlement was fixed, on or before `date`.
     /// Parcels settled on or before it earn the payment; omitted, the payment date decides.
-    /// `ShareSplit` / `BonusIssue` (optional): the date the register closed for the
-    /// conversion, either side of `date`; a non-`Exact` rule rounds the units registered at
-    /// it (settled on or before it), and omitted, every trade dated before `date` counts.
+    /// `ShareSplit` / `BonusIssue` / `ScripForScrip` / Demerger (optional): the date the
+    /// register closed for the conversion, either side of `date`; a non-`Exact` rule rounds
+    /// the units registered at it (settled on or before it), a trade dated before `date` but
+    /// settled after it being converted on its own, and omitted, every trade dated before
+    /// `date` counts. It never changes which parcels an exchange or demerger consumes.
     #[serde(default)]
     record_date: Option<NaiveDate>,
     /// `ShareSplit` only (required): every `split_old_units` existing units become
@@ -738,7 +768,7 @@ pub struct CorporateActionBody {
 /// and was entered as another. Two groups are shared rather than owned by one
 /// type, and they are the only thing that varies between arms: `currency`,
 /// which `ReturnOfCapital`, `RightsIssue` and `BuyBack` require and the other five
-/// forbid, and `record_date`, which `ReturnOfCapital`, `ShareSplit` and `BonusIssue` may carry.
+/// forbid, and `record_date`, which `ReturnOfCapital` and the four ratio-driven types may carry.
 #[derive(Clone, Copy)]
 struct Presence(u16);
 
@@ -942,7 +972,9 @@ impl CorporateActionBody {
                     renounceable: self.renounceable?,
                 })
             }
-            ActionType::ScripForScrip if present.only(Presence::SCRIP | Presence::FRACTION) => {
+            ActionType::ScripForScrip
+                if present.only(Presence::SCRIP | Presence::FRACTION | Presence::RECORD) =>
+            {
                 let scrip_listing_id = self.scrip_listing_id.filter(|&l| l != self.listing_id)?;
                 // The cash component is all-or-none: cash per old unit, the
                 // replacement unit's market value (the apportionment needs
@@ -970,9 +1002,12 @@ impl CorporateActionBody {
                     scrip_market_value,
                     scrip_cash_currency,
                     fraction_rule: self.fraction_rule?,
+                    record_date,
                 })
             }
-            ActionType::Demerger if present.only(Presence::DEMERGER | Presence::FRACTION) => {
+            ActionType::Demerger
+                if present.only(Presence::DEMERGER | Presence::FRACTION | Presence::RECORD) =>
+            {
                 let demerger_listing_id =
                     self.demerger_listing_id.filter(|&l| l != self.listing_id)?;
                 let demerger_cost_base_pct = self
@@ -1023,6 +1058,7 @@ impl CorporateActionBody {
                     demerger_close_sourced_from,
                     demerger_close_reason,
                     fraction_rule: self.fraction_rule?,
+                    record_date,
                 })
             }
             ActionType::BuyBack if present.only(Presence::BUYBACK | Presence::CURRENCY) => {
@@ -1135,7 +1171,7 @@ mod tests {
             ),
             (
                 "ScripForScrip",
-                Presence::SCRIP | Presence::FRACTION,
+                Presence::SCRIP | Presence::FRACTION | Presence::RECORD,
                 json!({
                     "scrip_listing_id": 2,
                     "scrip_new_units": "2",
@@ -1145,7 +1181,7 @@ mod tests {
             ),
             (
                 "Demerger",
-                Presence::DEMERGER | Presence::FRACTION,
+                Presence::DEMERGER | Presence::FRACTION | Presence::RECORD,
                 json!({
                     "demerger_listing_id": 2,
                     "demerger_new_units": "1",

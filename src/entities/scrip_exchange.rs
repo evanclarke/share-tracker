@@ -239,13 +239,24 @@ async fn execute(
     // The registry's rounding of each holding's replacement units onto the
     // replacement listing's grid (`fraction_rule`), distributed across its
     // parcels; a holding it leaves unrounded keeps the exact ratio's count.
+    // The holding rounded is its register at the record date (Sells
+    // straddling it delivered out of it, Buys settled after it converted on
+    // their own); the parcels consumed are every one open on the exchange
+    // date regardless.
+    let straddling = inputs
+        .straddling_sales(&mut tx, action.listing_id, terms.record_date)
+        .await?;
     let rounded = corporate_action::db_round_replacements(
         &mut tx,
-        action_id,
-        terms.fraction_rule,
-        terms.scrip_listing_id,
-        (terms.new_units, terms.old_units),
-        &parcels.iter().map(rollover::converted).collect::<Vec<_>>(),
+        &corporate_action::Replacing {
+            action_id,
+            rule: terms.fraction_rule,
+            destination: terms.scrip_listing_id,
+            ratio: (terms.new_units, terms.old_units),
+            record_date: terms.record_date,
+            parcels: &parcels.iter().map(rollover::converted).collect::<Vec<_>>(),
+            straddling: &straddling,
+        },
     )
     .await?;
     let mut replacements: Vec<Replacement> = Vec::new();
@@ -405,6 +416,9 @@ struct Terms {
     cash_apportionment: Option<(Decimal, Decimal)>,
     /// How the registry treats a fractional entitlement to replacement units.
     fraction_rule: FractionRule,
+    /// When the register closed for the exchange, if recorded — what decides
+    /// which holding a straddling trade's units were rounded with.
+    record_date: Option<NaiveDate>,
 }
 
 impl Terms {
@@ -417,6 +431,7 @@ impl Terms {
             scrip_market_value,
             scrip_cash_currency,
             fraction_rule,
+            record_date,
         } = kind
         else {
             return Err(ExchangeError::NotAScripForScrip);
@@ -438,6 +453,7 @@ impl Terms {
             cash,
             cash_apportionment,
             fraction_rule: *fraction_rule,
+            record_date: *record_date,
         })
     }
 
@@ -731,6 +747,7 @@ mod tests {
                     scrip_cash_per_unit: cash.map(|(c, _)| c.parse().unwrap()),
                     scrip_market_value: cash.map(|(_, mv)| mv.parse().unwrap()),
                     scrip_cash_currency: cash.map(|_| "AUD".to_owned()).map(CurrencyCode::from),
+                    record_date: None,
                 },
             },
         )
@@ -1682,6 +1699,7 @@ mod tests {
                     scrip_cash_per_unit: None,
                     scrip_market_value: None,
                     scrip_cash_currency: None,
+                    record_date: None,
                 },
             },
         )
@@ -2029,6 +2047,7 @@ mod tests {
                     scrip_cash_per_unit: Some(cash.0.parse().unwrap()),
                     scrip_market_value: Some(cash.1.parse().unwrap()),
                     scrip_cash_currency: Some("USD".into()),
+                    record_date: None,
                 },
             },
         )

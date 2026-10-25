@@ -976,6 +976,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )

@@ -581,6 +581,7 @@ mod tests {
                     scrip_cash_per_unit: Some(dec("2")),
                     scrip_market_value: Some(dec("18")),
                     scrip_cash_currency: Some("AUD".into()),
+                    record_date: None,
                 },
             },
         )
@@ -628,6 +629,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )
@@ -719,6 +721,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )
@@ -771,6 +774,7 @@ mod tests {
                     scrip_cash_per_unit: None,
                     scrip_market_value: None,
                     scrip_cash_currency: None,
+                    record_date: None,
                 },
             },
         )
@@ -881,6 +885,7 @@ mod tests {
                     demerger_close_price: None,
                     demerger_close_sourced_from: None,
                     demerger_close_reason: None,
+                    record_date: None,
                 },
             },
         )

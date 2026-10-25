@@ -155,7 +155,9 @@ pub use model::{
     ActionKind, CorporateAction, CorporateActionBody, FractionRule,
     NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, WorthlessEvent,
 };
-pub use rounding::{Converted, RoundError, db_insert_count, db_round_replacements, db_settle};
+pub use rounding::{
+    Converted, Replacing, RoundError, db_insert_count, db_round_replacements, db_settle,
+};
 
 /// Referenced by name only from other modules' tests (production code calls
 /// these through the HTTP routes in `http.rs`, not this re-export), so the
