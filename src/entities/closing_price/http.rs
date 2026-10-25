@@ -272,7 +272,7 @@ async fn fetch_one(
     let market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("no such listing"))?;
+        .ok_or_else(|| ApiError::missing_reference("listing", "listing_id", body.listing_id))?;
     validate_complete_trading_day(&market, body.price_date)?;
     reject_unpriced_date(&market, body.price_date)?;
     let before = db_get_one(&pool, body.listing_id, body.price_date).await?;
@@ -319,7 +319,7 @@ async fn backfill(
     let mut market = load_market(&pool, body.listing_id)
         .await
         .map_err(internal)?
-        .ok_or_else(|| ApiError::not_found("no such listing"))?;
+        .ok_or_else(|| ApiError::missing_reference("listing", "listing_id", body.listing_id))?;
     market.symbol_override = body.symbol.clone();
     if body.from > body.to {
         return Err(ApiError::unprocessable("from is after to"));
@@ -453,7 +453,7 @@ async fn delete_one(
 /// call reports `deleted: 0`), and nothing is destroyed — every removed row
 /// lands in `row_history` with its figure and provenance.
 ///
-/// `404` for an unknown listing; `422` for a listing that declares no
+/// `422` for an unknown listing, or for a listing that declares no
 /// `unpriced_before`, since without one there is no superseded span at all.
 #[utoipa::path(
     post,
@@ -466,9 +466,13 @@ async fn clear_unpriced_before(
 ) -> Result<Json<ClearSummary>, ApiError> {
     let listing = listing::db_get(&pool, body.listing_id)
         .await?
-        .ok_or_else(|| ApiError::not_found("no such listing"))?;
+        .ok_or_else(|| ApiError::missing_reference("listing", "listing_id", body.listing_id))?;
     match db_clear_unpriced_before(&pool, body.listing_id).await? {
-        ClearOutcome::NoListing => Err(ApiError::not_found("no such listing")),
+        ClearOutcome::NoListing => Err(ApiError::missing_reference(
+            "listing",
+            "listing_id",
+            body.listing_id,
+        )),
         ClearOutcome::NoMarker => Err(ApiError::unprocessable(format!(
             "{} has no unpriced_before, so no stored price of its is superseded — only the span \
              before that marker can be cleared in bulk. Set unpriced_before on the listing (PUT \

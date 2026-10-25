@@ -379,3 +379,32 @@ Considered and not proposed: an MCP server exposing the API as tools. 177 tools 
 agent to choose among; the items above (a complete spec with `operationId`s, a compact index, tag
 slices, and the project skill) give most of the benefit, and a small curated MCP tool set can be
 revisited once they land.
+
+## `PUT /trades/:id` naming a missing listing answers 500 (found 2026-10-25)
+Seen while verifying the `Exact`-mode `unrealised_gains` fix: a `PUT /trades/:id` whose
+`listing_id` names no listing answers **500** (log: "no rows returned") instead of the `422` a
+reference to a missing record gets everywhere else (`ApiError::from(sqlx::Error)`'s foreign-key
+wording). Not investigated.
+- [x] Find the read that runs before the insert's foreign-key check (likely a listing/market or
+  unit-scale lookup turning `RowNotFound` into `Internal`), answer `422` naming the missing listing,
+  and pin it with a test — then sweep the other write paths taking a `listing_id` (Sell, DRP,
+  operations, `holding_unit_scales`) for the same shape
+  — Done 2026-10-25. The read was `trade::settlement::settlement_days_for_listing`, a `fetch_one`
+  that `Settlement::resolve_on` runs on the write's transaction before the INSERT, so a missing
+  listing was `RowNotFound` → `500` on `PUT`/`POST /trades` **and** `PUT`/`POST /sells`. It now
+  reads `fetch_optional` and refuses a missing listing through a `Refusal` (the `422` carrier
+  `corporate_action::rounding::db_settle` already used), worded by the new
+  `infra::http::missing_reference_body`: `the request refers to a listing that does not exist
+  (listing_id N)` — the foreign-key wording, plus what and which. The sweep is a cross-entity
+  contract test, `entities::tests::references`: `every_write_naming_a_listing_or_account_has_a_case`
+  reads every `PUT`/`POST` whose body schema names a `*listing_id`/`*account_id` (or whose path is
+  keyed by `{listing_id}`) off the generated OpenAPI document — 35 routes — and fails until each has
+  a case, and `a_write_naming_a_missing_listing_or_account_is_422` swaps each named reference for a
+  missing one in turn (asserting `422` with a reason), then sends the unmutated body (asserting it
+  succeeds, so the refusal is about the reference). Only trades and Sells were `500`; every other
+  route already answered the foreign-key `422` (or a business-rule `422`: cash in lieu and the
+  what-if find no holding). The sweep also found the three closing-price operations taking a
+  listing in the **body** (`/closing_prices/fetch`, `/backfill`, `/clear_unpriced_before`)
+  answering `404 no such listing` — now the same `422` (docs/API.md updated, incl. Response
+  codes); the path-keyed `PUT /closing_prices/:listing_id/:price_date` keeps the `404` a path
+  parameter owes

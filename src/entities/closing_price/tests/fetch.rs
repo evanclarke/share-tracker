@@ -401,7 +401,7 @@ async fn fetch_and_store_names_the_symbol_when_the_whole_window_returns_no_candl
 }
 
 #[tokio::test]
-async fn api_backfill_unknown_listing_404_and_bad_range_422() {
+async fn api_backfill_unknown_listing_and_bad_range_422() {
     let pool = test_pool().await;
     insert_listing(&pool, 1, "BHP", "XASX", "AUD").await;
     let app = full_router(pool, StubFetcher::default());
@@ -412,7 +412,7 @@ async fn api_backfill_unknown_listing_404_and_bad_range_422() {
         serde_json::json!({ "listing_id": 99, "from": "2026-06-01", "to": "2026-06-05" }),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (status, _) = post_json(
         &app,
@@ -558,7 +558,7 @@ async fn api_fetch_rejects_incomplete_and_non_trading_days() {
         serde_json::json!({ "listing_id": 99, "price_date": "2024-01-05" }),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 #[tokio::test]

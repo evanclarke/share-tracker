@@ -12,7 +12,7 @@ use sqlx::error::{DatabaseError, ErrorKind};
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool};
 use std::any::Any;
-use std::error;
+use std::{error, fmt};
 
 /// A boxed error source carried by [`ApiError::Internal`].
 pub type BoxError = Box<dyn error::Error + Send + Sync + 'static>;
@@ -127,6 +127,12 @@ impl ApiError {
     /// A 422 with the given plain-text explanation.
     pub fn unprocessable(msg: impl Into<String>) -> Self {
         ApiError::Unprocessable(msg.into())
+    }
+
+    /// The `422` for a request whose body names a `noun` row that does not
+    /// exist — [`missing_reference_body`]'s wording.
+    pub fn missing_reference(noun: &str, field: &str, id: impl fmt::Display) -> Self {
+        ApiError::Unprocessable(missing_reference_body(noun, field, id))
     }
 
     /// A 400 with the given plain-text explanation.
@@ -1085,7 +1091,10 @@ fn is_busy_code(code: i32) -> bool {
 
 /// A write refused by a step every write path shares *inside* its own
 /// transaction — the rounded-entitlement recompute
-/// (`corporate_action::rounding::db_settle`) — carried through the
+/// (`corporate_action::rounding::db_settle`), or the listing's settlement
+/// period a trade or Sell resolves before its insert
+/// (`trade::settlement::settlement_days_for_listing`, which refuses a
+/// `listing_id` naming no listing) — carried through the
 /// `sqlx::Error` every such path already returns, the way an `FxError` gap
 /// travels through report code: as a `Decode` error boxing this value, which
 /// [`ApiError`]'s `From<sqlx::Error>` recovers and answers `422` with
@@ -1114,6 +1123,17 @@ impl Refusal {
     pub fn body(&self) -> &str {
         &self.body
     }
+}
+
+/// The `422` body for a request naming a `noun` row that does not exist: the
+/// foreign-key wording `From<sqlx::Error>` answers ("the request refers to a
+/// record that does not exist"), with the record's kind and the field and id
+/// that named it — which the foreign-key arm cannot say, since SQLite's
+/// message names neither. Used where a read runs ahead of the insert whose
+/// foreign key would otherwise refuse it (a listing's settlement period, a
+/// listing's price market), so the refusal reads the same either way.
+pub fn missing_reference_body(noun: &str, field: &str, id: impl fmt::Display) -> String {
+    format!("the request refers to a {noun} that does not exist ({field} {id})")
 }
 
 impl From<Refusal> for sqlx::Error {

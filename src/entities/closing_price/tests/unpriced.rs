@@ -261,7 +261,8 @@ async fn api_clear_unpriced_before_clears_exactly_the_superseded_span() {
 
 /// Without a marker there is no superseded span, so there is nothing this
 /// endpoint may clear — it must never become a bulk-delete of real price
-/// history. An unknown listing is the ordinary 404.
+/// history. An unknown listing is the `422` every body naming a missing
+/// listing answers.
 #[tokio::test]
 async fn api_clear_unpriced_before_is_refused_without_a_marker() {
     let pool = test_pool().await;
@@ -295,8 +296,11 @@ async fn api_clear_unpriced_before_is_refused_without_a_marker() {
         serde_json::json!({ "listing_id": 99 }),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(String::from_utf8_lossy(&bytes), "no such listing");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        String::from_utf8_lossy(&bytes),
+        "the request refers to a listing that does not exist (listing_id 99)"
+    );
 }
 
 /// The audit trail is per row, not per statement: the `AFTER DELETE`

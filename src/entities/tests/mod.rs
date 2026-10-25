@@ -6,6 +6,7 @@ mod delete;
 mod list;
 mod operations;
 mod put;
+mod references;
 
 use super::*;
 use crate::entities::route_tables::{LIST_ROUTES, PUT_ROUTES, PutOutcome};

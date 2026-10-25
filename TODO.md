@@ -75,6 +75,9 @@ per parcel, recompute-on-write, and the register at the record date for splits, 
 scrip exchanges and demergers — `Exact` kept by owner decision) is closed and archived in
 [`DONE/reviews.md`](DONE/reviews.md).
 
+The `PUT /trades/:id` missing-listing `500` found 2026-10-25 (and the sweep of every write naming a
+listing or holding account it prompted) is closed and archived in [`DONE/api.md`](DONE/api.md).
+
 ## 2026–27 Budget CGT changes — announced, not law (ATO mirror sweep 2026-10-08)
 The ATO's CGT discount, cost base, how-to-calculate and indexation pages have carried a banner
 since 29 June 2026: "Recent changes to capital gains tax (CGT) announced in the 2026–27 Federal
@@ -95,13 +98,3 @@ falls under the existing rules.
 - [ ] Whatever is decided, make sure a closing price is stored for every held listing on the last
   trading day before 1 July 2027 (the scheduled price import plus `closing_price`'s held-days
   backfill), since a missing one cannot be fetched reliably years later
-
-## `PUT /trades/:id` naming a missing listing answers 500 (found 2026-10-25)
-Seen while verifying the `Exact`-mode `unrealised_gains` fix: a `PUT /trades/:id` whose
-`listing_id` names no listing answers **500** (log: "no rows returned") instead of the `422` a
-reference to a missing record gets everywhere else (`ApiError::from(sqlx::Error)`'s foreign-key
-wording). Not investigated.
-- [ ] Find the read that runs before the insert's foreign-key check (likely a listing/market or
-  unit-scale lookup turning `RowNotFound` into `Internal`), answer `422` naming the missing listing,
-  and pin it with a test — then sweep the other write paths taking a `listing_id` (Sell, DRP,
-  operations, `holding_unit_scales`) for the same shape

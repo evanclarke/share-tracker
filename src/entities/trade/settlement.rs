@@ -12,7 +12,7 @@ use crate::entities::{corporate_action, exchange_holiday};
 #[cfg(test)]
 use crate::infra::db;
 use crate::infra::db::write_tx;
-use crate::infra::http::ApiError;
+use crate::infra::http::{ApiError, Refusal, missing_reference_body};
 use crate::infra::id::{ListingId, TradeId};
 use chrono::{Datelike, Days, NaiveDate};
 use sqlx::SqlitePool;
@@ -127,18 +127,29 @@ pub(crate) fn warn_if_outside_holiday_coverage(
 
 /// The listing's exchange T+n settlement period, or `None` for an
 /// exchange-less (Crypto) listing — those settle same-day.
+///
+/// A `listing_id` naming no listing is the request's mistake, not the
+/// server's: every caller asks on behalf of a body that named it (a trade or
+/// Sell write, the what-if's hypothetical sale), and this read runs *before*
+/// the insert whose foreign key would refuse it. So it is refused here, as a
+/// [`Refusal`] carrying the foreign-key wording with the id — a `fetch_one`'s
+/// bare `RowNotFound` was a `500` (found 2026-10-25).
 pub(crate) async fn settlement_days_for_listing(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
 ) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar(
+    let row: Option<Option<i64>> = sqlx::query_scalar(
         "SELECT e.settlement_days FROM listings l \
          LEFT JOIN exchanges e ON e.mic = l.exchange_mic \
          WHERE l.id = ?",
     )
     .bind(listing_id)
-    .fetch_one(&mut *conn)
-    .await
+    .fetch_optional(&mut *conn)
+    .await?;
+    row.ok_or_else(|| {
+        let body = missing_reference_body("listing", "listing_id", listing_id);
+        Refusal::new(body.clone(), body).into()
+    })
 }
 
 /// A settlement date together with where it came from — what a write path
