@@ -119,8 +119,14 @@ pub async fn db_open_parcels_on(
     // is a foreign key, so the map always has the row.
     let tickers = listing::db_tickers(&mut *conn).await?;
 
+    // Listed in the shared schedule order (`open_parcels::schedule_order`),
+    // the order every holding total beside this schedule (portfolio overview,
+    // unrealised gains) sums its parcels in, so each total is these rows added
+    // down the page.
+    let mut ordered: Vec<&open_parcels::OpenParcel> = open.iter().collect();
+    ordered.sort_by_key(|p| open_parcels::schedule_order(p));
     let mut parcels = Vec::with_capacity(open.len());
-    for p in &open {
+    for p in ordered {
         let t = &p.parcel;
         // A scrip-for-scrip replacement parcel carries the consumed parcel's
         // acquisition date (`t.acquired()`): it drives the reported
@@ -145,20 +151,6 @@ pub async fn db_open_parcels_on(
         });
     }
 
-    parcels.sort_by(|a, b| {
-        (
-            a.listing_id,
-            a.holding_account_id,
-            a.acquisition_date,
-            a.trade_id,
-        )
-            .cmp(&(
-                b.listing_id,
-                b.holding_account_id,
-                b.acquisition_date,
-                b.trade_id,
-            ))
-    });
     Ok(parcels)
 }
 

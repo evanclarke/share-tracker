@@ -32,9 +32,10 @@
 //! read.
 
 use crate::domain::rollover;
-use crate::infra::id::{ListingId, TradeId};
+use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
+use rust_decimal::Decimal;
 use sqlx::sqlite::SqliteRow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use chrono::NaiveDate;
 use sqlx::Row;
@@ -74,6 +75,55 @@ pub struct OpenParcel {
     /// [`cost_base`] pipeline, so callers needing only the bottom line take
     /// `.adjusted`.
     pub cost_base: CostBase<Aud>,
+}
+
+/// The order the open-parcels schedule (`reports::open_parcels`) lists
+/// parcels in: by listing, holding account, (deemed) acquisition date, then
+/// trade id. A holding's figures are summed in this order ([`by_holding`],
+/// [`holding_quantity`]), so a total is the sum of the rows a reader sees, as
+/// that reader adds them down the page.
+pub fn schedule_order(p: &OpenParcel) -> (ListingId, HoldingAccountId, NaiveDate, TradeId) {
+    (
+        p.parcel.listing_id,
+        p.parcel.holding_account_id,
+        p.parcel.acquired(),
+        p.parcel.id,
+    )
+}
+
+/// The open parcels grouped into holdings — one entry per (listing, holding
+/// account), in key order — each holding's parcels in [`schedule_order`].
+/// Every report printing a holding beside its parcels aggregates through this,
+/// so its totals and the schedule's rows are the same figures in the same order.
+pub fn by_holding(
+    open: &[OpenParcel],
+) -> BTreeMap<(ListingId, HoldingAccountId), Vec<&OpenParcel>> {
+    let mut sorted: Vec<&OpenParcel> = open.iter().collect();
+    sorted.sort_by_key(|p| schedule_order(p));
+    let mut holdings: BTreeMap<_, Vec<&OpenParcel>> = BTreeMap::new();
+    for p in sorted {
+        holdings
+            .entry((p.parcel.listing_id, p.parcel.holding_account_id))
+            .or_default()
+            .push(p);
+    }
+    holdings
+}
+
+/// A holding's quantity: the sum of its parcels' remaining quantities **as
+/// printed** (each [`UnitsAt::quantity`]), added in [`schedule_order`].
+///
+/// Not the exact count rounded once. After a ratio that does not divide a
+/// parcel (an `Exact` 2-for-3 split or exchange), each parcel's remainder is
+/// a 28-digit rounding of a non-terminating count, and a sum of such roundings
+/// has no single right last digit — the exact total rounded once can differ
+/// from the printed rows' sum in the 28th digit, and `Decimal` addition itself
+/// rounds once a sum outgrows 28 digits, so even the order matters. The holding
+/// row is the figure a Sell of everything records: its allocations are the
+/// printed remainders and its quantity must equal their sum exactly
+/// (`sell::db_upsert`), so this is the quantity that Sell can state.
+pub fn holding_quantity(parcels: &[&OpenParcel]) -> Decimal {
+    parcels.iter().map(|p| p.remaining_as_of.quantity()).sum()
 }
 
 /// One Sell's consumption of a purchase parcel's units: how many, when, and

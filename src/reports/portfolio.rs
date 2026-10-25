@@ -137,26 +137,17 @@ pub async fn db_holdings_on(
     // aggregation per (listing, holding account).
     let open = open_parcels::load(conn, as_of).await?;
 
-    let mut holding_qty: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
-    let mut holding_cost_base: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
-
-    for p in &open {
-        let key = (p.parcel.listing_id, p.parcel.holding_account_id);
-        // The holding's quantity is reported in the unit basis of `as_of`
-        // (live view: current units, after every recorded split) so market
-        // value lines up with a price as of that date.
-        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of.quantity();
-        *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += p.cost_base.adjusted;
-    }
-
-    let mut result: Vec<HoldingOverview> = holding_qty
+    // One row per (listing, account) holding. The quantity is in the unit
+    // basis of `as_of` (live view: current units, after every recorded split)
+    // so market value lines up with a price as of that date, and is the sum
+    // of the parcels' printed remainders in the open-parcels schedule's order
+    // (`open_parcels::holding_quantity`), so it agrees with that schedule to
+    // the last digit.
+    let result: Vec<HoldingOverview> = open_parcels::by_holding(&open)
         .into_iter()
-        .filter(|(_, qty)| *qty > Decimal::ZERO)
-        .map(|((listing_id, holding_account_id), qty)| {
-            let cost_base = holding_cost_base
-                .get(&(listing_id, holding_account_id))
-                .copied()
-                .unwrap_or(Decimal::ZERO);
+        .map(|((listing_id, holding_account_id), parcels)| {
+            let qty = open_parcels::holding_quantity(&parcels);
+            let cost_base: Decimal = parcels.iter().map(|p| p.cost_base.adjusted).sum();
             let avg = if qty > Decimal::ZERO {
                 cost_base / qty
             } else {
@@ -176,9 +167,9 @@ pub async fn db_holdings_on(
                 price_unavailable: None,
             }
         })
+        .filter(|h| h.quantity > Decimal::ZERO)
         .collect();
 
-    result.sort_by_key(|h| (h.listing_id, h.holding_account_id));
     Ok(result)
 }
 

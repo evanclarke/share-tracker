@@ -125,8 +125,9 @@ transfers of 68% and 35% to account 2, a 1-for-4 bonus issue, a 2-for-3 split), 
 (`449.50000000000000000000000001` against `449.5`) on another. Each parcel's remainder is a 28-digit
 rounding of a non-terminating count, and a sum of such roundings has no single right last digit, so
 this cannot be fixed inside the exact-fraction model — the per-parcel stored grid counts below are
-what fix it. The seed is deliberately not committed to `proptest-regressions/` (it would fail every
-run until then); add it, and see it pass, as part of closing this section.
+what fix it. The seed is committed to `proptest-regressions/reports/unrealised_gains.txt` (with
+the second instance, `d841d284…`), passing against the `Exact` property since 2026-10-25 — see the
+item "Fix the `Exact`-mode `unrealised_gains` property's intermittent failure" below.
 
 The live portfolio's only ratio-driven action is a 1-for-1 demerger, so no stored figure is wrong
 today; this is a model-correctness change. DRP's `residual_handling` (`CarryForward | PayOut`) is
@@ -322,6 +323,23 @@ the precedent: the rule is on the plan, the grid on the holding.
   figures carry, or make the holding row the sum of the printed parcel remainders so the two agree
   by construction (preferred if it is what a reader of the report expects) — and commit both seeds
   to `proptest-regressions/reports/unrealised_gains.txt`, passing
+  *Done 2026-10-25 (`domain::open_parcels::{schedule_order, by_holding, holding_quantity}`).* The
+  holding row **is** the sum of its parcels' printed remainders, added in the open-parcels
+  schedule's order (listing, account, acquisition date, trade id) — by construction, no tolerance.
+  The cause was narrower than "no single right last digit": the reports summed the same per-parcel
+  28-digit figures the schedule prints, but in the loader's trade-id order while the schedule lists
+  them by acquisition date, and a `Decimal` sum that outgrows 28 digits rounds, so the order moved
+  the last digit. The realised side settles which figure is right: a Sell of everything allocates
+  the printed remainders and must state their exact sum as its `quantity` (`sell::db_upsert`), so
+  the old row was a quantity no Sell could state (`422`) — a defect, not just a test artefact. The
+  exact holding rounded once was rejected for the same reason. Applies to the portfolio overview
+  and unrealised gains (`quantity`, and `cgt_discount_eligible_quantity` over the eligible
+  parcels); the open-parcels schedule now sorts by the same shared key. The property also asserts
+  the overview's and unrealised rows' quantities equal the schedule's sum for every holding (in
+  both its `Exact` and rounded runs); `PROPTEST_CASES=4000` passes. `docs/API.md` *Fractional
+  entitlements* rewritten (it documented the disagreement as a limitation). Not fixed here: a
+  4000-case run of the **rounded** variant found an unrelated pre-existing failure (seed `b6b1a593…`,
+  a whole-unit Sell refused as off-grid after splits/bonus/transfer), not committed
 - [ ] **Two latent property failures found while closing "Recompute on write" (2026-10-25)**, both
   present before it: (1) `a_rounded_unrealised_gain_is_what_selling_everything_that_day_realises`
   can generate a rounded split that empties a parcel (five 1-unit Buys, a 1-for-2 split, rule

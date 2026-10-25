@@ -115,58 +115,44 @@ pub async fn db_unrealised_gains_on(
     // excluded and quantities come back in that date's unit basis.
     let open = open_parcels::load(conn, Some(as_of_date)).await?;
 
-    let mut holding_qty: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
-    let mut holding_cost_base: HashMap<(ListingId, HoldingAccountId), Decimal> = HashMap::new();
-    let mut holding_cgt_eligible_qty: HashMap<(ListingId, HoldingAccountId), Decimal> =
-        HashMap::new();
-
-    for p in &open {
-        let key = (p.parcel.listing_id, p.parcel.holding_account_id);
-        *holding_qty.entry(key).or_insert(Decimal::ZERO) += p.remaining_as_of.quantity();
-        *holding_cost_base.entry(key).or_insert(Decimal::ZERO) += p.cost_base.adjusted;
-
-        // CGT discount, on the shared ownership rule (`domain::cgt_discount`).
-        // A split does not restart the clock — the converted shares keep the
-        // original acquisition date (TD 2000/10) — and a scrip-for-scrip
-        // replacement parcel counts the combined holding period from its
-        // deemed acquisition date (`ParcelRow::acquired`).
-        if cgt_discount::discount_eligible(p.parcel.acquired(), as_of_date) {
-            *holding_cgt_eligible_qty.entry(key).or_insert(Decimal::ZERO) +=
-                p.remaining_as_of.quantity();
-        }
-    }
-
-    let mut result: Vec<UnrealisedGain> = holding_qty
+    // One row per (listing, account) holding, each figure summed over its
+    // parcels in the open-parcels schedule's order: the quantity is the sum of
+    // the parcels' printed remainders (`open_parcels::holding_quantity`), so
+    // the row agrees with the schedule beside it — and with the Sell of
+    // everything, whose allocations are those remainders — to the last digit,
+    // even when a non-terminating `Exact` ratio left each a 28-digit rounding.
+    let result: Vec<UnrealisedGain> = open_parcels::by_holding(&open)
         .into_iter()
-        .filter(|(_, qty)| *qty > Decimal::ZERO)
-        .map(|(key, qty)| {
-            let (listing_id, holding_account_id) = key;
-            let cost_base = holding_cost_base
-                .get(&key)
+        .map(|((listing_id, holding_account_id), parcels)| {
+            // CGT discount, on the shared ownership rule
+            // (`domain::cgt_discount`). A split does not restart the clock —
+            // the converted shares keep the original acquisition date
+            // (TD 2000/10) — and a scrip-for-scrip replacement parcel counts
+            // the combined holding period from its deemed acquisition date
+            // (`ParcelRow::acquired`).
+            let eligible: Vec<&open_parcels::OpenParcel> = parcels
+                .iter()
                 .copied()
-                .unwrap_or(Decimal::ZERO);
-            let cgt_eligible = holding_cgt_eligible_qty
-                .get(&key)
-                .copied()
-                .unwrap_or(Decimal::ZERO);
+                .filter(|p| cgt_discount::discount_eligible(p.parcel.acquired(), as_of_date))
+                .collect();
             UnrealisedGain {
                 listing_id,
                 holding_account_id,
-                quantity: qty,
-                total_cost_base: cost_base,
+                quantity: open_parcels::holding_quantity(&parcels),
+                total_cost_base: parcels.iter().map(|p| p.cost_base.adjusted).sum(),
                 current_price: None,
                 market_value: None,
                 unrealised_gain_loss: None,
-                cgt_discount_eligible_quantity: cgt_eligible,
+                cgt_discount_eligible_quantity: open_parcels::holding_quantity(&eligible),
                 price_as_of: None,
                 fx_provisional: false,
                 price_carried_forward: false,
                 price_unavailable: None,
             }
         })
+        .filter(|g| g.quantity > Decimal::ZERO)
         .collect();
 
-    result.sort_by_key(|h| (h.listing_id, h.holding_account_id));
     Ok(result)
 }
 
@@ -813,7 +799,7 @@ pub(crate) mod tests {
     pub(crate) mod properties {
         use super::*;
         use crate::infra::id::TradeId;
-        use crate::reports::{open_parcels, realised_gains};
+        use crate::reports::{open_parcels, portfolio, realised_gains};
         use chrono::{Datelike, Days, Weekday};
         use proptest::prelude::*;
         use serde_json::{Value, json};
@@ -1141,6 +1127,33 @@ pub(crate) mod tests {
                 .expect_status(StatusCode::OK);
             let rows: Vec<UnrealisedGain> = resp.json();
             let schedule = open(&pool, as_of).await;
+            // Every report printing a holding beside the schedule prints the
+            // same holdings, each quantity the sum of the schedule's rows for
+            // it as listed (`domain::open_parcels::holding_quantity`) — to the
+            // last digit, even where an `Exact` ratio left every remainder a
+            // 28-digit rounding of a non-terminating count.
+            let overview: Vec<portfolio::HoldingOverview> = app
+                .post("/portfolio/overview", &json!({ "as_of_date": as_of }))
+                .await
+                .expect_status(StatusCode::OK)
+                .json();
+            prop_assert_eq!(overview.len(), rows.len(), "overview holdings");
+            for (holding, row) in overview.iter().zip(&rows) {
+                let printed: Decimal = schedule
+                    .iter()
+                    .filter(|p| {
+                        p.listing_id == row.listing_id
+                            && p.holding_account_id == row.holding_account_id
+                    })
+                    .map(|p| p.remaining_quantity)
+                    .sum();
+                prop_assert_eq!(
+                    (holding.listing_id, holding.holding_account_id),
+                    (row.listing_id, row.holding_account_id)
+                );
+                prop_assert_eq!(holding.quantity, printed, "overview quantity");
+                prop_assert_eq!(row.quantity, printed, "unrealised quantity");
+            }
 
             for row in &rows {
                 let price = if row.listing_id == 1 {
