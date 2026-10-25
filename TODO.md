@@ -340,7 +340,7 @@ the precedent: the rule is on the plan, the grid on the holding.
   entitlements* rewritten (it documented the disagreement as a limitation). Not fixed here: a
   4000-case run of the **rounded** variant found an unrelated pre-existing failure (seed `b6b1a593…`,
   a whole-unit Sell refused as off-grid after splits/bonus/transfer), not committed
-- [ ] **Two latent property failures found while closing "Recompute on write" (2026-10-25)**, both
+- [ ] **Latent property failures found while closing "Recompute on write" (2026-10-25)**, all
   present before it: (1) `a_rounded_unrealised_gain_is_what_selling_everything_that_day_realises`
   can generate a rounded split that empties a parcel (five 1-unit Buys, a 1-for-2 split, rule
   `Down`) and fails on the documented `422` — the strategy, or the property, needs to treat that
@@ -348,7 +348,14 @@ the precedent: the rule is on the plan, the grid on the holding.
   non-terminating count such as 1000 × 5/3) into a listing with a grid, rounded `Up`, overshoots by
   a grid step when the 28-digit `units_before` rounds an exact count (1250) to 1250.000…0002
   (reachable before it through an unconstrained override entered ahead of the action) — the
-  rounded operations property's grid-change op is limited to a grid for now because of it
+  rounded operations property's grid-change op is limited to a grid for now because of it; (3)
+  found by a 4000-case run while closing the `Exact`-mode item (2026-10-25), pre-existing: the same
+  rounded property's final Sell is refused `422` because its quantity
+  `18955.999999999999936139394624` is finer than whole units — seed
+  `cc b6b1a59387705af5dbd77f936cc4a8b3cddcd3dce3fed641bc661fb5c54359d0`, shrinking to a Buy of 710,
+  Split 3:1, Split 2:1, Bonus 2-per-1, a Transfer of 11% to account 2, Split 3:1, `gap_days = 1`
+  (a rounded holding's printed quantity should lie on its grid); commit the seed to
+  `proptest-regressions/entities/corporate_action/tests/rounding.txt`, passing
 
 - [ ] **Register by record date for rounded scrip exchanges and demergers.** "Register by settlement
   date" (2026-10-25) covers splits and bonus issues; a rounded `ScripForScrip`/`Demerger` still
@@ -357,3 +364,13 @@ the precedent: the rule is on the plan, the grid on the holding.
   the same register rule — Buys settled on/before the record date, Sells settled after — and decide
   which parcels the operation consumes for a trade straddling it, consistent with the split/bonus
   treatment (`entitlement_rounding::round_registered_holding`); remove the limitation
+
+## `PUT /trades/:id` naming a missing listing answers 500 (found 2026-10-25)
+Seen while verifying the `Exact`-mode `unrealised_gains` fix: a `PUT /trades/:id` whose
+`listing_id` names no listing answers **500** (log: "no rows returned") instead of the `422` a
+reference to a missing record gets everywhere else (`ApiError::from(sqlx::Error)`'s foreign-key
+wording). Not investigated.
+- [ ] Find the read that runs before the insert's foreign-key check (likely a listing/market or
+  unit-scale lookup turning `RowNotFound` into `Internal`), answer `422` naming the missing listing,
+  and pin it with a test — then sweep the other write paths taking a `listing_id` (Sell, DRP,
+  operations, `holding_unit_scales`) for the same shape
