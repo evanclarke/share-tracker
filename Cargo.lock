@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "share-tracker"
-version = "0.33.0"
+version = "0.33.1"
 dependencies = [
  "argon2",
  "axum",
