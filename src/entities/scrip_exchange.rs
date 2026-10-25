@@ -380,6 +380,8 @@ async fn execute(
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
     let replacements = rollover::created_trades(&mut tx, replacement_ids).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(Exchange { sell, replacements })
 }

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4fc39d5213a743ad9037ab0d09f9607f0b1d505c6c3ef62cc8630589fa44bb71 # shrinks to units = [2307], unit_places = 1, new = 3, old = 6, scale = 1, rule = Nearest
+cc e46b523ecc06f98f20703efc4ed810247f198480cebdef532a28773eb710ecb8 # shrinks to units = [1], added = [], dropped = [false, false, false, false, false], changed = [None, None, None, None, None], new = 1, old = 2, scale = 0, rule = CashInLieu

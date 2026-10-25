@@ -13,6 +13,7 @@
 //! every holding account belongs to the same taxpayer, so taxpayer-level
 //! reports (tax summary, net capital gain) aggregate across all of them.
 
+use crate::entities::corporate_action;
 use crate::entities::holding_unit_scale::{self, Holding, ScaleError};
 use crate::infra::db;
 use crate::infra::db::write_tx;
@@ -192,6 +193,8 @@ async fn write(
     // by the id it actually holds.
     let assigned_id = id.unwrap_or_else(|| HoldingAccountId(result.last_insert_rowid()));
     let upserted = http::crud_upserted::<HoldingAccount, _>(&mut *tx, outcome, assigned_id).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(upserted)
 }

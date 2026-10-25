@@ -867,6 +867,12 @@ async fn write(
         });
     }
 
+    // A parcel or sale of a listing with a rounded share split or bonus issue
+    // moves the units that action converted: its stored counts are
+    // recomputed over the state this write leaves behind (and refused `422`
+    // where a later sale no longer fits them).
+    corporate_action::db_settle(&mut tx).await?;
+
     let upserted = http::crud_upserted::<Trade, _>(&mut *tx, outcome, assigned_id).await?;
     tx.commit().await?;
     Ok(upserted)
@@ -939,6 +945,7 @@ pub async fn db_delete(pool: &SqlitePool, id: TradeId) -> Result<DeleteOutcome, 
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
 }

@@ -1343,7 +1343,7 @@ mod tests {
     /// an omission. The snapshotted reports are the price-dependent three
     /// ([`SnapshotReport`]); a table only the live-computed CGT reports or the
     /// (un-snapshotted) tax summary read is therefore exempt.
-    const STALENESS_EXEMPT_TABLES: [(&str, &str); 24] = [
+    const STALENESS_EXEMPT_TABLES: [(&str, &str); 26] = [
         (
             "attachments",
             "documents are provenance, not financial facts; no snapshotted report reads them \
@@ -1394,13 +1394,17 @@ mod tests {
         (
             "holding_accounts",
             "identity only: an account names where a parcel sits and carries no figure a report \
-             computes with — its `unit_scale` decides only which quantity writes are accepted \
-             (0053_unit_scale.sql)",
+             computes with — its `unit_scale` decides which quantity writes are accepted and \
+             the grid a rounded split/bonus rounds onto, and a change of the latter is \
+             recomputed into `corporate_action_parcel_counts`, whose own triggers stale what \
+             moves (0053_unit_scale.sql, 0057_rounding_recompute.sql)",
         ),
         (
             "holding_unit_scales",
-            "a per-listing unit-scale override decides only which quantity writes are accepted; \
-             it changes no stored figure and no report reads it (0053_unit_scale.sql)",
+            "a per-listing unit-scale override decides which quantity writes are accepted and \
+             the grid a rounded split/bonus rounds onto; no report reads it, and a change of the \
+             grid is recomputed into `corporate_action_parcel_counts`, whose own triggers stale \
+             what moves (0053_unit_scale.sql, 0057_rounding_recompute.sql)",
         ),
         (
             "inheritances",
@@ -1461,6 +1465,18 @@ mod tests {
             "a rights sale changes no holding quantity and no parcel cost base, so no \
              snapshotted report reads it — its effect is confined to the live-computed CGT \
              reports (0006_rights_sales.sql)",
+        ),
+        (
+            "rounding_dirty",
+            "the listings a write transaction has yet to recompute rounded entitlements for: \
+             empty at every commit (its deferred foreign key fails any commit that leaves a \
+             row), and the recompute's own writes to `corporate_action_parcel_counts` stale \
+             what they move (0057_rounding_recompute.sql)",
+        ),
+        (
+            "rounding_never",
+            "the parent `rounding_dirty`'s deferred foreign key names and no row can ever \
+             reference — its CHECK refuses every insert (0057_rounding_recompute.sql)",
         ),
         (
             "row_history",

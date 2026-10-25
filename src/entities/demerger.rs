@@ -432,6 +432,8 @@ async fn execute(
         .ok_or(sqlx::Error::RowNotFound)?;
     let head_replacements = rollover::created_trades(&mut tx, head_ids).await?;
     let demerged_replacements = rollover::created_trades(&mut tx, demerged_ids).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(Demerge {
         sell,

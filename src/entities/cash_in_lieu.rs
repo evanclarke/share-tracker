@@ -278,6 +278,8 @@ async fn execute(
     let sell = trade::db_get(&mut *tx, id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(sell)
 }
@@ -430,6 +432,58 @@ mod tests {
         )
         .await
         .expect_status(StatusCode::CREATED);
+    }
+
+    /// A paid fraction stands with the parcels behind it. A Buy entered later
+    /// but dated before the action recomputes the holding (0057): one of 30
+    /// units adds an exact 10, so the holding's fraction and the parcel
+    /// carrying it are unchanged and the write lands; one of a single unit
+    /// moves the fraction (a third more), which the recorded payment no longer
+    /// sells — refused `422` naming the Sell to undo first, nothing stored.
+    #[tokio::test]
+    async fn a_back_dated_parcel_that_moves_a_paid_fraction_is_refused() {
+        let pool = test_pool().await;
+        let app = holding(&pool).await;
+        app.put_ok("/corporate_actions/7", &consolidation("CashInLieu"))
+            .await;
+        let sell: Value = app
+            .post("/corporate_actions/7/cash_in_lieu", &payment("2.00"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        let buy = |qty: &str| {
+            json!({
+                "trade_type": "Buy", "date": "2024-05-01", "listing_id": 1,
+                "average_price": "3", "quantity": qty, "currency": "AUD", "brokerage": "0",
+                "brokerage_currency": "AUD", "fx_rate": "1",
+            })
+        };
+        let kept: Value = app
+            .post("/trades", &buy("30"))
+            .await
+            .expect_status(StatusCode::CREATED)
+            .json();
+        assert_eq!(
+            remaining(&pool, ymd(2024, 6, 20)).await,
+            [
+                (1, 1, dec("17")),
+                (1, 2, dec("16")),
+                (1, kept["id"].as_i64().unwrap(), dec("10"))
+            ]
+        );
+
+        let resp = app.post("/trades", &buy("1")).await;
+        let (status, body) = resp.status_and_body();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body.contains(&format!("cash-in-lieu Sell #{}", sell["id"])),
+            "{body}"
+        );
+        let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(trades, 4);
     }
 
     /// What is not a cash-in-lieu payment is refused before anything is

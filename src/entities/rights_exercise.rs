@@ -545,6 +545,8 @@ async fn execute(
     let trade = trade::db_get(&mut *tx, new_id)
         .await?
         .ok_or_else(|| ExerciseError::Db(sqlx::Error::RowNotFound))?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(trade)
 }

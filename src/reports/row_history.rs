@@ -1564,7 +1564,10 @@ mod tests {
             (
                 "entitlement_overrides",
                 Some(
-                    "INSERT INTO corporate_actions (id, action_type, listing_id, date, split_new_units, split_old_units, fraction_rule) VALUES (22, 'ShareSplit', 1, '2024-07-01', '1', '3', 'Down'); \
+                    // `Exact`, so no write here marks the listing for a
+                    // rounding recompute (0057) these bare statements could
+                    // not settle; the audit trigger pair is all this tests.
+                    "INSERT INTO corporate_actions (id, action_type, listing_id, date, split_new_units, split_old_units, fraction_rule) VALUES (22, 'ShareSplit', 1, '2024-07-01', '1', '3', 'Exact'); \
                      INSERT INTO entitlement_overrides (id, corporate_action_id, holding_account_id, units_received) VALUES (22, 22, 1, '33')",
                 ),
                 "id",

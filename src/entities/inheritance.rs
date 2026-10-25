@@ -873,6 +873,8 @@ async fn write(
     }
 
     let upserted = http::crud_upserted::<Inheritance, _>(&mut *tx, outcome, assigned_id).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(upserted)
 }
@@ -929,6 +931,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
         .execute(&mut *tx)
         .await?;
 
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
 }

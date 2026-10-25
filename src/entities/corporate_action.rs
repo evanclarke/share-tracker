@@ -148,17 +148,14 @@ pub use crate::domain::adjustments::{
 /// `utoipa::IntoParams` so the OpenAPI document's query parameters come from
 /// what axum decodes rather than from prose.
 pub use db::{
-    CorporateActionListQuery, allocations_fit_parcels, db_get_tx, db_operation_ran,
-    rebased_quantity_beyond_range,
+    CorporateActionListQuery, db_get_tx, db_operation_ran, rebased_quantity_beyond_range,
 };
 pub use http::router;
 pub use model::{
     ActionKind, CorporateAction, CorporateActionBody, FractionRule,
     NOTHING_PAID_FOR_NON_RENOUNCEABLE_RIGHTS, WorthlessEvent,
 };
-pub use rounding::{
-    Converted, RoundError, db_insert_count, db_recompute_listing, db_round_replacements,
-};
+pub use rounding::{Converted, RoundError, db_insert_count, db_round_replacements, db_settle};
 
 /// Referenced by name only from other modules' tests (production code calls
 /// these through the HTTP routes in `http.rs`, not this re-export), so the

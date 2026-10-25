@@ -2,14 +2,29 @@
 //! issues (`corporate_action_parcel_counts`, migration 0055): computed per
 //! holding by `domain::entitlement_rounding` and written inside the write
 //! transaction of whatever changed them — the action itself (its ratio, rule,
-//! date or listing; a new action; a deletion) or a "units received" override
-//! ([`crate::entities::entitlement_override`]).
+//! date or listing; a new action; a deletion), a "units received" override
+//! ([`crate::entities::entitlement_override`]), or any trade, sale, allocation
+//! or unit-scale write the counts were computed from.
+//!
+//! **Settling** ([`db_settle`]) is how every such write gets here. Migration
+//! 0057's triggers mark the written fact's listing in `rounding_dirty`, whose
+//! rows violate a deferred foreign key, so a transaction that wrote one cannot
+//! commit until `db_settle` has recomputed the listing and drained the row —
+//! a write path that forgets to settle fails at COMMIT instead of storing
+//! counts computed from facts that have since moved. Settling also runs the
+//! checks the recomputed counts must pass (representability, every sale still
+//! fitting its parcel, every recorded cash-in-lieu payment still selling the
+//! fraction it was paid for) and answers a failure `422` through
+//! [`crate::infra::http::Refusal`].
 //!
 //! The whole listing is recomputed in date order, because each action's
 //! "units before" are re-based through every earlier one — an earlier
-//! rounded action by the counts this pass has just stored for it. The rows
-//! are then reconciled with what is stored: a row that would not change is
-//! not rewritten, so recomputing after an unrelated edit writes nothing.
+//! rounded action by the counts this pass has just stored for it. Each
+//! holding's distribution is **stable**: the counts already stored are passed
+//! back as priors, and `round_holding` keeps every one the new total allows
+//! (a registry does not redistribute a holding it has already rounded). The
+//! rows are then reconciled with what is stored: a row that would not change
+//! is not rewritten, so recomputing after an unrelated edit writes nothing.
 //!
 //! The units an action converts are those its own re-base converts: the
 //! parcels acquired (traded) before its date, less the sales dated before it
@@ -18,18 +33,19 @@
 //! (`domain::adjustments::split_ratio`). A share split or bonus issue carries
 //! no record date of its own here, and its `date` is what decides which basis
 //! a trade's quantity is in, so that is also what decides which units the
-//! registry rounded; the trades it counted are frozen while it stands (0055's
-//! guard triggers).
+//! registry rounded.
 
 use crate::domain::adjustments::{
     AcquiredUnits, SplitEvent, StoredCount, UnitsAt, sold_in_acquired_units,
     split_adjusted_quantity,
 };
-use crate::domain::entitlement_rounding::{self, ParcelBefore, ParcelCount, RoundingError};
+use crate::domain::cost_base::UnrepresentableQuantity;
+use crate::domain::entitlement_rounding::{self, ParcelBefore, ParcelCount, Prior, RoundingError};
 use crate::domain::open_parcels;
 use crate::entities::corporate_action::model::FractionRule;
 use crate::entities::holding_unit_scale;
 use crate::infra::decimal::{Money, parse_dec};
+use crate::infra::http::Refusal;
 use crate::infra::id::{HoldingAccountId, ListingId, TradeId};
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
@@ -103,9 +119,190 @@ struct Parcel {
     account: HoldingAccountId,
 }
 
+/// Why a write's recomputed counts could not stand. Each is answered `422`
+/// (through [`Refusal`]) by [`db_settle`].
+#[derive(thiserror::Error, Debug)]
+pub enum SettleError {
+    /// A holding cannot be rounded (a parcel left with no units, or an
+    /// override that does not fit its grid).
+    #[error("a rounded holding cannot be stored: {0}")]
+    Rounding(#[source] RoundError),
+    /// The listing's split stream re-bases a quantity past `Decimal`'s range.
+    #[error("a rebased quantity is unrepresentable: {0}")]
+    Unrepresentable(#[source] UnrepresentableQuantity),
+    /// The recomputed counts leave a sale allocating more units than its
+    /// parcel now holds.
+    #[error("a sale no longer fits the recomputed count of its parcel")]
+    AllocationsExceedParcel,
+    /// A recorded cash-in-lieu payment no longer sells the fraction its
+    /// holding now carries (the fraction, or the parcel carrying it, moved).
+    #[error("cash-in-lieu Sell #{sell} no longer sells corporate action #{action_id}'s fraction")]
+    CashInLieuMoved {
+        sell: TradeId,
+        action_id: i64,
+        account: HoldingAccountId,
+    },
+}
+
+impl SettleError {
+    /// The user-facing `422` body.
+    fn body(&self) -> String {
+        match self {
+            SettleError::Rounding(e) => e.detail().unwrap_or_else(|| e.to_string()),
+            SettleError::Unrepresentable(e) => e.message(),
+            SettleError::AllocationsExceedParcel => {
+                "this write changes the units a rounded share split or bonus issue of the \
+                 listing converted, and the counts recomputed for it leave a sale allocating \
+                 more units than the parcel it draws on now holds — correct or remove those \
+                 allocations first"
+                    .to_owned()
+            }
+            SettleError::CashInLieuMoved {
+                sell,
+                action_id,
+                account,
+            } => format!(
+                "this write changes the fraction corporate action #{action_id} left holding \
+                 account {account}, which the cash-in-lieu Sell #{sell} has already sold — \
+                 delete that Sell (DELETE /sells/{sell}), make this change, then record the \
+                 payment again"
+            ),
+        }
+    }
+}
+
+impl From<SettleError> for sqlx::Error {
+    fn from(e: SettleError) -> Self {
+        match e {
+            SettleError::Rounding(RoundError::Db(err)) => err,
+            refused @ (SettleError::Rounding(RoundError::Holding { .. })
+            | SettleError::Unrepresentable(_)
+            | SettleError::AllocationsExceedParcel
+            | SettleError::CashInLieuMoved { .. }) => Refusal::new(refused.body(), refused).into(),
+        }
+    }
+}
+
+/// Recompute every listing the open write transaction has marked dirty
+/// (`rounding_dirty`, migration 0057), check the state it leaves, and clear
+/// the marks — called by every write path that can touch a fact a rounded
+/// share split's or bonus issue's stored counts are computed from, after its
+/// own writes and before it commits (or rolls back a `?dry_run=true`
+/// preview). A transaction that leaves a mark behind cannot commit.
+///
+/// A refusal is a [`Refusal`] carried in the `sqlx::Error`, so `?` delivers
+/// it to the handler as the `422` it is.
+pub async fn db_settle(conn: &mut sqlx::SqliteConnection) -> Result<(), sqlx::Error> {
+    let dirty: Vec<ListingId> =
+        sqlx::query_scalar("SELECT DISTINCT listing_id FROM rounding_dirty ORDER BY listing_id")
+            .fetch_all(&mut *conn)
+            .await?;
+    for listing_id in dirty {
+        settle_listing(&mut *conn, listing_id).await?;
+    }
+    sqlx::query("DELETE FROM rounding_dirty")
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// One dirty listing: recompute, then the checks the recomputed counts must
+/// pass.
+async fn settle_listing(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: ListingId,
+) -> Result<(), SettleError> {
+    db_recompute_listing(&mut *conn, listing_id)
+        .await
+        .map_err(SettleError::Rounding)?;
+    let db = |e: sqlx::Error| SettleError::Rounding(RoundError::Db(e));
+    // Representability first: `allocations_fit_parcels` re-bases each
+    // allocation itself, so an unrepresentable one overflows inside that check
+    // before it can answer.
+    if let Some(beyond) = super::db::rebased_quantity_beyond_range(&mut *conn, listing_id)
+        .await
+        .map_err(db)?
+    {
+        return Err(SettleError::Unrepresentable(beyond));
+    }
+    if !super::db::allocations_fit_parcels(&mut *conn, listing_id)
+        .await
+        .map_err(db)?
+    {
+        return Err(SettleError::AllocationsExceedParcel);
+    }
+    if let Some((sell, action_id, account)) =
+        db_moved_payment(&mut *conn, listing_id).await.map_err(db)?
+    {
+        return Err(SettleError::CashInLieuMoved {
+            sell,
+            action_id,
+            account,
+        });
+    }
+    Ok(())
+}
+
+/// The first cash-in-lieu Sell of one of the listing's split/bonus actions
+/// that no longer sells exactly the fraction its holding carries — a
+/// different parcel, or a different quantity once re-based to the payment
+/// date — as (Sell, action, account).
+async fn db_moved_payment(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: ListingId,
+) -> Result<Option<(TradeId, i64, HoldingAccountId)>, sqlx::Error> {
+    let payments = sqlx::query(
+        "SELECT s.id, s.date AS paid, s.holding_account_id, a.id AS action_id, \
+                a.date AS action_date, pa.purchase_trade_id, pa.quantity_allocated \
+         FROM trades s \
+         JOIN corporate_actions a ON a.id = s.cash_in_lieu_action_id \
+         JOIN parcel_allocations pa ON pa.sale_trade_id = s.id \
+         WHERE a.listing_id = ? \
+           AND (a.action_type = 'ShareSplit' OR a.action_type = 'BonusIssue') \
+         ORDER BY s.id",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if payments.is_empty() {
+        return Ok(None);
+    }
+    let splits = super::db_splits_for_listing(&mut *conn, listing_id).await?;
+    for row in &payments {
+        let sell: TradeId = row.try_get("id")?;
+        let action_id: i64 = row.try_get("action_id")?;
+        let account: HoldingAccountId = row.try_get("holding_account_id")?;
+        let parcel: TradeId = row.try_get("purchase_trade_id")?;
+        let sold = parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?;
+        let carried: Option<String> = sqlx::query_scalar(
+            "SELECT c.in_lieu_units FROM corporate_action_parcel_counts c \
+             WHERE c.corporate_action_id = ? AND c.trade_id = ?",
+        )
+        .bind(action_id)
+        .bind(parcel)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let carried = carried
+            .map(|c| parse_dec("in_lieu_units", &c))
+            .transpose()?
+            .unwrap_or(Decimal::ZERO);
+        let fits = carried > Decimal::ZERO
+            && UnitsAt::new(carried, row.try_get("action_date")?)
+                .rebased(&splits.for_parcel(parcel), Some(row.try_get("paid")?))
+                .quantity()
+                == sold;
+        if !fits {
+            return Ok(Some((sell, action_id, account)));
+        }
+    }
+    Ok(None)
+}
+
 /// Recompute and store the per-parcel counts of every rounded share split and
-/// bonus issue of `listing_id`, on the caller's write transaction.
-pub async fn db_recompute_listing(
+/// bonus issue of `listing_id`, on the caller's write transaction — keeping,
+/// holding by holding, every count already stored that the new total allows.
+/// Reached through [`db_settle`].
+async fn db_recompute_listing(
     conn: &mut sqlx::SqliteConnection,
     listing_id: ListingId,
 ) -> Result<(), RoundError> {
@@ -151,6 +348,7 @@ pub async fn db_recompute_listing(
         let parcels = db_parcels(&mut *conn, listing_id).await?;
         let sales = open_parcels::db_sales_by_parcel(&mut *conn, Some(listing_id)).await?;
         let overrides = db_overrides(&mut *conn, listing_id).await?;
+        let priors = db_priors(&mut *conn, listing_id).await?;
         let mut scales: HashMap<HoldingAccountId, Option<u32>> = HashMap::new();
         // Each rounded action's stored counts, as computed so far in this
         // pass — what re-bases a parcel across it for the actions after it.
@@ -196,6 +394,7 @@ pub async fn db_recompute_listing(
                         trade_id: parcel.id,
                         acquired: parcel.date,
                         units,
+                        prior: priors.get(&(action.id, parcel.id)).copied(),
                     });
             }
 
@@ -362,6 +561,8 @@ pub async fn db_round_replacements(
             trade_id: p.parcel,
             acquired: p.acquired,
             units: p.units,
+            // The operation runs once, over parcels nothing has rounded yet.
+            prior: None,
         });
     }
     let overrides: HashMap<HoldingAccountId, Decimal> = sqlx::query(
@@ -451,6 +652,41 @@ pub(crate) async fn db_overrides(
                     row.try_get("holding_account_id")?,
                 ),
                 parse_dec("units_received", row.try_get("units_received")?)?,
+            ))
+        })
+        .collect()
+}
+
+/// The counts stored for the listing's actions by the last recompute, by
+/// (action, parcel): the priors the stable distribution keeps.
+async fn db_priors(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: ListingId,
+) -> Result<HashMap<(i64, TradeId), Prior>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT c.corporate_action_id, c.trade_id, c.units_before, c.units_after, \
+                c.in_lieu_units \
+         FROM corporate_action_parcel_counts c \
+         JOIN corporate_actions a ON a.id = c.corporate_action_id \
+         WHERE a.listing_id = ? \
+           AND (a.action_type = 'ShareSplit' OR a.action_type = 'BonusIssue')",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let after = parse_dec("units_after", row.try_get("units_after")?)?;
+            let in_lieu = parse_dec("in_lieu_units", row.try_get("in_lieu_units")?)?;
+            Ok((
+                (
+                    row.try_get("corporate_action_id")?,
+                    row.try_get("trade_id")?,
+                ),
+                Prior {
+                    before: parse_dec("units_before", row.try_get("units_before")?)?,
+                    on_grid: after - in_lieu,
+                },
             ))
         })
         .collect()

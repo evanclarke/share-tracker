@@ -339,6 +339,8 @@ async fn execute(
         ),
         None => None,
     };
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(Participation { trade, income })
 }

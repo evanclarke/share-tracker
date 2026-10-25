@@ -130,7 +130,7 @@ pub async fn db_upsert(
 ) -> Result<(), UpsertError> {
     use crate::entities::corporate_action;
     use crate::entities::trade::TradeType;
-    use crate::infra::db::read_tx;
+    use crate::infra::db::{read_tx, write_tx};
     use chrono::NaiveDate;
 
     let sale_row = sqlx::query("SELECT trade_type, date, quantity FROM trades WHERE id = ?")
@@ -211,6 +211,7 @@ pub async fn db_upsert(
         return Err(UpsertError::SaleQuantityExceeded);
     }
 
+    let mut tx = write_tx(pool).await?;
     sqlx::query(
         "INSERT INTO parcel_allocations (id, sale_trade_id, purchase_trade_id, quantity_allocated) \
          VALUES (?, ?, ?, ?) \
@@ -223,8 +224,11 @@ pub async fn db_upsert(
     .bind(allocation.sale_trade_id)
     .bind(allocation.purchase_trade_id)
     .bind(Money(allocation.quantity_allocated))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    // A draw on a parcel before a rounded split/bonus moves its counts (0057).
+    corporate_action::db_settle(&mut tx).await?;
+    tx.commit().await?;
     Ok(())
 }
 

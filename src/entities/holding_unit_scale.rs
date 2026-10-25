@@ -41,12 +41,13 @@
 //! stored figure and no report reads it — it only decides which writes are
 //! accepted (see the migration's header).
 
+use crate::entities::corporate_action;
 use crate::infra::db::{self, write_tx};
 use crate::infra::decimal::parse_dec;
 use crate::infra::extract::Json;
 use crate::infra::http::{self, ApiError, CrudEntity, NoFilter, UpsertResponse, Upserted};
 use crate::infra::id::{HoldingAccountId, ListingId};
-use crate::infra::respond::Created;
+use crate::infra::respond::{Created, NoContent};
 use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -111,13 +112,38 @@ http::crud_get_route!(
     "/holding_unit_scales/{id}",
     "Fetch one unit-scale override, or 404."
 );
-http::crud_delete_route!(
-    delete_one,
-    HoldingUnitScale,
-    i64,
-    "/holding_unit_scales/{id}",
-    "Delete the unit-scale override; the holding falls back to its account's scale."
-);
+
+/// `DELETE /holding_unit_scales/{id}` — hand-written rather than
+/// `crud_delete_route!`: the holding's grid changes, so a rounded share split's
+/// or bonus issue's stored counts for it are recomputed in the delete's own
+/// transaction (`corporate_action::db_settle`).
+#[utoipa::path(
+    delete,
+    path = "/holding_unit_scales/{id}",
+    summary = "Delete the unit-scale override; the holding falls back to its account's scale."
+)]
+async fn delete_one(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<i64>,
+) -> Result<NoContent, ApiError> {
+    let found = db_delete(&pool, id).await?;
+    http::deleted(found, HoldingUnitScale::NOUN)
+}
+
+/// Delete the override at `id`, `Ok(false)` when there is none, recomputing
+/// what its grid rounded.
+pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, sqlx::Error> {
+    let mut tx = write_tx(pool).await?;
+    let deleted = sqlx::query("DELETE FROM holding_unit_scales WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        > 0;
+    corporate_action::db_settle(&mut tx).await?;
+    tx.commit().await?;
+    Ok(deleted)
+}
 
 pub fn router() -> OpenApiRouter<SqlitePool> {
     OpenApiRouter::new()
@@ -441,6 +467,8 @@ async fn write(
     .await?;
     let assigned = id.unwrap_or_else(|| result.last_insert_rowid());
     let upserted = http::crud_upserted::<HoldingUnitScale, _>(&mut *tx, outcome, assigned).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(upserted)
 }

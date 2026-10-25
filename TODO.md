@@ -249,7 +249,7 @@ the precedent: the rule is on the plan, the grid on the holding.
     counts do not terminate cannot migrate to any rule without moving history (so the other three
     pieces stay reachable for them), and `Exact` is the only valve for 0055's freeze guards. The
     items below replace the valve and close the remaining gaps instead
-- [ ] **Recompute on write instead of freezing.** Replace 0055's freeze guards with recomputation: a
+- [x] **Recompute on write instead of freezing.** Replace 0055's freeze guards with recomputation: a
   trade/sale/allocation/settlement-date/unit-scale write that touches a holding before a rounded
   split/bonus recomputes that listing's stored counts inside its own `write_tx` (the existing
   `db_recompute_listing`, then the representability and `allocations_fit_parcels` checks), refusing
@@ -264,6 +264,29 @@ the precedent: the rule is on the plan, the grid on the holding.
   operations property gains back-dated trade/sale writes and scale changes, with preview, undo and
   the stored-count invariants holding after each, and no existing parcel's count moving when a
   back-dated parcel is added unless the total forces it
+  *Done 2026-10-25 (migration 0057, `corporate_action::rounding::db_settle`).* 0055's ten guards
+  are dropped. **Structural:** 0057's triggers mark a listing with a non-`Exact` split/bonus in
+  `rounding_dirty` on any trade (listing/date/settlement date/quantity/type/account),
+  allocation, unit-scale, override or action write; each row violates a deferred FK to the
+  never-populated `rounding_never`, so COMMIT (or an autocommit statement) fails until `db_settle`
+  recomputes and drains it — verified by a test that commits unsettled. `db_settle` is called on
+  every write path (trade upsert/delete, Sell write/delete, transfer and its delete, DRP
+  reinvest/undo, ESS vest/statement delete, inheritance write/delete, rights exercise, exchange,
+  demerger, buy-back, worthless, cash in lieu, holding-account and unit-scale writes — the
+  unit-scale delete is now hand-written — overrides, action upsert/delete, the
+  `settlement-recompute` job) and carries its `422`s back as an `infra::http::Refusal` inside
+  `sqlx::Error`. **Stable distribution** (`round_holding`'s `Prior`): a stored count is kept while
+  it is still valid for its parcel (on the grid, its share's floor or one step over); kept counts
+  are released — changed parcels first, then latest acquisition, then higher trade id — only while
+  the free parcels cannot absorb the total within a step each (zero floors taking one). Every count
+  thus stays within a step of its exact share (the old invariant still holds); the new invariant is
+  that an unchanged parcel's count moves only when keeping all of them is infeasible. An action's
+  own term edit and an override write distribute afresh. Remaining `422`s: a later sale no longer
+  fitting, a paid cash-in-lieu fraction moved (names the Sell), an emptied parcel, an override off
+  the grid. Properties: `entitlement_rounding`'s recompute property, and the rounded operations
+  property with back-dated Buys/Sells and grid changes (stability after every write and undo; an
+  undo is exact when the write moved no count, else restores every holding's parcels, units and
+  total — stability makes the rest history-dependent, a Known limitation)
 - [ ] **Register by settlement date.** Item 3 rounds the units held by **trade** date before a
   split/bonus's date (a Known limitation), against Financial correctness's rule that the register is
   the settlement date. Round the units **registered** (Buys settled on/before, Sells settled after,
@@ -277,3 +300,13 @@ the precedent: the rule is on the plan, the grid on the holding.
   figures carry, or make the holding row the sum of the printed parcel remainders so the two agree
   by construction (preferred if it is what a reader of the report expects) — and commit both seeds
   to `proptest-regressions/reports/unrealised_gains.txt`, passing
+- [ ] **Two latent property failures found while closing "Recompute on write" (2026-10-25)**, both
+  present before it: (1) `a_rounded_unrealised_gain_is_what_selling_everything_that_day_realises`
+  can generate a rounded split that empties a parcel (five 1-unit Buys, a 1-for-2 split, rule
+  `Down`) and fails on the documented `422` — the strategy, or the property, needs to treat that
+  refusal as a legitimate outcome; (2) an exchange/demerger of a holding left exact (no grid, so a
+  non-terminating count such as 1000 × 5/3) into a listing with a grid, rounded `Up`, overshoots by
+  a grid step when the 28-digit `units_before` rounds an exact count (1250) to 1250.000…0002
+  (reachable before it through an unconstrained override entered ahead of the action) — the
+  rounded operations property's grid-change op is limited to a grid for now because of it
+

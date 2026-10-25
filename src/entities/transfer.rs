@@ -36,7 +36,7 @@
 use crate::domain::cost_base::{ParcelRow, UnrepresentableQuantity};
 use crate::domain::whole_holding;
 use crate::domain::whole_holding::BackDatedParcel;
-use crate::entities::corporate_action::{UnitsAt, checked_as_acquired_quantity};
+use crate::entities::corporate_action::{self, UnitsAt, checked_as_acquired_quantity};
 use crate::entities::holding_unit_scale::{self, TooFine};
 use crate::entities::rollover;
 use crate::entities::sell::{self, AllocationInput};
@@ -610,6 +610,8 @@ async fn write(
         None => None,
     };
     let transfer_ins = rollover::created_trades(&mut tx, transfer_in_ids).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(TransferGroup {
         transfer,
@@ -862,6 +864,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
         .execute(&mut *tx)
         .await?;
 
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
 }

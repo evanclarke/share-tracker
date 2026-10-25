@@ -4540,9 +4540,9 @@ fn deletes_blocked_by_a_dependant_documented() {
 /// storing each parcel's count, `Exact` keeping the exact fraction, the
 /// cash-in-lieu disposal — is pinned by tests in `domain::entitlement_rounding`,
 /// `corporate_action::tests::rounding` and `entities::cash_in_lieu`; what needed
-/// writing down is how each rule applies, the distribution rule, what freezes
-/// behind a rounded action, and the worked figures a reader can check their own
-/// entry against.
+/// writing down is how each rule applies, the distribution rule, how a write
+/// behind a rounded action recomputes it, and the worked figures a reader can
+/// check their own entry against.
 #[test]
 fn fractional_entitlements_documented() {
     assert!(API_MD.contains("### Fractional entitlements"));
@@ -4569,7 +4569,22 @@ fn fractional_entitlements_documented() {
     assert!(
         API_MD.contains("A holding whose `unit_scale` is `null` has **no grid to round onto**")
     );
-    assert!(API_MD.contains("**The facts a stored count rests on are frozen while it stands.**"));
+    // A write behind a rounded action recomputes it, stably (TODO "Recompute
+    // on write instead of freezing"): the rule, the TODO's own worked case,
+    // the refusals that remain, the structural mark, and the limitation the
+    // stability leaves.
+    assert!(API_MD.contains(
+        "**A write behind a rounded action recomputes it — and a registry does not \
+         redistribute.**"
+    ));
+    assert!(API_MD.contains("the recompute keeps A at 34 and gives B 16"));
+    assert!(API_MD.contains("**later sale allocating more units than its parcel now holds**"));
+    assert!(API_MD.contains("a transaction that has not recomputed it cannot commit"));
+    assert!(!API_MD.contains("set that action's fraction_rule to Exact, make this change"));
+    assert!(API_MD.contains(
+        "**A rounded holding's stored counts depend on the order its facts were entered**"
+    ));
+    assert!(SCHEMA_MD.contains("rounding_dirty               The listings an open write"));
     assert!(API_MD.contains("**units-received override**"));
     // Cash in lieu is the operation's disposal of the fraction.
     assert!(API_MD.contains("### Paying cash in lieu"));

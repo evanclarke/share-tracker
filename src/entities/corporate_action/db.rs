@@ -5,7 +5,7 @@
 //! reduce parcels at read time instead of creating trades ([`DeleteError`]).
 
 use super::model::{ActionKind, CorporateAction};
-use super::rounding::{self, RoundError};
+use super::rounding;
 use crate::domain::adjustments::{
     AcquiredUnits, SplitRatio, UnitsAt, db_payment_currency_conflict, db_splits_for_listing,
     sold_in_acquired_units,
@@ -185,21 +185,6 @@ pub enum WriteError {
     /// Mapped to `422`.
     #[error("a return of capital does not apply to an AMIT")]
     ReturnOfCapitalOnAmit,
-    /// A rounded share split / bonus issue of the listing cannot store its
-    /// per-holding counts over the state the write leaves behind — a holding
-    /// too small to give each parcel a unit on its grid, or a units-received
-    /// override that does not fit it (`rounding::RoundError`). Mapped to `422`.
-    #[error("the listing's rounded entitlements cannot be stored: {0}")]
-    Rounding(#[source] RoundError),
-}
-
-impl From<RoundError> for WriteError {
-    fn from(e: RoundError) -> Self {
-        match e {
-            RoundError::Db(err) => WriteError::Db(err),
-            other @ RoundError::Holding { .. } => WriteError::Rounding(other),
-        }
-    }
 }
 
 impl From<WriteError> for ApiError {
@@ -259,11 +244,6 @@ impl From<WriteError> for ApiError {
                  AMMA statement's cost_base_adjustment, entered as AMIT adjustments (CGT event \
                  E10), not an E4 return of capital",
             ),
-            // A holding the rounding cannot store → 422 naming it.
-            WriteError::Rounding(e) => match e.detail() {
-                Some(detail) => ApiError::Unprocessable(detail),
-                None => ApiError::internal(e),
-            },
             // Unknown listing/currency FK or enum CHECK violation → 422.
             WriteError::Db(err) => err.into(),
             // A committed create whose row could not be read back: a real
@@ -903,10 +883,18 @@ async fn write(
     // A rounded split/bonus stores each parcel's count, computed from the
     // listing's whole history up to it — so every write that can move one
     // (this action's terms, its date, a new action before it, a move to
-    // another listing) recomputes them, before the checks below read them.
-    for &listing_id in &listings {
-        rounding::db_recompute_listing(&mut tx, listing_id).await?;
+    // another listing) recomputes them (0057's triggers marked the listings),
+    // before the checks below read them. An edit of this action's own terms
+    // redistributes it afresh: its stored counts were the old terms', so none
+    // is a count the new terms' registry put on the register — dropped here
+    // so the recompute keeps none of them.
+    if let Some(stored) = stored.as_ref().filter(|stored| *stored != action) {
+        sqlx::query("DELETE FROM corporate_action_parcel_counts WHERE corporate_action_id = ?")
+            .bind(stored.id)
+            .execute(&mut *tx)
+            .await?;
     }
+    rounding::db_settle(&mut tx).await?;
     for &listing_id in &listings {
         // Representability first: `allocations_fit_parcels` re-bases each
         // allocation itself, so an unrepresentable one overflows *inside* that
@@ -1008,19 +996,6 @@ pub enum DeleteError {
     /// delete answers with. Mapped to `422`.
     #[error("this corporate action is still referenced ({0})")]
     StillReferenced(String),
-    /// The listing's later rounded actions cannot store their counts once
-    /// this one is gone. Mapped to `422`.
-    #[error("the listing's rounded entitlements cannot be stored: {0}")]
-    Rounding(#[source] RoundError),
-}
-
-impl From<RoundError> for DeleteError {
-    fn from(e: RoundError) -> Self {
-        match e {
-            RoundError::Db(err) => DeleteError::Db(err),
-            other @ RoundError::Holding { .. } => DeleteError::Rounding(other),
-        }
-    }
 }
 
 impl From<DeleteError> for ApiError {
@@ -1037,10 +1012,6 @@ impl From<DeleteError> for ApiError {
                  excess (delete the parcels first)",
             ),
             DeleteError::StillReferenced(body) => ApiError::Unprocessable(body),
-            DeleteError::Rounding(e) => match e.detail() {
-                Some(detail) => ApiError::Unprocessable(detail),
-                None => ApiError::internal(e),
-            },
             DeleteError::Db(err) => err.into(),
         }
     }
@@ -1138,7 +1109,7 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, DeleteError> 
     // The action's own stored counts went with it (ON DELETE CASCADE); a later
     // rounded action re-based its "units before" through it, so the listing is
     // recomputed.
-    rounding::db_recompute_listing(&mut tx, action.listing_id).await?;
+    rounding::db_settle(&mut tx).await?;
 
     tx.commit().await?;
     Ok(true)

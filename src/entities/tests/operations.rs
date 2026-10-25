@@ -72,6 +72,25 @@ enum Op {
         account: i64,
         cents: i64,
     },
+    /// A Buy entered now but dated before every corporate action — behind
+    /// whatever has been rounded since.
+    BackBuy {
+        account: i64,
+        units: i64,
+        cents: i64,
+    },
+    /// A Sell dated before every corporate action, of `pct`% of each parcel
+    /// `account` held then.
+    BackSell {
+        account: i64,
+        pct: i64,
+        cents: i64,
+    },
+    /// A unit-scale override for account 1's holding of listing 1 (`None`:
+    /// unconstrained) — the grid a rounded split/bonus rounds it onto.
+    Scale {
+        scale: Option<u32>,
+    },
     BuyBack {
         pct: i64,
         price_cents: i64,
@@ -531,6 +550,62 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
                 undo_may_be_refused: false,
             }
         }
+        Op::BackBuy {
+            account,
+            units,
+            cents: c,
+        } => {
+            // Below every id the operations and `Op::Buy` assign.
+            let id = 800 - n as i64;
+            Step {
+                method: "PUT",
+                path: format!("/trades/{id}"),
+                body: Some(json!({
+                    "listing_id": 1, "holding_account_id": account, "date": wednesday(0),
+                    "trade_type": "Buy", "quantity": units.to_string(), "average_price": cents(c),
+                    "currency": "AUD", "brokerage": "9.95", "brokerage_currency": "AUD", "fx_rate": "1",
+                })),
+                previewable: false,
+                undo: Box::new(move |_| format!("/trades/{id}")),
+                undo_may_be_refused: false,
+            }
+        }
+        Op::BackSell {
+            account,
+            pct,
+            cents: c,
+        } => {
+            let date = wednesday(0) + Days::new(1);
+            let allocs = allocations(
+                &held(pool, date, Some(account)).await,
+                pct,
+                "quantity_allocated",
+            );
+            if allocs.is_empty() {
+                return None;
+            }
+            Step {
+                method: "POST",
+                path: "/sells".into(),
+                body: Some(json!({
+                    "listing_id": 1, "holding_account_id": account, "date": date,
+                    "quantity": total(&allocs, "quantity_allocated").to_string(),
+                    "average_price": cents(c), "currency": "AUD", "brokerage": "9.95",
+                    "brokerage_currency": "AUD", "fx_rate": "1", "allocations": allocs,
+                })),
+                previewable: true,
+                undo: Box::new(|created| format!("/sells/{}", created["id"])),
+                undo_may_be_refused: false,
+            }
+        }
+        Op::Scale { scale } => Step {
+            method: "POST",
+            path: "/holding_unit_scales".into(),
+            body: Some(json!({ "holding_account_id": 1, "listing_id": 1, "unit_scale": scale })),
+            previewable: false,
+            undo: Box::new(|created| format!("/holding_unit_scales/{}", created["id"])),
+            undo_may_be_refused: false,
+        },
         Op::Rename => Step {
             method: "POST",
             path: "/listings/1/renames".into(),
@@ -542,16 +617,30 @@ async fn prepare(pool: &SqlitePool, n: usize, op: &Op) -> Option<Step> {
     })
 }
 
+/// The stored counts' table, compared by value rather than row: a recompute
+/// deletes and re-inserts a row (a parcel sold out before the action and back)
+/// under a new `id`, which is no change to what is stored.
+const COUNTS_TABLE: &str = "corporate_action_parcel_counts";
+
 /// Run one step: preview it, run it, and when `undo` undo it again,
-/// checking the database at each point.
+/// checking the database at each point. `rounded`: the world rounds, so the
+/// write — and its undo, itself a write — is also held to the stable
+/// distribution ([`stable_counts_hold`]). An undo restores the stored counts
+/// exactly when the write moved none of them; when it did, stability makes
+/// them a property of the history (a count kept through the write is kept
+/// through its undo too), so the undo restores every holding's parcels, total
+/// and units converted ([`holdings_restored`]) but not necessarily which
+/// parcel holds each grid step.
 async fn run(
     pool: &SqlitePool,
     app: &ApiClient,
     step: Step,
     undo: bool,
+    rounded: bool,
 ) -> Result<(), TestCaseError> {
     let what = format!("{} {} {:?}", step.method, step.path, step.body);
     let before = table_contents(pool).await;
+    let counts_before = count_rows(pool).await;
     let preview = if step.previewable {
         let dry = send(
             app,
@@ -608,6 +697,10 @@ async fn run(
             what
         );
     }
+    let counts_after = count_rows(pool).await;
+    if rounded {
+        stable_counts_hold(pool, &counts_before, &counts_after, &what).await?;
+    }
     if undo {
         let path = (step.undo)(&created);
         let undone = app.delete(&path).await;
@@ -622,10 +715,204 @@ async fn run(
             what,
             undone.text()
         );
-        let changed = table_differences(&before, &table_contents(pool).await, CHANGED_BY_AN_UNDO);
+        let skip: Vec<&str> = CHANGED_BY_AN_UNDO
+            .iter()
+            .copied()
+            .chain([COUNTS_TABLE])
+            .collect();
+        let changed = table_differences(&before, &table_contents(pool).await, &skip);
         prop_assert!(changed.is_empty(), "undo {path} of {what} left {changed:?}");
+        let restored = count_rows(pool).await;
+        if rounded {
+            stable_counts_hold(pool, &counts_after, &restored, &format!("undo of {what}")).await?;
+        }
+        if counts_after == counts_before {
+            prop_assert_eq!(
+                &restored,
+                &counts_before,
+                "undo {} of {} moved stored counts the write had not",
+                path,
+                what
+            );
+        } else {
+            holdings_restored(pool, &counts_before, &restored, &what).await?;
+        }
     }
     Ok(())
+}
+
+/// Every stored count by (action, parcel): (units before, count on the grid,
+/// cash-in-lieu fraction).
+type CountRows = BTreeMap<(i64, i64), (Decimal, Decimal, Decimal)>;
+
+async fn count_rows(pool: &SqlitePool) -> CountRows {
+    let rows: Vec<(i64, i64, String, String, String)> = sqlx::query_as(
+        "SELECT corporate_action_id, trade_id, units_before, units_after, in_lieu_units \
+         FROM corporate_action_parcel_counts",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let d = |s: &str| s.parse::<Decimal>().unwrap();
+    rows.into_iter()
+        .map(|(action, trade, before, after, in_lieu)| {
+            let in_lieu = d(&in_lieu);
+            ((action, trade), (d(&before), d(&after) - in_lieu, in_lieu))
+        })
+        .collect()
+}
+
+/// What an undo restores of the stored counts however the write moved them:
+/// the same parcels under every action, and per rounded holding the same
+/// units converted and the same total on the grid — every figure the
+/// registry's holding is, as against which of its parcels holds a step.
+async fn holdings_restored(
+    pool: &SqlitePool,
+    before: &CountRows,
+    restored: &CountRows,
+    what: &str,
+) -> Result<(), TestCaseError> {
+    prop_assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        restored.keys().collect::<Vec<_>>(),
+        "undo of {} changed which parcels have stored counts",
+        what
+    );
+    let accounts: HashMap<i64, i64> = sqlx::query_as("SELECT id, holding_account_id FROM trades")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+    let totals = |rows: &CountRows| {
+        let mut by_holding: BTreeMap<(i64, i64), (Decimal, Decimal, Decimal)> = BTreeMap::new();
+        for ((action, trade), (units, count, in_lieu)) in rows {
+            let entry = by_holding.entry((*action, accounts[trade])).or_default();
+            entry.0 += *units;
+            entry.1 += *count;
+            entry.2 += *in_lieu;
+        }
+        by_holding
+    };
+    prop_assert_eq!(
+        totals(before),
+        totals(restored),
+        "undo of {} did not restore a holding's units or total",
+        what
+    );
+    Ok(())
+}
+
+/// The stable distribution, over one write: in every rounded holding of a
+/// split or bonus issue, a parcel whose units before the action did not
+/// change, and whose count is still a valid count for it (on the holding's
+/// grid, its share's floor or one step over), keeps that count — unless
+/// keeping every such count leaves the holding's other parcels unable to
+/// absorb its total, each at its share's floor or one step over (and every
+/// zero floor taking the step). That is the only thing that may force a
+/// registry's count to move (`domain::entitlement_rounding::round_holding`).
+async fn stable_counts_hold(
+    pool: &SqlitePool,
+    before: &CountRows,
+    after: &CountRows,
+    what: &str,
+) -> Result<(), TestCaseError> {
+    let holdings: Vec<(i64, i64, i64, Option<u32>)> = sqlx::query_as(
+        "SELECT c.corporate_action_id, c.trade_id, t.holding_account_id, \
+                CASE WHEN o.id IS NULL THEN ha.unit_scale ELSE o.unit_scale END \
+         FROM corporate_action_parcel_counts c \
+         JOIN trades t ON t.id = c.trade_id \
+         JOIN corporate_actions a ON a.id = c.corporate_action_id \
+         JOIN holding_accounts ha ON ha.id = t.holding_account_id \
+         LEFT JOIN holding_unit_scales o \
+                ON o.holding_account_id = t.holding_account_id AND o.listing_id = t.listing_id \
+         WHERE a.action_type IN ('ShareSplit', 'BonusIssue')",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    let mut by_holding: BTreeMap<(i64, i64), (u32, Vec<i64>)> = BTreeMap::new();
+    for (action, trade, account, scale) in holdings {
+        let scale = scale.expect("a stored count has a grid");
+        by_holding
+            .entry((action, account))
+            .or_insert((scale, Vec::new()))
+            .1
+            .push(trade);
+    }
+    for ((action, account), (scale, trades)) in by_holding {
+        let (new, old) = action_ratio(pool, action).await;
+        let step = Decimal::new(1, scale);
+        let total: Decimal = trades.iter().map(|t| after[&(action, *t)].1).sum();
+        let (mut kept, mut lower, mut must, mut may) =
+            (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+        let mut moved = false;
+        for trade in &trades {
+            let (units, count, _) = after[&(action, *trade)];
+            let share = units * new / old;
+            let floor = (share / step).floor() * step;
+            let ceiling = if floor == share { floor } else { floor + step };
+            match before.get(&(action, *trade)) {
+                Some((was_units, was, _))
+                    if *was_units == units
+                        && *was > Decimal::ZERO
+                        && was.normalize().scale() <= scale
+                        && *was >= floor
+                        && *was <= ceiling =>
+                {
+                    kept += *was;
+                    moved |= *was != count;
+                }
+                _ => {
+                    lower += floor;
+                    if floor.is_zero() {
+                        must += step;
+                    }
+                    if floor != share {
+                        may += step;
+                    }
+                }
+            }
+        }
+        let rest = total - kept;
+        prop_assert!(
+            !moved || rest < lower + must || rest > lower + may,
+            "{what}: action {action} account {account} moved a kept count the others could absorb"
+        );
+    }
+    Ok(())
+}
+
+/// A ratio-driven action's (new, old): every `old` units become `new`.
+async fn action_ratio(pool: &SqlitePool, action: i64) -> (Decimal, Decimal) {
+    match corporate_action::db_get(pool, action)
+        .await
+        .unwrap()
+        .unwrap()
+        .kind
+    {
+        ActionKind::ShareSplit {
+            split_new_units,
+            split_old_units,
+            ..
+        } => (split_new_units, split_old_units),
+        ActionKind::BonusIssue {
+            bonus_units,
+            bonus_held_units,
+            ..
+        } => (bonus_held_units + bonus_units, bonus_held_units),
+        ActionKind::ScripForScrip {
+            scrip_new_units,
+            scrip_old_units,
+            ..
+        } => (scrip_new_units, scrip_old_units),
+        ActionKind::Demerger {
+            demerger_new_units,
+            demerger_held_units,
+            ..
+        } => (demerger_new_units, demerger_held_units),
+        other => panic!("counts stored for {other:?}"),
+    }
 }
 
 /// The non-`Exact` rules, for a strategy to pick from.
@@ -657,6 +944,16 @@ fn rounded_op() -> impl Strategy<Value = Op> {
         1 => (1i64..=3, 1i64..=5, 1i64..=99, rounding_rule())
             .prop_map(|(new, held, pct, rule)| Op::Demerger { new, held, pct, rule }),
         3 => (1i64..=2, 0i64..=500).prop_map(|(account, cents)| Op::CashInLieu { account, cents }),
+        2 => (1i64..=2, 1i64..=300, 1i64..=5_000)
+            .prop_map(|(account, units, cents)| Op::BackBuy { account, units, cents }),
+        2 => (1i64..=2, 1i64..=100, 1i64..=5_000)
+            .prop_map(|(account, pct, cents)| Op::BackSell { account, pct, cents }),
+        // A grid only: an unconstrained (`None`) holding goes exact, and an
+        // exchange/demerger of a non-terminating exact holding rounded `Up`
+        // can overshoot by a step on its 28th digit — an `Exact`-mode defect
+        // of its own (TODO.md), not this world's. Dropping the grid is
+        // covered by `corporate_action::tests::rounding`.
+        1 => (0u32..=2).prop_map(|scale| Op::Scale { scale: Some(scale) }),
     ]
 }
 
@@ -675,11 +972,14 @@ type ParcelCounts = (Decimal, Decimal, Decimal);
 async fn stored_counts_hold(pool: &SqlitePool) -> Result<(), TestCaseError> {
     let rows: Vec<StoredCountRow> = sqlx::query_as(
         "SELECT c.corporate_action_id, t.holding_account_id, c.units_before, c.units_after, \
-                c.in_lieu_units, a.fraction_rule, ha.unit_scale \
+                c.in_lieu_units, a.fraction_rule, \
+                CASE WHEN o.id IS NULL THEN ha.unit_scale ELSE o.unit_scale END \
          FROM corporate_action_parcel_counts c \
          JOIN trades t ON t.id = c.trade_id \
          JOIN corporate_actions a ON a.id = c.corporate_action_id \
          JOIN holding_accounts ha ON ha.id = t.holding_account_id \
+         LEFT JOIN holding_unit_scales o \
+                ON o.holding_account_id = t.holding_account_id AND o.listing_id = t.listing_id \
          ORDER BY c.corporate_action_id, t.holding_account_id",
     )
     .fetch_all(pool)
@@ -697,34 +997,7 @@ async fn stored_counts_hold(pool: &SqlitePool) -> Result<(), TestCaseError> {
     }
     for ((action, account), parcels) in holdings {
         let (rule, scale) = &rules[&action];
-        let kind = corporate_action::db_get(pool, action)
-            .await
-            .unwrap()
-            .unwrap()
-            .kind;
-        let (new, old) = match kind {
-            ActionKind::ShareSplit {
-                split_new_units,
-                split_old_units,
-                ..
-            } => (split_new_units, split_old_units),
-            ActionKind::BonusIssue {
-                bonus_units,
-                bonus_held_units,
-                ..
-            } => (bonus_held_units + bonus_units, bonus_held_units),
-            ActionKind::ScripForScrip {
-                scrip_new_units,
-                scrip_old_units,
-                ..
-            } => (scrip_new_units, scrip_old_units),
-            ActionKind::Demerger {
-                demerger_new_units,
-                demerger_held_units,
-                ..
-            } => (demerger_new_units, demerger_held_units),
-            other => return Err(TestCaseError::fail(format!("counts stored for {other:?}"))),
-        };
+        let (new, old) = action_ratio(pool, action).await;
         let step = Decimal::new(1, *scale);
         let held: Decimal = parcels.iter().map(|(b, _, _)| *b).sum();
         let exact = held * new / old;
@@ -802,7 +1075,7 @@ async fn world_on(steps: &[(Op, bool)], rounded: bool) -> Result<(), TestCaseErr
         .await;
     for (n, (op, undo)) in steps.iter().enumerate() {
         if let Some(step) = prepare(&pool, n, op).await {
-            run(&pool, &app, step, *undo).await?;
+            run(&pool, &app, step, *undo, rounded).await?;
             if rounded {
                 stored_counts_hold(&pool).await?;
             }
@@ -831,11 +1104,16 @@ proptest! {
 
     /// The same, with every ratio-driven action rounded onto account 1's
     /// whole-unit grid (account 2 has none, so its holdings stay exact) and
-    /// cash-in-lieu payments among the operations: each previews exactly as
-    /// it writes and undoes exactly — the stored per-parcel counts included —
-    /// and after every step the stored counts of each rounded holding sum to
-    /// its exact count rounded by the action's rule, on the grid, each within
-    /// one grid step of its parcel's exact share.
+    /// cash-in-lieu payments, back-dated Buys and Sells (dated before every
+    /// action, so each recomputes what has been rounded since) and changes of
+    /// account 1's grid among the operations: each previews exactly as it
+    /// writes; each write and each undo keeps every stored count the new
+    /// total allows (`stable_counts_hold`); an undo restores every table, and
+    /// the stored counts exactly when the write moved none — otherwise every
+    /// holding's parcels, units and total (`holdings_restored`); and after
+    /// every step the stored counts of each rounded holding sum to its exact
+    /// count rounded by the action's rule, on the grid, each within one grid
+    /// step of its parcel's exact share.
     #[test]
     fn every_rounded_operation_previews_undoes_and_stores_grid_counts(
         steps in prop::collection::vec((rounded_op(), prop::bool::weighted(0.4)), 1..=10),

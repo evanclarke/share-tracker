@@ -8,7 +8,7 @@
 //! were computed against is completed (SCENARIOS S-04).
 
 use super::model::SettlementDateSource;
-use crate::entities::exchange_holiday;
+use crate::entities::{corporate_action, exchange_holiday};
 #[cfg(test)]
 use crate::infra::db;
 use crate::infra::db::write_tx;
@@ -363,6 +363,12 @@ pub async fn run_recompute(pool: &SqlitePool) -> Result<(), String> {
         );
         recomputed += 1;
     }
+    // A settlement date is the register date a rounded share split's or bonus
+    // issue's stored counts are keyed to (0057 marks the listing), so they are
+    // recomputed over the repaired dates in the same transaction.
+    corporate_action::db_settle(&mut tx)
+        .await
+        .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
 
     tracing::info!(

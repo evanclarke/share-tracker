@@ -8,7 +8,10 @@
 //!
 //! For a `ShareSplit`/`BonusIssue` the override takes effect at once: the
 //! write recomputes the listing's stored per-parcel counts inside its own
-//! transaction (and checks the sales after the action still fit them). For a
+//! transaction (`corporate_action::db_settle`, which checks the sales after
+//! the action still fit them), the overridden holding distributed afresh —
+//! a statement's count is a new total for the whole holding, so none of the
+//! counts stored before it is kept. For a
 //! `ScripForScrip`/`Demerger` it is read when the exchange or demerger runs —
 //! the units are of the replacement (demerged) listing — so it is frozen,
 //! like the action's own terms, once that operation has run.
@@ -125,25 +128,9 @@ pub enum OverrideError {
     /// Mapped to `422`.
     #[error("the action's operation has already run")]
     OperationRan,
-    /// The listing's rounded counts cannot be stored with the override.
-    #[error("the listing's rounded entitlements cannot be stored: {0}")]
-    Rounding(#[source] corporate_action::RoundError),
-    /// The recomputed counts leave a later sale allocating more units than its
-    /// parcel holds. Mapped to `422`.
-    #[error("the override leaves a sale allocating more units than its parcel holds")]
-    AllocationsExceedParcel,
     /// A create committed but the row could not be read back. Mapped to `500`.
     #[error("the units-received override was created but could not be read back")]
     VanishedAfterCreate,
-}
-
-impl From<corporate_action::RoundError> for OverrideError {
-    fn from(e: corporate_action::RoundError) -> Self {
-        match e {
-            corporate_action::RoundError::Db(err) => OverrideError::Db(err),
-            other @ corporate_action::RoundError::Holding { .. } => OverrideError::Rounding(other),
-        }
-    }
 }
 
 impl From<OverrideError> for ApiError {
@@ -161,14 +148,6 @@ impl From<OverrideError> for ApiError {
                 "this action's exchange, demerger or cash-in-lieu payment has already been \
                  recorded, and its parcels were written from the units received then — undo \
                  that operation first",
-            ),
-            OverrideError::Rounding(e) => match e.detail() {
-                Some(detail) => ApiError::Unprocessable(detail),
-                None => ApiError::internal(e),
-            },
-            OverrideError::AllocationsExceedParcel => ApiError::unprocessable(
-                "with these units received, a sale after the action allocates more units than \
-                 the parcel it draws on holds — correct or remove those allocations first",
             ),
             OverrideError::Db(err) => err.into(),
             err @ OverrideError::VanishedAfterCreate => ApiError::internal(err),
@@ -205,16 +184,24 @@ async fn check_action(
     Ok((action.listing_id, read_time))
 }
 
-/// Recompute the stored counts of the listing a split/bonus override belongs
-/// to, and check the sales after it still fit.
-async fn recompute(
+/// Drop the counts stored for one holding of a split/bonus, so the recompute
+/// [`corporate_action::db_settle`] runs distributes it afresh: an override
+/// states the holding's whole count anew, so none of the counts stored under
+/// the old total is a prior the new one should keep.
+async fn release_holding(
     conn: &mut sqlx::SqliteConnection,
-    listing_id: ListingId,
-) -> Result<(), OverrideError> {
-    corporate_action::db_recompute_listing(&mut *conn, listing_id).await?;
-    if !corporate_action::allocations_fit_parcels(&mut *conn, listing_id).await? {
-        return Err(OverrideError::AllocationsExceedParcel);
-    }
+    action_id: i64,
+    account: HoldingAccountId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM corporate_action_parcel_counts \
+         WHERE corporate_action_id = ? \
+           AND trade_id IN (SELECT id FROM trades WHERE holding_account_id = ?)",
+    )
+    .bind(action_id)
+    .bind(account)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 
@@ -227,22 +214,27 @@ async fn write(
     let mut tx = write_tx(pool).await?;
     let outcome =
         http::Upsert::of(http::crud_exists_opt::<EntitlementOverride, _>(&mut *tx, id).await?);
-    // An edit can move the override off another action; that one is checked
-    // (and recomputed) too.
-    let previous: Option<i64> = match id {
+    // An edit can move the override off another action or account; that
+    // holding is checked (and recomputed) too.
+    let previous: Option<(i64, HoldingAccountId)> = match id {
         Some(id) => {
-            sqlx::query_scalar("SELECT corporate_action_id FROM entitlement_overrides WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?
+            sqlx::query_as(
+                "SELECT corporate_action_id, holding_account_id FROM entitlement_overrides \
+                 WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?
         }
         None => None,
     };
-    let mut listings = Vec::new();
-    for action_id in iter::once(body.corporate_action_id).chain(previous) {
-        let (listing, read_time) = check_action(&mut tx, action_id).await?;
+    let mut released = Vec::new();
+    for (action_id, account) in
+        iter::once((body.corporate_action_id, body.holding_account_id)).chain(previous)
+    {
+        let (_, read_time) = check_action(&mut tx, action_id).await?;
         if read_time {
-            listings.push(listing);
+            released.push((action_id, account));
         }
     }
     let result = db::insert_with_optional_id(
@@ -260,10 +252,10 @@ async fn write(
     .execute(&mut *tx)
     .await?;
     let assigned = id.unwrap_or_else(|| result.last_insert_rowid());
-    listings.dedup();
-    for listing in listings {
-        recompute(&mut tx, listing).await?;
+    for (action_id, account) in released {
+        release_holding(&mut tx, action_id, account).await?;
     }
+    corporate_action::db_settle(&mut tx).await?;
     let upserted =
         http::crud_upserted::<EntitlementOverride, _>(&mut *tx, outcome, assigned).await?;
     tx.commit().await?;
@@ -274,28 +266,30 @@ async fn write(
 /// falls back to its rule's own rounding.
 pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<bool, OverrideError> {
     let mut tx = write_tx(pool).await?;
-    let action_id: Option<i64> =
-        sqlx::query_scalar("SELECT corporate_action_id FROM entitlement_overrides WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some(action_id) = action_id else {
+    let found: Option<(i64, HoldingAccountId)> = sqlx::query_as(
+        "SELECT corporate_action_id, holding_account_id FROM entitlement_overrides WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((action_id, account)) = found else {
         return Ok(false);
     };
     // An override on an action that no longer rounds (its rule set back to
     // Exact) is simply removed; one whose operation ran is frozen with it.
-    let (listing, read_time) = match check_action(&mut tx, action_id).await {
-        Ok(found) => (Some(found.0), found.1),
-        Err(OverrideError::NotRounded) => (None, false),
+    let read_time = match check_action(&mut tx, action_id).await {
+        Ok((_, read_time)) => read_time,
+        Err(OverrideError::NotRounded) => false,
         Err(e) => return Err(e),
     };
     sqlx::query("DELETE FROM entitlement_overrides WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    if let Some(listing) = listing.filter(|_| read_time) {
-        recompute(&mut tx, listing).await?;
+    if read_time {
+        release_holding(&mut tx, action_id, account).await?;
     }
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(true)
 }

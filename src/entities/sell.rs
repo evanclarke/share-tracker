@@ -520,6 +520,8 @@ pub async fn db_delete_sell(pool: &SqlitePool, id: TradeId) -> Result<DeleteOutc
         .execute(&mut *tx)
         .await?;
 
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
 }
@@ -649,6 +651,8 @@ async fn write(
     }
 
     let upserted = http::crud_upserted::<Trade, _>(&mut *tx, outcome, written).await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     mode.finish(tx).await?;
     Ok(upserted)
 }

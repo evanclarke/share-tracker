@@ -1,7 +1,10 @@
 //! A non-`Exact` share split or bonus issue rounds each holding onto its
-//! unit grid and stores each parcel's count (`rounding.rs`, migration 0055).
+//! unit grid and stores each parcel's count (`rounding.rs`, migration 0055),
+//! recomputed by every write that moves a fact it rests on (migration 0057).
 
 use super::*;
+use crate::entities::trade;
+use crate::infra::db::write_tx;
 use crate::test_support::dec;
 use serde_json::{Value, json};
 
@@ -242,83 +245,292 @@ async fn a_units_received_override_replaces_the_rounded_total() {
     assert!(body.contains("not Exact"), "{body}");
 }
 
-/// The trades a stored count was computed from are frozen behind it: a trade
-/// or sale dated before the action is refused `422` naming the way out, one
-/// on or after it is not, and a cost-only edit of an earlier parcel moves no
-/// count so it is let through. The grid is frozen the same way.
+fn buy_json(date: &str, qty: &str) -> Value {
+    json!({
+        "trade_type": "Buy", "date": date, "listing_id": 1, "average_price": "10",
+        "quantity": qty, "currency": "AUD", "brokerage": "0",
+        "brokerage_currency": "AUD", "fx_rate": "1",
+    })
+}
+
+/// (parcel, units before, units after) of action 7's stored counts.
+async fn counts(pool: &SqlitePool) -> Vec<(i64, String, String)> {
+    stored(pool)
+        .await
+        .into_iter()
+        .filter(|row| row.0 == 7)
+        .map(|(_, trade, before, after, _)| (trade, before, after))
+        .collect()
+}
+
+/// The TODO's own case. Parcel A (100 units) consolidated 1-for-3, rounded
+/// up, is 34 on the register, and all 34 are sold. A Buy entered afterwards
+/// but dated before the consolidation (B, 50) makes the holding 150 → 50: the
+/// write recomputes the counts in its own transaction, and A keeps the 34 it
+/// sold while B absorbs the difference, 16 — where a fresh distribution would
+/// have handed out 33 / 17 and left A's sale over-allocated.
 #[tokio::test]
-async fn the_facts_a_stored_count_depends_on_are_frozen() {
+async fn a_back_dated_parcel_absorbs_the_difference_and_a_sold_count_stays() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["100"]).await;
+    app.put_ok("/corporate_actions/7", &split_json("Up", "1", "3"))
+        .await;
+    app.post("/sells", &sell_json("2024-06-11", &[(1, "34")]))
+        .await
+        .expect_status(StatusCode::CREATED);
+
+    let created: Value = app
+        .post("/trades", &buy_json("2024-05-01", "50"))
+        .await
+        .expect_status(StatusCode::CREATED)
+        .json();
+    let b = created["id"].as_i64().unwrap();
+    assert_eq!(
+        counts(&pool).await,
+        [
+            (1, "100".into(), "34".into()),
+            (b, "50".into(), "16".into())
+        ]
+    );
+    assert_eq!(remaining(&pool, d(2024, 6, 11)).await, [(b, dec("16"))]);
+    // Deleting it again restores the holding exactly.
+    app.delete(format!("/trades/{b}"))
+        .await
+        .expect_status(StatusCode::NO_CONTENT);
+    assert_eq!(counts(&pool).await, [(1, "100".into(), "34".into())]);
+}
+
+/// A back-dated write that leaves a later sale no longer fitting the
+/// recomputed counts is refused `422`, and nothing is stored. Here the
+/// newcomer (one unit, a third of a unit after the consolidation) must have a
+/// unit of its own, and the total has none to spare: the kept counts are
+/// released, the holding is distributed afresh (16, 16, 1), and parcel 1's
+/// sale of 17 no longer fits.
+#[tokio::test]
+async fn a_back_dated_write_a_later_sale_no_longer_fits_is_refused() {
     let pool = test_pool().await;
     let app = whole_unit_holding(&pool, &["50", "50"]).await;
     app.put_ok("/corporate_actions/7", &split_json("Down", "1", "3"))
         .await;
-
-    let buy = |date: &str, qty: &str| {
-        json!({
-            "trade_type": "Buy", "date": date, "listing_id": 1, "average_price": "10",
-            "quantity": qty, "currency": "AUD", "brokerage": "0",
-            "brokerage_currency": "AUD", "fx_rate": "1",
-        })
-    };
-    let resp = app.post("/trades", &buy("2024-05-01", "10")).await;
-    let (status, body) = resp.status_and_body();
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(body.contains("fraction_rule to Exact"), "{body}");
-    app.post("/trades", &buy("2024-06-03", "10"))
+    app.post("/sells", &sell_json("2024-06-11", &[(1, "17")]))
         .await
         .expect_status(StatusCode::CREATED);
+    let before = counts(&pool).await;
+    let trades: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-    // A sale before the action, its delete, and a quantity edit: refused.
-    app.post("/sells", &sell_json("2024-05-01", &[(1, "5")]))
+    let resp = app.post("/trades", &buy_json("2024-05-01", "1")).await;
+    let (status, body) = resp.status_and_body();
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body.contains("no longer") || body.contains("now holds"),
+        "{body}"
+    );
+    assert_eq!(counts(&pool).await, before);
+    let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
+        .fetch_one(&pool)
         .await
-        .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
-    app.delete("/trades/1")
+        .unwrap();
+    assert_eq!(after, trades);
+}
+
+/// Every fact a stored count rests on recomputes it in the writing
+/// transaction instead of being frozen: a sale dated before the action and
+/// its undo, a quantity edit, a deletion, and the holding's grid — the
+/// account's scale and a per-listing override.
+#[tokio::test]
+async fn every_fact_a_stored_count_rests_on_recomputes_it() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50", "50"]).await;
+    app.put_ok("/corporate_actions/7", &split_json("Down", "1", "3"))
+        .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
+
+    // A sale of parcel 1 before the action: 45 → 15 (on the grid exactly, so
+    // its 17 is no count for it), parcel 2 keeping its 16 of the 31.
+    let sold: Value = app
+        .post("/sells", &sell_json("2024-05-01", &[(1, "5")]))
         .await
-        .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
+        .expect_status(StatusCode::CREATED)
+        .json();
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "45".into(), "15".into()), (2, "50".into(), "16".into())]
+    );
+    app.delete(format!("/sells/{}", sold["id"]))
+        .await
+        .expect_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
+
+    // The cost of a parcel is no count: editing it moves nothing. Its
+    // quantity is: 51 is a share of exactly 17, which it keeps.
     let mut edited: Value = app.get_json("/trades/1").await;
+    edited["average_price"] = json!("11");
     edited["quantity"] = json!("51");
     let edited = test_support::writable_body(&edited, &[]);
-    app.put("/trades/1", &edited)
-        .await
-        .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
-    // The cost of a parcel is no count: editing it lands.
-    let mut priced: Value = app.get_json("/trades/1").await;
-    priced["average_price"] = json!("11");
-    let priced = test_support::writable_body(&priced, &[]);
-    let resp = app.put("/trades/1", &priced).await;
+    let resp = app.put("/trades/1", &edited).await;
     let (status, body) = resp.status_and_body();
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "51".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
 
-    // The grid: neither the account's scale nor an override may move.
-    app.put(
+    // The grid: two places, then whole units again by a per-listing
+    // override, then back. A count made on another grid is none on this
+    // one, so each change redistributes the holding afresh.
+    app.put_ok(
         "/holding_accounts/1",
         &json!({ "name": "Default", "unit_scale": 2 }),
     )
-    .await
-    .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
-    app.post(
-        "/holding_unit_scales",
-        &json!({ "holding_account_id": 1, "listing_id": 1, "unit_scale": 2 }),
-    )
-    .await
-    .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
-
-    // Setting the rule to Exact releases it; setting it back recomputes.
-    app.put_ok("/corporate_actions/7", &split_json("Exact", "1", "3"))
-        .await;
-    app.post("/trades", &buy("2024-05-01", "10"))
+    .await;
+    assert_eq!(
+        counts(&pool).await,
+        [
+            (1, "51".into(), "17".into()),
+            (2, "50".into(), "16.66".into())
+        ]
+    );
+    let scale: Value = app
+        .post(
+            "/holding_unit_scales",
+            &json!({ "holding_account_id": 1, "listing_id": 1, "unit_scale": 0 }),
+        )
         .await
-        .expect_status(StatusCode::CREATED);
+        .expect_status(StatusCode::CREATED)
+        .json();
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "51".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
+    app.delete(format!("/holding_unit_scales/{}", scale["id"]))
+        .await
+        .expect_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        counts(&pool).await,
+        [
+            (1, "51".into(), "17".into()),
+            (2, "50".into(), "16.66".into())
+        ]
+    );
+
+    // An unconstrained override: no grid, so the holding goes exact and
+    // stores nothing; deleting it rounds afresh on the account's grid.
+    let open: Value = app
+        .post(
+            "/holding_unit_scales",
+            &json!({ "holding_account_id": 1, "listing_id": 1, "unit_scale": null }),
+        )
+        .await
+        .expect_status(StatusCode::CREATED)
+        .json();
+    assert!(counts(&pool).await.is_empty());
+    app.delete(format!("/holding_unit_scales/{}", open["id"]))
+        .await
+        .expect_status(StatusCode::NO_CONTENT);
+    assert_eq!(
+        counts(&pool).await,
+        [
+            (1, "51".into(), "17".into()),
+            (2, "50".into(), "16.66".into())
+        ]
+    );
+
+    // Deleting a parcel: 51 → 17 of a 17 total, nothing left to move.
+    app.delete("/trades/2")
+        .await
+        .expect_status(StatusCode::NO_CONTENT);
+    assert_eq!(counts(&pool).await, [(1, "51".into(), "17".into())]);
+}
+
+/// What makes recomputing structural: a write that marks a listing with a
+/// rounded split or bonus issue cannot commit until the counts are settled.
+/// A transaction that forgets `db_settle` fails at COMMIT on the deferred
+/// foreign key 0057 hangs off `rounding_dirty` — and is rolled back whole —
+/// while the same write settled commits; an autocommit statement is refused
+/// the same way.
+#[tokio::test]
+async fn a_write_that_forgets_to_settle_cannot_commit() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50", "50"]).await;
     app.put_ok("/corporate_actions/7", &split_json("Down", "1", "3"))
         .await;
-    // 110 units → 36: 50/50/10 → 16.67/16.67/3.33 → 17, 16, 3.
-    let after = remaining(&pool, d(2024, 6, 3)).await;
-    let total: Decimal = after
-        .iter()
-        .filter(|(id, _)| *id != 3)
-        .map(|(_, q)| *q)
-        .sum();
-    assert_eq!(total, dec("36"));
+    let insert = "INSERT INTO trades (id, trade_type, date, settlement_date, listing_id, \
+                  average_price, quantity, currency, brokerage, brokerage_currency, fx_rate) \
+                  VALUES (9, 'Buy', '2024-05-01', '2024-05-03', 1, '10', '30', 'AUD', '0', \
+                  'AUD', '1')";
+
+    let mut tx = write_tx(&pool).await.unwrap();
+    sqlx::query(insert).execute(&mut *tx).await.unwrap();
+    let err = tx.commit().await.unwrap_err();
+    assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades WHERE id = 9")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "the unsettled write was rolled back");
+    let err = sqlx::query(insert).execute(&pool).await.unwrap_err();
+    assert!(err.to_string().contains("FOREIGN KEY"), "{err}");
+
+    let mut tx = write_tx(&pool).await.unwrap();
+    sqlx::query(insert).execute(&mut *tx).await.unwrap();
+    db_settle(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    // 130 → 43: 17 and 16 kept, the newcomer's share exactly 10.
+    assert_eq!(
+        counts(&pool).await,
+        [
+            (1, "50".into(), "17".into()),
+            (2, "50".into(), "16".into()),
+            (9, "30".into(), "10".into())
+        ]
+    );
+    let dirty: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rounding_dirty")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(dirty, 0);
+}
+
+/// The scheduled `settlement-recompute` job rewrites computed settlement
+/// dates — a column that marks a rounded listing (0057) — so it settles in its
+/// own transaction too: it runs to completion over a rounded listing, and the
+/// counts (decided by trade date) do not move.
+#[tokio::test]
+async fn the_settlement_recompute_job_settles_what_it_rewrites() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50", "50"]).await;
+    app.put_ok("/corporate_actions/7", &split_json("Down", "1", "3"))
+        .await;
+    let mut tx = write_tx(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE trades SET settlement_date = '2024-01-30', settlement_date_source = 'computed' \
+         WHERE id = 1",
+    )
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    db_settle(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+
+    trade::run_recompute(&pool).await.unwrap();
+    let settled: NaiveDate = sqlx::query_scalar("SELECT settlement_date FROM trades WHERE id = 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_ne!(settled, d(2024, 1, 30));
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
 }
 
 /// A rounded total too small to leave every parcel a unit is refused,

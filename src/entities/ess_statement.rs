@@ -33,7 +33,7 @@
 
 use crate::domain::cost_base;
 use crate::domain::cost_base::UnrepresentableCost;
-use crate::entities::trade;
+use crate::entities::{corporate_action, trade};
 use crate::infra::currency::CurrencyCode;
 use crate::infra::db::write_tx;
 use crate::infra::decimal::{Money, OptMoney};
@@ -790,6 +790,8 @@ pub async fn db_delete(pool: &SqlitePool, id: i64) -> Result<DeleteOutcome, sqlx
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    // Recompute any rounded share split / bonus issue this write moved (0057).
+    corporate_action::db_settle(&mut tx).await?;
     tx.commit().await?;
     Ok(DeleteOutcome::Deleted)
 }

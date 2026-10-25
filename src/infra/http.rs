@@ -1083,6 +1083,45 @@ fn is_busy_code(code: i32) -> bool {
     code & 0xff == SQLITE_BUSY
 }
 
+/// A write refused by a step every write path shares *inside* its own
+/// transaction — the rounded-entitlement recompute
+/// (`corporate_action::rounding::db_settle`) — carried through the
+/// `sqlx::Error` every such path already returns, the way an `FxError` gap
+/// travels through report code: as a `Decode` error boxing this value, which
+/// [`ApiError`]'s `From<sqlx::Error>` recovers and answers `422` with
+/// [`Refusal::body`]. So a write path refuses correctly by calling the step
+/// with `?`, with no variant to add to its own error enum.
+#[derive(thiserror::Error, Debug)]
+#[error("write refused: {source}")]
+pub struct Refusal {
+    /// The user-facing `422` body.
+    body: String,
+    /// What refused it, for the log.
+    #[source]
+    source: BoxError,
+}
+
+impl Refusal {
+    /// A refusal answering `body`, caused by `source`.
+    pub fn new(body: String, source: impl Into<BoxError>) -> Self {
+        Refusal {
+            body,
+            source: source.into(),
+        }
+    }
+
+    /// The user-facing `422` body.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+}
+
+impl From<Refusal> for sqlx::Error {
+    fn from(refusal: Refusal) -> Self {
+        sqlx::Error::Decode(Box::new(refusal))
+    }
+}
+
 /// Classify a database error: a constraint violation (foreign key, check,
 /// unique, or not-null) means the request referenced or supplied data the
 /// data model rejects — e.g. an unrecognised currency code (FK to
@@ -1103,11 +1142,6 @@ fn is_busy_code(code: i32) -> bool {
 /// A **busy** database is classified first, ahead of the constraint kinds:
 /// see [`is_busy`]. It is neither the client's fault nor the server's, so it
 /// is neither a 422 nor a 500 — it answers `503` with [`BUSY_BODY`].
-/// The prefix of every `RAISE(ABORT, …)` message 0055's guard triggers raise:
-/// a write behind a rounded share split or bonus issue (or to the unit grid it
-/// rounded onto). What follows it is the reason, answered `422`.
-const ROUNDED_ENTITLEMENT_GUARD: &str = "rounded entitlement: ";
-
 impl From<sqlx::Error> for ApiError {
     #[expect(
         clippy::wildcard_enum_match_arm,
@@ -1125,12 +1159,6 @@ impl From<sqlx::Error> for ApiError {
             // listings.ticker". It names columns/constraints, never a value
             // the client supplied, so it is safe to surface.
             let detail = db.message();
-            // A guard trigger refusing a write that would move a rounded
-            // corporate action's stored per-parcel counts (migration 0055):
-            // its message is the whole user-facing reason.
-            if let Some(reason) = detail.strip_prefix(ROUNDED_ENTITLEMENT_GUARD) {
-                return ApiError::Unprocessable(reason.to_owned());
-            }
             let body = match db.kind() {
                 ErrorKind::ForeignKeyViolation => {
                     "the request refers to a record that does not exist".to_owned()
@@ -1152,6 +1180,11 @@ impl From<sqlx::Error> for ApiError {
         // `impl From<FxError> for sqlx::Error`), carrying the `FxError`
         // itself so it can be recovered here rather than answered as an
         // opaque 500 the user can do nothing with (SCENARIOS M-04).
+        if let sqlx::Error::Decode(source) = &err
+            && let Some(refusal) = source.downcast_ref::<Refusal>()
+        {
+            return ApiError::Unprocessable(refusal.body().to_owned());
+        }
         if let sqlx::Error::Decode(source) = &err
             && let Some(fx) = source.downcast_ref::<FxError>()
             && let Some(response) = missing_rate_unprocessable(fx)
