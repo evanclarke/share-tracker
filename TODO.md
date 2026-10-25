@@ -242,3 +242,38 @@ the precedent: the rule is on the plan, the grid on the holding.
   `sold_in_acquired_units`' remainder matching and `adding_up_to`'s residue — each removal with the
   property that found its defect still passing. If `Exact` stays, this item is N/A and the
   machinery remains for it alone
+  - **N/A — decided (owner, 2026-10-25): `Exact` stays.** Investigation showed retiring it removes
+    nothing: `AcquiredUnits`' exact fraction is still reached under rounding (a partial sale of a
+    parcel re-based by stored after/before counts — 100 → 300 rounded, sell 200 — is 66.666…
+    as-acquired units, the `a20c26d` defect), legacy `Exact` split/bonus rows whose per-parcel
+    counts do not terminate cannot migrate to any rule without moving history (so the other three
+    pieces stay reachable for them), and `Exact` is the only valve for 0055's freeze guards. The
+    items below replace the valve and close the remaining gaps instead
+- [ ] **Recompute on write instead of freezing.** Replace 0055's freeze guards with recomputation: a
+  trade/sale/allocation/settlement-date/unit-scale write that touches a holding before a rounded
+  split/bonus recomputes that listing's stored counts inside its own `write_tx` (the existing
+  `db_recompute_listing`, then the representability and `allocations_fit_parcels` checks), refusing
+  `422` only a write whose sales genuinely no longer fit. Make it structural rather than per-path:
+  triggers mark the listing dirty and a write path that forgets to settle fails at COMMIT (e.g. a
+  `rounding_dirty` table with a deferred FK to a parent that never exists). **Stable distribution**:
+  a recompute keeps each existing parcel's stored count where the rounded total allows, and a
+  back-dated parcel absorbs the difference — a registry does not redistribute, and otherwise a
+  back-dated parcel can take a grid step from a sibling that has already sold it (parcel A 100, 1-for-3,
+  A stored 34 and sold; a back-dated B of 50 would redistribute 50 as A 33 / B 17). Docs (API.md
+  limitations + response codes, SCHEMA.md, 0055's narrative superseded); property: the rounded-world
+  operations property gains back-dated trade/sale writes and scale changes, with preview, undo and
+  the stored-count invariants holding after each, and no existing parcel's count moving when a
+  back-dated parcel is added unless the total forces it
+- [ ] **Register by settlement date.** Item 3 rounds the units held by **trade** date before a
+  split/bonus's date (a Known limitation), against Financial correctness's rule that the register is
+  the settlement date. Round the units **registered** (Buys settled on/before, Sells settled after,
+  by `settlement_date`) at the action's record date, giving splits/bonuses a record date if the
+  model needs one, and reconcile that with the unit basis a trade straddling the action is stated
+  in. Remove the Known limitation; property over trades straddling the action's date
+- [ ] **Fix the `Exact`-mode `unrealised_gains` property's intermittent failure.** Under `Exact` a
+  holding row (`898.9999999999999999999999999`) and its parcels' printed remainders (`899`) can
+  disagree in the 28th digit (seeds `e7cf5465…`, `d841d284…`). Since `Exact` stays, decide what the
+  assertion should mean for a non-terminating holding — compare within the rounding the printed
+  figures carry, or make the holding row the sum of the printed parcel remainders so the two agree
+  by construction (preferred if it is what a reader of the report expects) — and commit both seeds
+  to `proptest-regressions/reports/unrealised_gains.txt`, passing
