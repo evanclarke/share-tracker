@@ -332,3 +332,10 @@ the precedent: the rule is on the plan, the grid on the holding.
   (reachable before it through an unconstrained override entered ahead of the action) — the
   rounded operations property's grid-change op is limited to a grid for now because of it
 
+- [ ] **Register by record date for rounded scrip exchanges and demergers.** "Register by settlement
+  date" (2026-10-25) covers splits and bonus issues; a rounded `ScripForScrip`/`Demerger` still
+  converts the parcels open on the operation date by **trade** date, since those operations have no
+  record date of their own here (the narrowed Known limitation in `docs/API.md` says so). Give them
+  the same register rule — Buys settled on/before the record date, Sells settled after — and decide
+  which parcels the operation consumes for a trade straddling it, consistent with the split/bonus
+  treatment (`entitlement_rounding::round_registered_holding`); remove the limitation
