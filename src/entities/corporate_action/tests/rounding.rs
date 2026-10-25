@@ -1592,9 +1592,16 @@ mod properties {
         let sum_units: i64 = held.iter().map(|&i| left[i]).sum();
         let mut on_grid_total = Decimal::ZERO;
         for &i in &held {
-            // The cash-in-lieu fraction rides on at most one registered parcel.
+            // The cash-in-lieu fraction rides on at most one registered parcel
+            // — and may be all it holds, when the whole register's
+            // entitlement is under a unit: the cash-in-lieu Sell reaches that
+            // parcel's cost base, so it is not emptied (as in [`check`]).
             let on_grid = count[&i].trunc();
-            prop_assert!(on_grid > Decimal::ZERO, "parcel {} emptied", i + 1);
+            prop_assert!(
+                on_grid > Decimal::ZERO || count[&i] > Decimal::ZERO,
+                "parcel {} emptied",
+                i + 1
+            );
             on_grid_total += on_grid;
             let (num, den) = if pending.is_empty() {
                 (left[i] * new, old)
@@ -1698,6 +1705,29 @@ mod properties {
             demerger in any::<bool>(),
         ) {
             test_support::block_on(operation_straddling(world, record, (new, old), rule, demerger))?;
+        }
+    }
+
+    /// CI, 2026-10-25 (the v0.33.0 push), shrunk: a 1-for-4 cash-in-lieu
+    /// exchange or demerger of a register holding 3 units — the first parcel
+    /// sold out, the second down to 3 — whose whole entitlement is ¾ of a
+    /// unit, paid as cash. The one replacement parcel carries that fraction
+    /// and no whole unit, which is not an emptied parcel.
+    #[test]
+    fn a_cash_in_lieu_operation_whose_whole_entitlement_is_a_fraction() {
+        for demerger in [false, true] {
+            let world = World {
+                buys: vec![(2, 7, 5), (2, 31, 0)],
+                sells: vec![(0, 0, 7, 0), (1, 0, 28, 0)],
+            };
+            test_support::block_on(operation_straddling(
+                world,
+                None,
+                (1, 4),
+                Rule::CashInLieu,
+                demerger,
+            ))
+            .unwrap();
         }
     }
 }
