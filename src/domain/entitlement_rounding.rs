@@ -25,6 +25,7 @@
 //! multiplication, so no rounded quotient decides which grid point a share
 //! lies under.
 
+use crate::domain::adjustments::Fraction;
 use crate::infra::id::TradeId;
 use chrono::NaiveDate;
 use rust_decimal::prelude::ToPrimitive;
@@ -55,8 +56,15 @@ pub struct ParcelBefore {
     /// remainder, so the distribution is deterministic.
     pub acquired: NaiveDate,
     /// Units it held immediately before the action, in the basis then in
-    /// force (positive).
+    /// force (positive) — the figure stored as its `units_before`.
     pub units: Decimal,
+    /// The same units as the exact fraction they are, where [`Self::units`]
+    /// is a 28-digit rounding of a count that does not terminate (an `Exact`
+    /// action before, on a holding with no grid: 1000 units after a 5-for-3
+    /// split are 5000/3). The rounding reads this instead: rounded up from
+    /// 1666.666…667, 3-for-4 is 1250.000…0002 and became 1251, where the
+    /// holding's exact 1250 needs no rounding. `None` where `units` is exact.
+    pub exact: Option<Fraction>,
     /// The count stored for it by the last recompute, if any — what a
     /// registry has already put on the register for this parcel, kept where
     /// the holding's rounded total allows ([`round_holding`]'s stability).
@@ -206,6 +214,16 @@ pub fn round_holding(
     if parcels.is_empty() || held <= Decimal::ZERO {
         return Ok(vec![]);
     }
+    // Every figure below is computed from the parcels' exact counts, each a
+    // numerator over one common denominator `den` (`ParcelBefore::exact`), so
+    // the ratio applies to `Σ nums / den` — the holding's own count, not a sum
+    // of roundings of it.
+    let (nums, den) = exact_units(parcels);
+    let held = nums
+        .iter()
+        .try_fold(Decimal::ZERO, |acc, n| acc.checked_add(*n))
+        .ok_or_else(overflow)?;
+    let old = old.checked_mul(den).ok_or_else(overflow)?;
     let total = match units_received {
         Some(received) => checked_received(received, scale)?,
         None => rounded_total(held, new, old, scale, rule)?,
@@ -217,7 +235,25 @@ pub fn round_holding(
         Some(received) => (received, held),
         None => (new, old),
     };
-    distribute(parcels, total, share_of, scale, in_lieu)
+    distribute(parcels, &nums, total, share_of, scale, in_lieu)
+}
+
+/// The parcels' exact units before the action as numerators over one common
+/// denominator: `(nums, den)`, each parcel's count `nums[i] / den`. Where
+/// that common denominator is past `Decimal`'s range, the stored figures
+/// over 1 (the 28-digit roundings, no worse than before).
+fn exact_units(parcels: &[ParcelBefore]) -> (Vec<Decimal>, Decimal) {
+    let fractions: Vec<Fraction> = parcels
+        .iter()
+        .map(|p| {
+            p.exact.unwrap_or(Fraction {
+                num: p.units,
+                den: Decimal::ONE,
+            })
+        })
+        .collect();
+    Fraction::over_common_denominator(&fractions)
+        .unwrap_or_else(|| (parcels.iter().map(|p| p.units).collect(), Decimal::ONE))
 }
 
 /// What the register held for one holding at a share split's or bonus issue's
@@ -293,7 +329,8 @@ pub fn round_registered_holding(
         return Err(RoundingError::ParcelEmptied(parcels[0].trade_id));
     }
     let in_lieu = in_lieu_fraction(register.units, registered, new, old, scale, rule)?;
-    distribute(parcels, total, (total, held), scale, in_lieu)
+    let units: Vec<Decimal> = parcels.iter().map(|p| p.units).collect();
+    distribute(parcels, &units, total, (total, held), scale, in_lieu)
 }
 
 impl Rounding {
@@ -381,11 +418,14 @@ fn in_lieu_fraction(
     ))
 }
 
-/// Distribute `total` across `parcels` — each parcel's share `units ×
-/// share_of.0 / share_of.1` — by [`round_holding`]'s steps (1)–(4), carrying
-/// `in_lieu` (a cash-in-lieu fraction) on one parcel.
+/// Distribute `total` across `parcels` — each parcel's share `units[i] ×
+/// share_of.0 / share_of.1`, `units` in the same order as `parcels` (their
+/// units, or their exact numerators with the denominator folded into
+/// `share_of.1`) — by [`round_holding`]'s steps (1)–(4), carrying `in_lieu`
+/// (a cash-in-lieu fraction) on one parcel.
 fn distribute(
     parcels: &[ParcelBefore],
+    units: &[Decimal],
     total: Decimal,
     (multiplier, divisor): (Decimal, Decimal),
     scale: u32,
@@ -394,8 +434,8 @@ fn distribute(
     let step = Decimal::new(1, scale);
     let overflow = || RoundingError::Unrepresentable;
     let mut shares: Vec<(Decimal, Decimal)> = Vec::with_capacity(parcels.len());
-    for p in parcels {
-        let num = p.units.checked_mul(multiplier).ok_or_else(overflow)?;
+    for units in units {
+        let num = units.checked_mul(multiplier).ok_or_else(overflow)?;
         shares.push(floor_on_grid(num, divisor, scale).ok_or_else(overflow)?);
     }
 
@@ -533,6 +573,7 @@ mod tests {
             trade_id: TradeId(id),
             acquired: day(acquired),
             units: units.parse().unwrap(),
+            exact: None,
             prior: None,
         }
     }
@@ -541,6 +582,7 @@ mod tests {
     /// same units.
     fn kept(id: i64, acquired: u32, units: &str, count: &str) -> ParcelBefore {
         ParcelBefore {
+            exact: None,
             prior: Some(Prior {
                 before: units.parse().unwrap(),
                 on_grid: count.parse().unwrap(),
@@ -775,6 +817,7 @@ mod tests {
         let counts = round_holding(
             &[
                 ParcelBefore {
+                    exact: None,
                     prior: Some(Prior {
                         before: d("50"),
                         on_grid: d("17"),
@@ -936,6 +979,7 @@ mod tests {
                     trade_id: TradeId(i64::try_from(i).unwrap() + 1),
                     acquired: day(u32::try_from(i).unwrap() + 10),
                     units: Decimal::from(*u),
+                    exact: None,
                     prior: None,
                 })
                 .collect();
@@ -949,6 +993,7 @@ mod tests {
                 }
                 second.push(ParcelBefore {
                     units: changed[i].map_or(p.units, Decimal::from),
+                    exact: None,
                     prior: Some(Prior { before: p.units, on_grid: c.after - c.in_lieu }),
                     ..*p
                 });
@@ -958,6 +1003,7 @@ mod tests {
                     trade_id: TradeId(100 + i64::try_from(j).unwrap()),
                     acquired: day(day_n + 1),
                     units: Decimal::from(*u),
+                    exact: None,
                     prior: None,
                 });
             }
@@ -1033,6 +1079,7 @@ mod tests {
                     trade_id: TradeId(i64::try_from(i).unwrap() + 1),
                     acquired: day(u32::try_from(i).unwrap() + 1),
                     units: Decimal::new(*u, unit_places.min(scale)),
+                    exact: None,
                     prior: None,
                 })
                 .collect();

@@ -340,7 +340,7 @@ the precedent: the rule is on the plan, the grid on the holding.
   entitlements* rewritten (it documented the disagreement as a limitation). Not fixed here: a
   4000-case run of the **rounded** variant found an unrelated pre-existing failure (seed `b6b1a593…`,
   a whole-unit Sell refused as off-grid after splits/bonus/transfer), not committed
-- [ ] **Latent property failures found while closing "Recompute on write" (2026-10-25)**, all
+- [x] **Latent property failures found while closing "Recompute on write" (2026-10-25)**, all
   present before it: (1) `a_rounded_unrealised_gain_is_what_selling_everything_that_day_realises`
   can generate a rounded split that empties a parcel (five 1-unit Buys, a 1-for-2 split, rule
   `Down`) and fails on the documented `422` — the strategy, or the property, needs to treat that
@@ -356,6 +356,36 @@ the precedent: the rule is on the plan, the grid on the holding.
   Split 3:1, Split 2:1, Bonus 2-per-1, a Transfer of 11% to account 2, Split 3:1, `gap_days = 1`
   (a rounded holding's printed quantity should lie on its grid); commit the seed to
   `proptest-regressions/entities/corporate_action/tests/rounding.txt`, passing
+  *Done 2026-10-25.* **(3) root cause:** a parcel re-based across a rounded action uses its
+  stored counts as the ratio (`StoredCount`: 710 before, 2130 after), and `split_ratio` multiplied
+  those raw counts in unreduced — over four rounded actions about 4e15 / 7e13 — so in
+  `split_adjusted_quantity` the remainder's numerator times the ratio passed 28 digits, `mul_div`
+  divided early, and a remainder of exactly 34125 printed as 34124.99999999999993745…. **Fix
+  (`domain::adjustments`):** every exact fraction is kept in lowest terms — `split_ratio` reduces
+  at each step, `AcquiredUnits::fraction` reduces, and `times_ratio` cancels common factors before
+  the one division — via an exact decimal `gcd`, so a count that is itself representable (every
+  grid count is) comes out exact. Only a gcd **above 1** is divided out: dividing by one below
+  (10⁻²⁶ for a 28-digit numerator) trades a short denominator for a 27-digit one, and an
+  intermediate version that did so failed `a_rollover_chain_realises_each_original_cost_base_…`
+  by 13 cents (its seeds are committed). Regression test
+  `a_remainder_re_based_through_stored_counts_stays_on_its_grid` (fails without the fix); seed
+  `b6b1a593…` committed and passing. **(2):** the rounding now reads the exact count:
+  `ParcelBefore::exact` carries the units as a fraction (`adjustments::split_adjusted_fraction`,
+  from `RolledParcel::at_date_exact` for an exchange/demerger and from the recompute's own re-base
+  for a split/bonus), and `round_holding` puts a holding's parcels over one common denominator
+  before applying the ratio (the stored `units_before` stays the 28-digit figure; past `Decimal`'s
+  range it falls back to it). Regression test `an_exchange_rounds_an_exact_holding_from_its_exact_count`
+  (1000 × 5/3 exchanged 3-for-4, `Up` → 1250, was 1251); the rounded operations property's
+  grid-change op picks "unconstrained" again (its stored-count check reads the exact count to 20
+  places, the stored `before` being a 28-digit rounding). `round_registered_holding` (a straddling
+  Sell's register) still sums `Decimal`s — no property reaches a non-terminating register there.
+  **(1):** `realise_everything` accepts, for a rounded Split and a rounded exchange only, exactly
+  the documented `422` ("rounding leaves parcel … with no units") and carries on without that
+  fact; any other status, or that refusal in an `Exact` run, fails (seed `f70dbc8f…`, an exchange,
+  committed). `PROPTEST_CASES=3000` passes for `a_rounded_unrealised_gain_…`,
+  `every_rounded_operation_previews_undoes_and_stores_grid_counts` and
+  `a_rounded_split_rounds_the_register_at_its_record_date`; `docs/API.md` *Fractional
+  entitlements* states that the rule rounds the exact count
 
 - [ ] **Register by record date for rounded scrip exchanges and demergers.** "Register by settlement
   date" (2026-10-25) covers splits and bonus issues; a rounded `ScripForScrip`/`Demerger` still

@@ -918,6 +918,35 @@ pub(crate) mod tests {
             })
         }
 
+        /// Whether a ratio-driven write (a split, an exchange) was made:
+        /// `true` for its `201`, `false` for the one refusal a rounded run
+        /// documents for it — a holding's rounded count too small to leave
+        /// each of its parcels a unit (five 1-unit parcels consolidated
+        /// 1-for-2 and rounded down hold 2 units between them), which
+        /// `docs/API.md` *Fractional entitlements* answers `422` because a
+        /// parcel at no units would strand its cost base. Any other status,
+        /// or that refusal in an `Exact` run (which never rounds), fails the
+        /// case.
+        fn written_unless_a_parcel_emptied(
+            rounded: bool,
+            resp: &test_support::ApiResponse,
+        ) -> Result<bool, TestCaseError> {
+            if resp.status == StatusCode::CREATED {
+                return Ok(true);
+            }
+            let body = resp.text();
+            prop_assert!(
+                rounded
+                    && resp.status == StatusCode::UNPROCESSABLE_ENTITY
+                    && body.contains("rounding leaves parcel")
+                    && body.contains("with no units"),
+                "{} {}",
+                resp.status,
+                body
+            );
+            Ok(false)
+        }
+
         /// The rule a rounded run gives an action, read off the action's own
         /// terms so a recorded seed still generates the same history.
         fn rounded_rule(a: i64, b: i64) -> &'static str {
@@ -1025,12 +1054,14 @@ pub(crate) mod tests {
                         }
                     }
                     Fact::Split { new, old } if !exchanged => {
-                        app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
+                        let resp = app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
                             "listing_id": 1, "date": on, "action_type": "ShareSplit", "fraction_rule": rule(new, old),
                             "split_new_units": new.to_string(), "split_old_units": old.to_string(),
                         }))
-                        .await
-                        .expect_status(StatusCode::CREATED);
+                        .await;
+                        // A refused consolidation records nothing; the
+                        // history carries on without it.
+                        written_unless_a_parcel_emptied(rounded, &resp)?;
                     }
                     Fact::Bonus { units, held } if !exchanged => {
                         app.put(format!("/corporate_actions/{}", next_id("corporate_actions").await), &json!({
@@ -1100,10 +1131,12 @@ pub(crate) mod tests {
                         .await
                         .expect_status(StatusCode::CREATED);
                         if open(&pool, on).await.iter().any(|p| p.listing_id == 1) {
-                            app.post_empty(format!("/corporate_actions/{id}/exchange"))
-                                .await
-                                .expect_status(StatusCode::CREATED);
-                            exchanged = true;
+                            let resp = app
+                                .post_empty(format!("/corporate_actions/{id}/exchange"))
+                                .await;
+                            // A refused exchange leaves the holding where it
+                            // was, still in the old listing.
+                            exchanged = written_unless_a_parcel_emptied(rounded, &resp)?;
                         }
                     }
                     _ => {}

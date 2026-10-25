@@ -948,12 +948,10 @@ fn rounded_op() -> impl Strategy<Value = Op> {
             .prop_map(|(account, units, cents)| Op::BackBuy { account, units, cents }),
         2 => (1i64..=2, 1i64..=100, 1i64..=5_000)
             .prop_map(|(account, pct, cents)| Op::BackSell { account, pct, cents }),
-        // A grid only: an unconstrained (`None`) holding goes exact, and an
-        // exchange/demerger of a non-terminating exact holding rounded `Up`
-        // can overshoot by a step on its 28th digit — an `Exact`-mode defect
-        // of its own (TODO.md), not this world's. Dropping the grid is
-        // covered by `corporate_action::tests::rounding`.
-        1 => (0u32..=2).prop_map(|scale| Op::Scale { scale: Some(scale) }),
+        // A grid, or none: an unconstrained (`None`) holding goes exact, and
+        // an exchange/demerger of it into a listing with a grid rounds the
+        // holding's exact count, never a 28-digit rounding of it.
+        1 => prop::option::of(0u32..=2).prop_map(|scale| Op::Scale { scale }),
     ]
 }
 
@@ -1000,7 +998,14 @@ async fn stored_counts_hold(pool: &SqlitePool) -> Result<(), TestCaseError> {
         let (new, old) = action_ratio(pool, action).await;
         let step = Decimal::new(1, *scale);
         let held: Decimal = parcels.iter().map(|(b, _, _)| *b).sum();
-        let exact = held * new / old;
+        // A stored `before` converted from a holding left exact (no grid) is
+        // a 28-digit rounding of a count that need not terminate (5000/3),
+        // which the model rounds from its exact fraction. Here the exact
+        // count is only approximated, so it is read to 20 places first: every
+        // count this world generates is a fraction of small ratio terms, so
+        // one off the grid lies further from it than that, while a rounding
+        // of one on it (1250.000…0002) lies far nearer.
+        let exact = (held * new / old).round_dp(20);
         let expected = match rule.as_str() {
             "Up" => {
                 exact.round_dp_with_strategy(*scale, rust_decimal::RoundingStrategy::AwayFromZero)

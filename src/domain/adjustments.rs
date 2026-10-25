@@ -684,10 +684,58 @@ pub fn split_ratio(splits: &[SplitEvent], from: NaiveDate, up_to: Option<NaiveDa
             s.stored.is_none(),
             "a stored-count event reached split_ratio unresolved (ListingSplits::for_parcel)"
         );
-        new *= s.new_units;
-        old *= s.old_units;
+        (new, old) = lowest_terms(new * s.new_units, old * s.old_units);
     }
     SplitRatio { new, old }
+}
+
+/// The greatest common divisor of two non-negative terminating decimals —
+/// the largest decimal both are whole multiples of (`gcd(2.5, 1) = 0.5`) —
+/// or `None` where aligning their scales passes `u128`, or both are zero.
+/// Exact: both figures are read as integers on their common scale.
+fn gcd(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let scale = a.scale().max(b.scale());
+    let align = |d: Decimal| {
+        d.mantissa()
+            .unsigned_abs()
+            .checked_mul(10u128.checked_pow(scale - d.scale())?)
+    };
+    let (mut x, mut y) = (align(a)?, align(b)?);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    if x == 0 {
+        return None;
+    }
+    Decimal::try_from_i128_with_scale(i128::try_from(x).ok()?, scale).ok()
+}
+
+/// `num / den` (`den` positive) in lowest terms: both divided by their
+/// greatest common divisor, which divides each exactly — where that divisor
+/// is more than 1, so dividing by it **shrinks** both terms. A divisor of 1
+/// or less is left alone: the gcd of 658.28571428571428571428571429 and 3
+/// is 10⁻²⁶ (the shortest-count read-back tries every such figure), and
+/// dividing by it trades a one-digit denominator for a 27-digit one,
+/// spending the headroom the reduction exists to save: the later arithmetic
+/// fell back to rounded figures, and a rollover chain's realised cost base
+/// came back 13 cents off the one the schedule carried (found by
+/// `a_rollover_chain_realises_each_original_cost_base_from_its_own_date`).
+/// Left as given, too, where the divisor cannot be computed ([`gcd`]).
+///
+/// Every exact fraction this module carries — a cumulative split ratio, an
+/// [`AcquiredUnits`] count — is kept in lowest terms. A ratio built from a
+/// parcel's **stored** counts (`StoredCount`: 710 units before, 2130 after)
+/// multiplies its raw counts in, and over several rounded actions the
+/// unreduced terms outgrew `Decimal`'s 28 digits: [`mul_div`] then divided
+/// early and rounded, and a parcel whose re-based remainder is exactly 34125
+/// read as 34124.99999999999993745… — a figure off its holding's grid that
+/// no Sell could state. Reduced, the same ratio is 54 for 1, and a result
+/// that is itself representable (every count on a grid is) comes out exact.
+fn lowest_terms(num: Decimal, den: Decimal) -> (Decimal, Decimal) {
+    match gcd(num, den) {
+        Some(g) if g > Decimal::ONE => (num / g, den / g),
+        _ => (num, den),
+    }
 }
 
 /// A quantity in one parcel's own **as-acquired** unit basis — the basis
@@ -752,6 +800,9 @@ impl AcquiredUnits {
             // A whole multiple of the denominator divides exactly.
             return Self::new(num / den);
         }
+        // Kept in lowest terms, so a later product of it stays as small as
+        // the count allows (see `lowest_terms`).
+        let (num, den) = lowest_terms(num, den);
         Self { num, den }
     }
 
@@ -768,7 +819,7 @@ impl AcquiredUnits {
 
     /// The count as an exact fraction, for a caller that folds the
     /// denominator into a division of its own rather than rounding twice.
-    pub(crate) fn parts(self) -> Fraction {
+    pub fn parts(self) -> Fraction {
         Fraction {
             num: self.num,
             den: self.den,
@@ -800,11 +851,30 @@ impl AcquiredUnits {
 /// An [`AcquiredUnits`] count as the exact fraction `num / den` it holds —
 /// see [`AcquiredUnits::parts`].
 #[must_use = "a dropped money or quantity figure is a silent money error"]
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Fraction {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fraction {
     pub num: Decimal,
     /// Always positive.
     pub den: Decimal,
+}
+
+impl Fraction {
+    /// The counts `fractions` over one common denominator: each count's
+    /// numerator on that denominator, and the denominator — so a sum of the
+    /// counts, and any ratio applied to it, is exact (`num / den` summed
+    /// stays a single division). `None` where that denominator or a
+    /// numerator on it is past `Decimal`'s range.
+    pub fn over_common_denominator(fractions: &[Fraction]) -> Option<(Vec<Decimal>, Decimal)> {
+        let mut common = Decimal::ONE;
+        for f in fractions {
+            common = lcm(common, f.den)?;
+        }
+        let nums = fractions
+            .iter()
+            .map(|f| f.num.checked_mul(common / f.den))
+            .collect::<Option<Vec<_>>>()?;
+        Some((nums, common))
+    }
 }
 
 /// The least common multiple of two positive ratio denominators: their
@@ -996,14 +1066,14 @@ pub fn split_adjusted_quantity(
     up_to: Option<NaiveDate>,
 ) -> UnitsAt {
     let SplitRatio { new, old } = rebase_ratio(splits, Some(acquired), up_to);
-    let Fraction { num, den } = qty.parts();
     // One division for the fraction's denominator and the ratio's together:
     // a remainder kept exact is not rounded on its way out either.
     let quantity = if new == old {
         qty.get()
     } else {
-        match den.checked_mul(old) {
-            Some(divisor) => mul_div(&[num, new], divisor),
+        match times_ratio(qty.parts(), SplitRatio { new, old }) {
+            Some(Fraction { num, den }) if den == Decimal::ONE => num,
+            Some(Fraction { num, den }) => num / den,
             None => mul_div(&[qty.get(), new], old),
         }
     };
@@ -1011,6 +1081,37 @@ pub fn split_adjusted_quantity(
         quantity,
         basis: up_to,
     }
+}
+
+/// [`split_adjusted_quantity`] as the exact fraction it divides out — for a
+/// caller that rounds the count itself (`domain::entitlement_rounding`), which
+/// must round the count the parcel holds and not a 28-digit rounding of it:
+/// 1000 units after an exact 5-for-3 split are 5000/3, and 1666.666…667 of
+/// them exchanged 3-for-4 are 1250.000…0002, which a registry rounding up
+/// made 1251. `None` where the product is past `Decimal`'s range.
+pub fn split_adjusted_fraction(
+    qty: AcquiredUnits,
+    splits: &[SplitEvent],
+    acquired: NaiveDate,
+    up_to: Option<NaiveDate>,
+) -> Option<Fraction> {
+    times_ratio(qty.parts(), rebase_ratio(splits, Some(acquired), up_to))
+}
+
+/// The exact product `(num / den) × (new / old)`, in lowest terms when both
+/// factors are: each numerator is first divided by what it shares with the
+/// other factor's denominator, so the product carries no common factor and
+/// overflows only where the result itself is too large to state exactly.
+fn times_ratio(
+    Fraction { num, den }: Fraction,
+    SplitRatio { new, old }: SplitRatio,
+) -> Option<Fraction> {
+    let (num, old) = lowest_terms(num, old);
+    let (new, den) = lowest_terms(new, den);
+    Some(Fraction {
+        num: num.checked_mul(new)?,
+        den: den.checked_mul(old)?,
+    })
 }
 
 /// The smallest mantissa of a `Decimal` carrying 28 significant digits — the
@@ -1482,10 +1583,11 @@ mod tests {
         }
 
         /// Re-basing across a window is re-basing across its two halves: the
-        /// cumulative ratio over `(acquired, at]` is the product, numerator
-        /// and denominator separately, of the ratios over `(acquired, mid]`
-        /// and `(mid, at]` — so an event on the boundary is counted in
-        /// exactly one half.
+        /// cumulative ratio over `(acquired, at]` is the product of the
+        /// ratios over `(acquired, mid]` and `(mid, at]` — so an event on the
+        /// boundary is counted in exactly one half. Compared by value: each
+        /// ratio is kept in lowest terms, so the terms of a product need not
+        /// be the products of the terms.
         #[test]
         fn the_ratio_over_a_window_is_the_product_of_its_halves(
             splits in rebasings(),
@@ -1495,8 +1597,10 @@ mod tests {
             let whole = split_ratio(&splits, acquired(), Some(after_all()));
             let first = split_ratio(&splits, acquired(), Some(mid));
             let second = split_ratio(&splits, mid, Some(after_all()));
-            prop_assert_eq!(whole.new, first.new * second.new);
-            prop_assert_eq!(whole.old, first.old * second.old);
+            prop_assert_eq!(
+                whole.new * first.old * second.old,
+                whole.old * first.new * second.new
+            );
         }
     }
 }

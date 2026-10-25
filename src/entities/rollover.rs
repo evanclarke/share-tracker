@@ -67,6 +67,7 @@ pub fn converted(p: &RolledParcel) -> corporate_action::Converted {
         acquired: p.parcel.date,
         account: p.parcel.holding_account_id,
         units: p.at_date_units.quantity(),
+        exact: p.at_date_exact,
     }
 }
 

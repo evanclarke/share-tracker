@@ -35,8 +35,8 @@ use rust_decimal::Decimal;
 use sqlx::Row;
 
 use crate::domain::adjustments::{
-    self, AcquiredUnits, ListingSplits, RocEvent, UnitsAt, sold_in_acquired_units,
-    split_adjusted_quantity,
+    self, AcquiredUnits, Fraction, ListingSplits, RocEvent, UnitsAt, sold_in_acquired_units,
+    split_adjusted_fraction, split_adjusted_quantity,
 };
 use crate::domain::cost_base::{self, ParcelRow};
 
@@ -151,10 +151,13 @@ impl CostBaseInputs {
             // operation's date, so both bases are carried.
             let at_date_units =
                 split_adjusted_quantity(remaining, &splits, parcel.date, Some(self.up_to));
+            let at_date_exact =
+                split_adjusted_fraction(remaining, &splits, parcel.date, Some(self.up_to));
             open.push(RolledParcel {
                 parcel,
                 remaining,
                 at_date_units,
+                at_date_exact,
             });
         }
         Ok(open)
@@ -170,6 +173,11 @@ pub struct RolledParcel {
     /// The same units in the operation date's basis — what the closing Sell
     /// consumes and what a ratio scales.
     pub at_date_units: UnitsAt,
+    /// [`Self::at_date_units`] as the exact fraction it rounds — what a
+    /// registry's rounding of the replacement holding reads
+    /// (`entitlement_rounding::ParcelBefore::exact`). `None` where it is past
+    /// `Decimal`'s range.
+    pub at_date_exact: Option<Fraction>,
 }
 
 /// How deep a chain of rollovers [`replacement_descendants`],

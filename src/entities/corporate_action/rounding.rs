@@ -60,8 +60,8 @@
 //! column existed has always rounded.
 
 use crate::domain::adjustments::{
-    AcquiredUnits, SplitEvent, StoredCount, UnitsAt, sold_in_acquired_units,
-    split_adjusted_quantity,
+    AcquiredUnits, Fraction, SplitEvent, StoredCount, UnitsAt, sold_in_acquired_units,
+    split_adjusted_fraction, split_adjusted_quantity,
 };
 use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::domain::entitlement_rounding::{self, ParcelBefore, ParcelCount, Prior, RoundingError};
@@ -445,15 +445,19 @@ async fn db_recompute_listing(
                         &prior,
                         parcel.date,
                     );
-                let units = if remaining > AcquiredUnits::ZERO {
-                    split_adjusted_quantity(remaining, &prior, parcel.date, None).quantity()
+                let (units, exact) = if remaining > AcquiredUnits::ZERO {
+                    (
+                        split_adjusted_quantity(remaining, &prior, parcel.date, None).quantity(),
+                        split_adjusted_fraction(remaining, &prior, parcel.date, None),
+                    )
                 } else {
-                    Decimal::ZERO
+                    (Decimal::ZERO, None)
                 };
                 let before = ParcelBefore {
                     trade_id: parcel.id,
                     acquired: parcel.date,
                     units,
+                    exact,
                     prior: priors.get(&(action.id, parcel.id)).copied(),
                 };
                 if !registered(parcel.settled) {
@@ -647,6 +651,9 @@ pub struct Converted {
     pub account: HoldingAccountId,
     /// Its units at the operation date.
     pub units: Decimal,
+    /// The same units as an exact fraction, where `units` rounds a count
+    /// that does not terminate ([`ParcelBefore::exact`]).
+    pub exact: Option<Fraction>,
 }
 
 /// The replacement count each source parcel's holding is rounded to by a
@@ -673,6 +680,7 @@ pub async fn db_round_replacements(
             trade_id: p.parcel,
             acquired: p.acquired,
             units: p.units,
+            exact: p.exact,
             // The operation runs once, over parcels nothing has rounded yet.
             prior: None,
         });

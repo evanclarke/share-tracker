@@ -10,12 +10,12 @@ fn split_ratio_covers_half_open_interval() {
         split_event(d(2024, 6, 1), "2", "1"),
         split_event(d(2025, 1, 1), "1", "10"),
     ];
-    // Acquired before both: both apply → 2/10.
+    // Acquired before both: both apply → 2/10, kept in lowest terms.
     assert_eq!(
         split_ratio(&splits, d(2024, 1, 1), None),
         SplitRatio {
-            new: Decimal::from(2),
-            old: Decimal::from(10)
+            new: Decimal::ONE,
+            old: Decimal::from(5)
         }
     );
     // Acquired on the first conversion date: already post-split — only the
@@ -31,8 +31,8 @@ fn split_ratio_covers_half_open_interval() {
     assert_eq!(
         split_ratio(&splits, d(2024, 1, 1), Some(d(2025, 1, 1))),
         SplitRatio {
-            new: Decimal::from(2),
-            old: Decimal::from(10)
+            new: Decimal::ONE,
+            old: Decimal::from(5)
         }
     );
     // Re-basing to a date before the second conversion: only the first.

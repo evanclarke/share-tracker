@@ -605,6 +605,99 @@ async fn a_later_rounded_action_starts_from_the_earlier_ones_counts() {
     );
 }
 
+/// A parcel re-based through several rounded actions by its stored counts,
+/// partly sold between them, still reads its remaining count on its grid —
+/// the remainder a Sell of everything states. The shrunk CI seed
+/// `b6b1a593…` (TODO.md, 2026-10-25): 710 units, 3-for-1 up, 2-for-1 down,
+/// a 2-per-1 bonus issue down (12780), 1405 sold, 3-for-1 up — 11375 × 3 =
+/// 34125. The ratio a parcel re-bases by multiplies its raw stored counts
+/// (710 → 2130 → 4260 → 12780, then 11375 → 34125), and unreduced those
+/// terms outgrew `Decimal`'s 28 digits, so the remainder was divided early
+/// and read 34124.99999999999993745…, which the Sell of it was refused as
+/// finer than whole units. In lowest terms the ratio is 54 for 1 and the
+/// count exact.
+#[tokio::test]
+async fn a_remainder_re_based_through_stored_counts_stays_on_its_grid() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["710"]).await;
+    let action = |id: i64, date: &str, kind: &str, rule: &str, a: &str, b: &str| {
+        let (x, y) = if kind == "BonusIssue" {
+            ("bonus_units", "bonus_held_units")
+        } else {
+            ("split_new_units", "split_old_units")
+        };
+        (
+            format!("/corporate_actions/{id}"),
+            json!({
+                "listing_id": 1, "date": date, "action_type": kind,
+                x: a, y: b, "fraction_rule": rule,
+            }),
+        )
+    };
+    for (path, body) in [
+        action(7, "2024-02-01", "ShareSplit", "Up", "3", "1"),
+        action(8, "2024-03-01", "ShareSplit", "Down", "2", "1"),
+        action(9, "2024-04-01", "BonusIssue", "Down", "2", "1"),
+    ] {
+        app.put_ok(path, &body).await;
+    }
+    assert_eq!(remaining(&pool, d(2024, 4, 1)).await, [(1, dec("12780"))]);
+    app.post("/sells", &sell_json("2024-05-01", &[(1, "1405")]))
+        .await
+        .expect_status(StatusCode::CREATED);
+    let (path, body) = action(10, "2024-06-03", "ShareSplit", "Up", "3", "1");
+    app.put_ok(path, &body).await;
+    assert_eq!(remaining(&pool, d(2024, 8, 1)).await, [(1, dec("34125"))]);
+    app.post("/sells", &sell_json("2024-08-01", &[(1, "34125")]))
+        .await
+        .expect_status(StatusCode::CREATED);
+    assert!(remaining(&pool, d(2024, 8, 1)).await.is_empty());
+}
+
+/// An exchange of a holding the registry left exact (no grid: here an
+/// unconstrained override for the old listing) into a listing the account
+/// holds to whole units rounds the count the holding **has**. 1000 units
+/// after an exact 5-for-3 split are 5000/3; exchanged 3-for-4 they are
+/// exactly 1250, so rounding up leaves 1250. Rounded from the 28-digit
+/// 1666.666…667, the exact count read 1250.000…0002 and rounding up made
+/// it 1251 — a unit the registry never issued (TODO.md, 2026-10-25).
+#[tokio::test]
+async fn an_exchange_rounds_an_exact_holding_from_its_exact_count() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["1000"]).await;
+    insert_listing(&pool, 2, "NEW").await;
+    app.post(
+        "/holding_unit_scales",
+        &json!({ "holding_account_id": 1, "listing_id": 1, "unit_scale": null }),
+    )
+    .await
+    .expect_status(StatusCode::CREATED);
+    app.put_ok("/corporate_actions/7", &split_json("Up", "5", "3"))
+        .await;
+    app.put_ok(
+        "/corporate_actions/8",
+        &json!({
+            "listing_id": 1, "date": "2024-07-01", "action_type": "ScripForScrip",
+            "fraction_rule": "Up", "scrip_listing_id": 2,
+            "scrip_new_units": "3", "scrip_old_units": "4",
+        }),
+    )
+    .await;
+    app.post_empty("/corporate_actions/8/exchange")
+        .await
+        .expect_status(StatusCode::CREATED);
+    let replacement: (String, String) = sqlx::query_as(
+        "SELECT t.quantity, c.units_after FROM trades t \
+         JOIN corporate_action_parcel_counts c ON c.trade_id = t.id \
+         WHERE t.listing_id = 2",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(dec(&replacement.0), dec("1250"));
+    assert_eq!(dec(&replacement.1), dec("1250"));
+}
+
 /// [`split_json`] with a record date: the register the rounding reads.
 fn split_on_record(rule: &str, new: &str, old: &str, record: &str) -> Value {
     let mut body = split_json(rule, new, old);
