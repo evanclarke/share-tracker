@@ -198,7 +198,14 @@ Out of scope (enter these manually or seek advice):
   demergers (a non-rollover demerger's capital return is a return-of-capital
   payment — record a `ReturnOfCapital` action; an assessable demerger dividend
   is income).
-- **Fractional entitlements rounded or sold for cash in lieu** by the
-  registry: the operation keeps exact fractional unit counts so total cost
-  base is preserved; a cash-in-lieu payment is a separate small disposal —
-  enter it manually if material.
+
+Fractional entitlements are modelled (see `docs/API.md`'s *Fractional
+entitlements*): the `Demerger` action's `fraction_rule` says how the registry
+treats a demerged-entity entitlement that does not divide a holding — `Down`,
+`Up`, `Nearest` or `CashInLieu` rounds each holding's demerged-entity units
+onto its account's unit grid (as registered at the action's optional
+`record_date`), while `Exact` keeps exact fractional counts. Rounding moves
+units, never cost base: each parcel still carries its apportioned share in
+full. Under `CashInLieu` the registry's payment for the fraction is recorded
+with `POST /corporate_actions/{id}/cash_in_lieu`, a Sell of exactly the
+stored fraction.
