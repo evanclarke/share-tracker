@@ -316,7 +316,7 @@ the precedent: the rule is on the plan, the grid on the holding.
   `a_rounded_split_rounds_the_register_at_its_record_date` (straddling Buys/Sells, record date
   ±3 days or absent, every rule, then a settlement-date move) against an independent model of
   the register, checking totals, grid, within-a-step and that the re-base reads the same counts
-- [ ] **Fix the `Exact`-mode `unrealised_gains` property's intermittent failure.** Under `Exact` a
+- [x] **Fix the `Exact`-mode `unrealised_gains` property's intermittent failure.** Under `Exact` a
   holding row (`898.9999999999999999999999999`) and its parcels' printed remainders (`899`) can
   disagree in the 28th digit (seeds `e7cf5465…`, `d841d284…`). Since `Exact` stays, decide what the
   assertion should mean for a non-terminating holding — compare within the rounding the printed
