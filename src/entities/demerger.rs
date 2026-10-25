@@ -49,8 +49,11 @@
 //!
 //! Out of scope (documented in `docs/ato/demergers.md`): demergers without
 //! rollover, pre-CGT original interests, assessable demerger dividends or
-//! separate capital returns, and registry cash-in-lieu of fractional
-//! entitlements (the demerge keeps exact fractional unit counts).
+//! separate capital returns. A registry's rounding of fractional entitlements
+//! is the action's `fraction_rule` (per holding, on the account's unit grid —
+//! `corporate_action::rounding`), and a cash-in-lieu payment is
+//! `POST /corporate_actions/{id}/cash_in_lieu`; only `Exact` keeps exact
+//! fractional unit counts.
 
 use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::domain::entitlement_rounding::ParcelCount;
