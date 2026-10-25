@@ -266,6 +266,7 @@ async fn insert_split(pool: &SqlitePool, id: i64, date: NaiveDate, new: &str, ol
                 fraction_rule: FractionRule::Exact,
                 split_new_units: dec(new),
                 split_old_units: dec(old),
+                record_date: None,
             },
         },
     )

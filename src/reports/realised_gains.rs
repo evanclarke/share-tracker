@@ -2423,6 +2423,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: new.parse().unwrap(),
                     split_old_units: old.parse().unwrap(),
+                    record_date: None,
                 },
             },
         )
@@ -2547,6 +2548,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     bonus_units: Decimal::ONE,
                     bonus_held_units: Decimal::from(10),
+                    record_date: None,
                 },
             },
         )
@@ -4450,7 +4452,7 @@ mod tests {
                                 kind: corporate_action::ActionKind::ShareSplit {
                                     fraction_rule: FractionRule::Exact,
                                     split_new_units: Decimal::from(new),
-                                    split_old_units: Decimal::from(old),
+                                    split_old_units: Decimal::from(old), record_date: None,
                                 },
                             })
                             .await

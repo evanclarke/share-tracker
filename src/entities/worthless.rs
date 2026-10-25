@@ -676,6 +676,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
+                    record_date: None,
                 },
             },
         )

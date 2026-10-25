@@ -91,6 +91,7 @@ async fn db_insert_and_retrieve_share_split_preserves_ratio() {
             fraction_rule: FractionRule::Exact,
             split_new_units: Decimal::from(7),
             split_old_units: Decimal::from(2),
+            record_date: None,
         }
     );
 }
@@ -111,6 +112,7 @@ async fn db_insert_and_retrieve_bonus_issue_preserves_ratio() {
             fraction_rule: FractionRule::Exact,
             bonus_units: Decimal::from(3),
             bonus_held_units: Decimal::from(7),
+            record_date: None,
         }
     );
 }

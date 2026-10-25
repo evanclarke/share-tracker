@@ -287,12 +287,34 @@ the precedent: the rule is on the plan, the grid on the holding.
   property with back-dated Buys/Sells and grid changes (stability after every write and undo; an
   undo is exact when the write moved no count, else restores every holding's parcels, units and
   total — stability makes the rest history-dependent, a Known limitation)
-- [ ] **Register by settlement date.** Item 3 rounds the units held by **trade** date before a
+- [x] **Register by settlement date.** Item 3 rounds the units held by **trade** date before a
   split/bonus's date (a Known limitation), against Financial correctness's rule that the register is
   the settlement date. Round the units **registered** (Buys settled on/before, Sells settled after,
   by `settlement_date`) at the action's record date, giving splits/bonuses a record date if the
   model needs one, and reconcile that with the unit basis a trade straddling the action is stated
   in. Remove the Known limitation; property over trades straddling the action's date
+  *Done 2026-10-25 (migration 0058, `corporate_action::rounding`,
+  `domain::entitlement_rounding::round_registered_holding`).* **Record date:** an optional
+  `record_date` on `ShareSplit`/`BonusIssue`, either side of `date` (ASX: ex + 1 business day;
+  NYSE forward split: before the ex-date), stored in a new audited column `rebase_record_date`
+  (the existing `record_date` is ROC-only and CHECKed `<= date`, and a CHECK cannot be altered);
+  read only under a non-`Exact` rule. NULL = the timetable's register (every trade dated before
+  `date`), which is what every existing row rounded, so no stored count moves. **Straddling
+  trades:** the action's `date` stays the ex-date that decides each trade's unit basis, and the
+  stored counts stay keyed on the parcels traded before it, so re-base and rounding always cover
+  the same units. Under the market timetable (ASX deferred settlement; US due bills) the register
+  equals that set for every normally settled trade, so only a trade traded before the ex-date and
+  settled after the record date straddles; it is a settlement obligation converted on its own —
+  a straddling **Buy**'s parcel is rounded alone (the rule; `CashInLieu` → down, the fraction
+  being the registered seller's), a straddling **Sell**'s units are rounded with the holding and
+  its own converted count delivered out of the rounded total, the remaining parcels sharing the
+  rest pro rata (within a step each, stable). A trade dated on/after the ex-date takes no part
+  however it settles. The trade-date Known limitation is replaced by a narrower one: a rounded
+  scrip exchange/demerger still converts the parcels open on its operation date by trade date (no
+  record date of its own). Properties: `entitlement_rounding`'s registered-holding property, and
+  `a_rounded_split_rounds_the_register_at_its_record_date` (straddling Buys/Sells, record date
+  ±3 days or absent, every rule, then a settlement-date move) against an independent model of
+  the register, checking totals, grid, within-a-step and that the re-base reads the same counts
 - [ ] **Fix the `Exact`-mode `unrealised_gains` property's intermittent failure.** Under `Exact` a
   holding row (`898.9999999999999999999999999`) and its parcels' printed remainders (`899`) can
   disagree in the 28th digit (seeds `e7cf5465…`, `d841d284…`). Since `Exact` stays, decide what the

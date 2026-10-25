@@ -3435,8 +3435,15 @@ mod tests {
             "the backfill is a value the column gains, not an edit"
         );
 
-        // The rows read back through the model as `Exact` actions.
-        let split = corporate_action::db_get(&pool, 1).await.unwrap().unwrap();
+        // The rows read back through the model as `Exact` actions — selected
+        // with the one column a later migration adds (0058's
+        // `rebase_record_date`) supplied, since the model reads it.
+        let split: corporate_action::CorporateAction = sqlx::query_as(
+            "SELECT *, NULL AS rebase_record_date FROM corporate_actions WHERE id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert!(matches!(
             split.kind,
             ActionKind::ShareSplit {

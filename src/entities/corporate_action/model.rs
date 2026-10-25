@@ -162,6 +162,18 @@ pub enum ActionKind {
         /// How the registry treats a fractional entitlement (see
         /// [`FractionRule`]).
         fraction_rule: FractionRule,
+        /// Optional record date — when the register closed to fix who holds
+        /// the units the action converts. Read only under a non-`Exact`
+        /// [`FractionRule`]: the holding rounded is the units **registered**
+        /// at it (Buys settled on or before it, Sells settled after it),
+        /// and a trade straddling it and the action's `date` is converted
+        /// as its own settlement obligation (`docs/API.md` *Fractional
+        /// entitlements*). It may fall on either side of `date` (after it
+        /// on the ASX, before it for a NYSE forward split). `None` reads the
+        /// register the market timetable leaves: every trade dated before
+        /// `date`. Informational on an `Exact` action.
+        #[serde(default)]
+        record_date: Option<NaiveDate>,
     },
     BonusIssue {
         /// Every `bonus_held_units` units held receive `bonus_units`
@@ -172,6 +184,18 @@ pub enum ActionKind {
         /// How the registry treats a fractional entitlement (see
         /// [`FractionRule`]).
         fraction_rule: FractionRule,
+        /// Optional record date — when the register closed to fix who holds
+        /// the units the action converts. Read only under a non-`Exact`
+        /// [`FractionRule`]: the holding rounded is the units **registered**
+        /// at it (Buys settled on or before it, Sells settled after it),
+        /// and a trade straddling it and the action's `date` is converted
+        /// as its own settlement obligation (`docs/API.md` *Fractional
+        /// entitlements*). It may fall on either side of `date` (after it
+        /// on the ASX, before it for a NYSE forward split). `None` reads the
+        /// register the market timetable leaves: every trade dated before
+        /// `date`. Informational on an `Exact` action.
+        #[serde(default)]
+        record_date: Option<NaiveDate>,
     },
     RightsIssue {
         /// Every `rights_held_units` units held at the record date entitle
@@ -387,11 +411,13 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ActionKind {
                 split_new_units: row_dec(row, "split_new_units")?,
                 split_old_units: row_dec(row, "split_old_units")?,
                 fraction_rule: fraction_rule(row)?,
+                record_date: row.try_get("rebase_record_date")?,
             }),
             "BonusIssue" => Ok(ActionKind::BonusIssue {
                 bonus_units: row_dec(row, "bonus_units")?,
                 bonus_held_units: row_dec(row, "bonus_held_units")?,
                 fraction_rule: fraction_rule(row)?,
+                record_date: row.try_get("rebase_record_date")?,
             }),
             "RightsIssue" => Ok(ActionKind::RightsIssue {
                 rights_units: row_dec(row, "rights_units")?,
@@ -515,9 +541,11 @@ pub struct CorporateActionBody {
     /// price's currency); refused on every other type.
     #[serde(default)]
     currency: Option<CurrencyCode>,
-    /// `ReturnOfCapital` only (optional): the date entitlement was fixed, on or before
-    /// `date`. Parcels acquired before it earn the payment; omitted, the payment date
-    /// decides.
+    /// `ReturnOfCapital` (optional): the date entitlement was fixed, on or before `date`.
+    /// Parcels settled on or before it earn the payment; omitted, the payment date decides.
+    /// `ShareSplit` / `BonusIssue` (optional): the date the register closed for the
+    /// conversion, either side of `date`; a non-`Exact` rule rounds the units registered at
+    /// it (settled on or before it), and omitted, every trade dated before `date` counts.
     #[serde(default)]
     record_date: Option<NaiveDate>,
     /// `ShareSplit` only (required): every `split_old_units` existing units become
@@ -710,7 +738,7 @@ pub struct CorporateActionBody {
 /// and was entered as another. Two groups are shared rather than owned by one
 /// type, and they are the only thing that varies between arms: `currency`,
 /// which `ReturnOfCapital`, `RightsIssue` and `BuyBack` require and the other five
-/// forbid, and `record_date`, which `ReturnOfCapital` alone may carry.
+/// forbid, and `record_date`, which `ReturnOfCapital`, `ShareSplit` and `BonusIssue` may carry.
 #[derive(Clone, Copy)]
 struct Presence(u16);
 
@@ -854,7 +882,11 @@ impl CorporateActionBody {
         // holder to, so a record date past the payment date is rejected rather
         // than silently ignored (CHECK-enforced too, 0023).
         let record_date = match self.record_date {
-            Some(rd) if rd > self.date => return None,
+            Some(rd)
+                if rd > self.date && matches!(self.action_type, ActionType::ReturnOfCapital) =>
+            {
+                return None;
+            }
             other => other,
         };
         let present = Presence::of(&self);
@@ -876,18 +908,24 @@ impl CorporateActionBody {
                     record_date,
                 })
             }
-            ActionType::ShareSplit if present.only(Presence::SPLIT | Presence::FRACTION) => {
+            ActionType::ShareSplit
+                if present.only(Presence::SPLIT | Presence::FRACTION | Presence::RECORD) =>
+            {
                 Some(ActionKind::ShareSplit {
                     split_new_units: positive(self.split_new_units)?,
                     split_old_units: positive(self.split_old_units)?,
                     fraction_rule: self.fraction_rule?,
+                    record_date,
                 })
             }
-            ActionType::BonusIssue if present.only(Presence::BONUS | Presence::FRACTION) => {
+            ActionType::BonusIssue
+                if present.only(Presence::BONUS | Presence::FRACTION | Presence::RECORD) =>
+            {
                 Some(ActionKind::BonusIssue {
                     bonus_units: positive(self.bonus_units)?,
                     bonus_held_units: positive(self.bonus_held_units)?,
                     fraction_rule: self.fraction_rule?,
+                    record_date,
                 })
             }
             ActionType::RightsIssue if present.only(Presence::RIGHTS | Presence::CURRENCY) => {
@@ -1076,12 +1114,12 @@ mod tests {
             ),
             (
                 "ShareSplit",
-                Presence::SPLIT | Presence::FRACTION,
+                Presence::SPLIT | Presence::FRACTION | Presence::RECORD,
                 json!({"split_new_units": "2", "split_old_units": "1", "fraction_rule": "Exact"}),
             ),
             (
                 "BonusIssue",
-                Presence::BONUS | Presence::FRACTION,
+                Presence::BONUS | Presence::FRACTION | Presence::RECORD,
                 json!({"bonus_units": "1", "bonus_held_units": "10", "fraction_rule": "Down"}),
             ),
             (

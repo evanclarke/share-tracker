@@ -79,6 +79,7 @@ fn split(id: i64, listing_id: ListingId, date: NaiveDate, new: &str, old: &str) 
             fraction_rule: FractionRule::Exact,
             split_new_units: new.parse().unwrap(),
             split_old_units: old.parse().unwrap(),
+            record_date: None,
         },
     }
 }
@@ -98,6 +99,7 @@ fn bonus(
             fraction_rule: FractionRule::Exact,
             bonus_units: units.parse().unwrap(),
             bonus_held_units: held.parse().unwrap(),
+            record_date: None,
         },
     }
 }

@@ -646,6 +646,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec(ratio),
                     split_old_units: Decimal::ONE,
+                    record_date: None,
                 },
             },
         )
@@ -1158,6 +1159,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     bonus_units: Decimal::ONE,
                     bonus_held_units: dec("10"),
+                    record_date: None,
                 },
             },
         )

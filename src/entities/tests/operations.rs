@@ -1410,12 +1410,14 @@ async fn chain(
                         fraction_rule: FractionRule::Exact,
                         split_new_units: new.into(),
                         split_old_units: old.into(),
+                        record_date: None,
                     }
                 } else {
                     ActionKind::BonusIssue {
                         fraction_rule: FractionRule::Exact,
                         bonus_units: new.into(),
                         bonus_held_units: old.into(),
+                        record_date: None,
                     }
                 };
                 put_action(&pool, 100 + n as i64, date, kind).await;

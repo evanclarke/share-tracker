@@ -1140,6 +1140,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
+                    record_date: None,
                 },
             },
         )
@@ -1560,6 +1561,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec("2"),
                     split_old_units: dec("1"),
+                    record_date: None,
                 },
             },
         )
@@ -1935,6 +1937,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec("1000"),
                     split_old_units: dec("1000000"),
+                    record_date: None,
                 },
             },
         )
@@ -1970,6 +1973,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     bonus_units: dec("2"),
                     bonus_held_units: dec("7"),
+                    record_date: None,
                 },
             ),
             (
@@ -1979,6 +1983,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec("5"),
                     split_old_units: dec("4"),
+                    record_date: None,
                 },
             ),
         ] {
@@ -2191,6 +2196,7 @@ mod tests {
                                 fraction_rule: FractionRule::Exact,
                                 split_new_units: Decimal::from(*new),
                                 split_old_units: Decimal::from(*old),
+                                record_date: None,
                             },
                         },
                     )
@@ -2207,6 +2213,7 @@ mod tests {
                                 fraction_rule: FractionRule::Exact,
                                 bonus_units: Decimal::from(*units),
                                 bonus_held_units: Decimal::from(*held),
+                                record_date: None,
                             },
                         },
                     )

@@ -34,7 +34,7 @@ const COLUMNS: &str = "id, action_type, listing_id, date, amount_per_unit, curre
                        demerger_held_units, demerger_cost_base_pct, worthless_event, \
                        record_date, demerger_close_date, demerger_close_price, \
                        demerger_close_sourced_from, demerger_close_reason, renounceable, \
-                       fraction_rule";
+                       fraction_rule, rebase_record_date";
 
 /// The `/corporate_actions` list filters: the listing and the action
 /// `date` range, inclusive at both ends. A corporate action belongs to
@@ -564,6 +564,7 @@ async fn write(
         demerger_close_reason: Option<String>,
         worthless_event: Option<&'static str>,
         fraction_rule: Option<&'static str>,
+        rebase_record_date: Option<NaiveDate>,
     }
     let mut c = Cols::default();
     match &action.kind {
@@ -580,7 +581,9 @@ async fn write(
             split_new_units,
             split_old_units,
             fraction_rule,
+            record_date,
         } => {
+            c.rebase_record_date = *record_date;
             c.split_new_units = OptMoney(Some(*split_new_units));
             c.split_old_units = OptMoney(Some(*split_old_units));
             c.fraction_rule = Some(fraction_rule.as_str());
@@ -589,7 +592,9 @@ async fn write(
             bonus_units,
             bonus_held_units,
             fraction_rule,
+            record_date,
         } => {
+            c.rebase_record_date = *record_date;
             c.bonus_units = OptMoney(Some(*bonus_units));
             c.bonus_held_units = OptMoney(Some(*bonus_held_units));
             c.fraction_rule = Some(fraction_rule.as_str());
@@ -787,9 +792,9 @@ async fn write(
           demerger_listing_id, demerger_new_units, demerger_held_units, \
           demerger_cost_base_pct, worthless_event, record_date, \
           demerger_close_date, demerger_close_price, demerger_close_sourced_from, \
-          demerger_close_reason, renounceable, fraction_rule) \
+          demerger_close_reason, renounceable, fraction_rule, rebase_record_date) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-                 ?, ?, ?, ?, ?, ?, ?) \
+                 ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(id) DO UPDATE SET \
              action_type       = excluded.action_type, \
              listing_id        = excluded.listing_id, \
@@ -824,7 +829,8 @@ async fn write(
              demerger_close_sourced_from = excluded.demerger_close_sourced_from, \
              demerger_close_reason       = excluded.demerger_close_reason, \
              renounceable                = excluded.renounceable, \
-             fraction_rule               = excluded.fraction_rule",
+             fraction_rule               = excluded.fraction_rule, \
+             rebase_record_date          = excluded.rebase_record_date",
         id,
     );
     let result = query
@@ -862,6 +868,7 @@ async fn write(
         .bind(c.demerger_close_reason)
         .bind(c.renounceable)
         .bind(c.fraction_rule)
+        .bind(c.rebase_record_date)
         .execute(&mut *tx)
         .await?;
     // An id-less INSERT was given one by the database; an upsert wrote the

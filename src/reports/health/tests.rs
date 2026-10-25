@@ -871,6 +871,7 @@ async fn insert_split(pool: &SqlitePool, id: i64, listing_id: ListingId, date: N
             fraction_rule: FractionRule::Exact,
             split_new_units: dec("2"),
             split_old_units: dec("1"),
+            record_date: None,
         },
     )
     .await;
@@ -3780,6 +3781,7 @@ async fn a_split_between_the_ex_date_and_the_fetch_does_not_skew_the_expected_am
             fraction_rule: FractionRule::Exact,
             split_new_units: dec("10"),
             split_old_units: dec("1"),
+            record_date: None,
         },
     )
     .await;

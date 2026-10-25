@@ -503,7 +503,8 @@ async fn a_write_that_forgets_to_settle_cannot_commit() {
 /// The scheduled `settlement-recompute` job rewrites computed settlement
 /// dates — a column that marks a rounded listing (0057) — so it settles in its
 /// own transaction too: it runs to completion over a rounded listing, and the
-/// counts (decided by trade date) do not move.
+/// counts do not move (the action has no record date, so its register is
+/// every trade dated before it).
 #[tokio::test]
 async fn the_settlement_recompute_job_settles_what_it_rewrites() {
     let pool = test_pool().await;
@@ -604,10 +605,516 @@ async fn a_later_rounded_action_starts_from_the_earlier_ones_counts() {
     );
 }
 
+/// [`split_json`] with a record date: the register the rounding reads.
+fn split_on_record(rule: &str, new: &str, old: &str, record: &str) -> Value {
+    let mut body = split_json(rule, new, old);
+    body["record_date"] = json!(record);
+    body
+}
+
+/// A Buy traded before the action's date (so stated in the pre-split basis)
+/// whose settlement falls after the record date was on no register when the
+/// holding was rounded: it is converted on its own, as the settlement
+/// obligation it is. Two 50-unit parcels, 1-for-3, rounded down: with no
+/// record date (the timetable's register) the holding is 100 → 33, as 17 +
+/// 16; with the second parcel settling after the record date, the registered
+/// holding is 50 → 16 and the late parcel 50 → 16 alone. The register and the
+/// re-base agree either way — every parcel traded before the split is
+/// converted, by its stored count.
+#[tokio::test]
+async fn a_buy_settling_after_the_record_date_is_converted_on_its_own() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50"]).await;
+    test_support::buy(2, 1)
+        .qty(dec("50"))
+        .date(d(2024, 5, 31))
+        .settlement(d(2024, 6, 5))
+        .insert(&pool)
+        .await;
+    app.put_ok("/corporate_actions/7", &split_json("Down", "1", "3"))
+        .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
+
+    app.put_ok(
+        "/corporate_actions/7",
+        &split_on_record("Down", "1", "3", "2024-06-04"),
+    )
+    .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "16".into()), (2, "50".into(), "16".into())]
+    );
+    assert_eq!(
+        remaining(&pool, d(2024, 6, 3)).await,
+        [(1, dec("16")), (2, dec("16"))]
+    );
+    let action: Value = app.get_json("/corporate_actions/7").await;
+    assert_eq!(action["record_date"], "2024-06-04");
+
+    // Settling it on the record date puts it back on the register, and the
+    // write recomputes the counts in its own transaction: 100 → 33 again,
+    // and — the distribution being stable — the step goes to the later
+    // acquisition rather than taking parcel 1's count back.
+    let mut tx = write_tx(&pool).await.unwrap();
+    sqlx::query("UPDATE trades SET settlement_date = '2024-06-04' WHERE id = 2")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    db_settle(&mut tx).await.unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "16".into()), (2, "50".into(), "17".into())]
+    );
+}
+
+/// A Sell traded before the action's date but settling after the record date
+/// still had its units on the seller's register: they are rounded with the
+/// holding, and the sale delivers its own converted count out of it. Parcels
+/// of 50 and 50, 2 sold from the first; 1-for-3 rounded down. By trade date
+/// the holding is 98 → 32; on the register it is 100 → 33, of which the
+/// 2-unit obligation delivers none (2/3 rounded down), so the parcels share
+/// 33 — 16 and 17, each within a unit of its pro-rata share.
+#[tokio::test]
+async fn a_sell_settling_after_the_record_date_is_rounded_with_the_holding() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50", "50"]).await;
+    let mut sale = sell_json("2024-05-31", &[(1, "2")]);
+    sale["settlement_date"] = json!("2024-06-05");
+    let created: Value = app
+        .post("/sells", &sale)
+        .await
+        .expect_status(StatusCode::CREATED)
+        .json();
+    let sell_id = created["id"].as_i64().unwrap();
+
+    app.put_ok("/corporate_actions/7", &split_json("Down", "1", "3"))
+        .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "48".into(), "16".into()), (2, "50".into(), "16".into())]
+    );
+    app.put_ok(
+        "/corporate_actions/7",
+        &split_on_record("Down", "1", "3", "2024-06-04"),
+    )
+    .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "48".into(), "16".into()), (2, "50".into(), "17".into())]
+    );
+    // The open parcels re-base by those counts: 33 units, all sellable.
+    assert_eq!(
+        remaining(&pool, d(2024, 6, 11)).await,
+        [(1, dec("16")), (2, dec("17"))]
+    );
+    app.post("/sells", &sell_json("2024-06-11", &[(1, "16"), (2, "17")]))
+        .await
+        .expect_status(StatusCode::CREATED);
+    assert!(remaining(&pool, d(2024, 6, 11)).await.is_empty());
+
+    // Settled by the record date instead, the sale left the register before
+    // it was rounded — 98 → 32 — and the later sale of 33 no longer fits.
+    let mut tx = write_tx(&pool).await.unwrap();
+    sqlx::query("UPDATE trades SET settlement_date = '2024-06-04' WHERE id = ?")
+        .bind(sell_id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    let refused = db_settle(&mut tx).await.unwrap_err();
+    assert!(refused.to_string().contains("sale"), "{refused}");
+}
+
+/// A trade dated on or after the action's date is stated in the post-action
+/// basis however it settles, so a post-ex Buy settled on or before the record
+/// date (same-day settlement, a record date after the ex-date) takes no part
+/// in the rounding — and a record date before the action's date (a NYSE
+/// forward split's) is read the same way as one after it.
+#[tokio::test]
+async fn a_post_action_trade_takes_no_part_whatever_its_settlement() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50", "50"]).await;
+    test_support::buy(3, 1)
+        .qty(dec("7"))
+        .date(d(2024, 6, 3))
+        .settlement(d(2024, 6, 3))
+        .insert(&pool)
+        .await;
+    app.put_ok(
+        "/corporate_actions/7",
+        &split_on_record("Down", "1", "3", "2024-06-05"),
+    )
+    .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
+    assert_eq!(
+        remaining(&pool, d(2024, 6, 3)).await,
+        [(1, dec("17")), (2, dec("16")), (3, dec("7"))]
+    );
+    // A record date before the ex-date: the second parcel (settled
+    // 2024-01-05) is registered by it, so nothing changes.
+    app.put_ok(
+        "/corporate_actions/7",
+        &split_on_record("Down", "1", "3", "2024-05-30"),
+    )
+    .await;
+    assert_eq!(
+        counts(&pool).await,
+        [(1, "50".into(), "17".into()), (2, "50".into(), "16".into())]
+    );
+}
+
+/// A record date on any other type than a return of capital, share split or
+/// bonus issue is refused; on a split it may fall either side of the date.
+#[tokio::test]
+async fn a_split_record_date_is_stored_either_side_of_its_date() {
+    let pool = test_pool().await;
+    let app = whole_unit_holding(&pool, &["50"]).await;
+    for record in ["2024-05-29", "2024-06-04"] {
+        app.put_ok(
+            "/corporate_actions/7",
+            &split_on_record("Exact", "2", "1", record),
+        )
+        .await;
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT rebase_record_date FROM corporate_actions WHERE id = 7")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored.as_deref(), Some(record));
+    }
+    let mut bonus = json!({
+        "listing_id": 1, "date": "2024-06-03", "action_type": "BonusIssue",
+        "bonus_units": "1", "bonus_held_units": "3", "fraction_rule": "Down",
+        "record_date": "2024-06-04",
+    });
+    app.put_ok("/corporate_actions/8", &bonus).await;
+    bonus["action_type"] = json!("WorthlessShares");
+    app.put("/corporate_actions/9", &bonus)
+        .await
+        .expect_status(StatusCode::UNPROCESSABLE_ENTITY);
+}
+
 mod properties {
+    use super::*;
     use crate::reports::unrealised_gains::tests::properties::{fact, realise_everything};
-    use crate::test_support;
     use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use std::collections::HashMap;
+
+    /// The trading days the straddling property dates its trades on: two
+    /// weeks of 2024 with the split's ex-date (2024-06-03) at index 5.
+    const DAYS: [(u32, u32); 10] = [
+        (5, 27),
+        (5, 28),
+        (5, 29),
+        (5, 30),
+        (5, 31),
+        (6, 3),
+        (6, 4),
+        (6, 5),
+        (6, 6),
+        (6, 7),
+    ];
+    const EX: usize = 5;
+
+    fn day(i: usize) -> NaiveDate {
+        d(2024, DAYS[i].0, DAYS[i].1)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Rule {
+        Down,
+        Up,
+        Nearest,
+        CashInLieu,
+    }
+
+    impl Rule {
+        fn name(self) -> &'static str {
+            match self {
+                Rule::Down => "Down",
+                Rule::Up => "Up",
+                Rule::Nearest => "Nearest",
+                Rule::CashInLieu => "CashInLieu",
+            }
+        }
+
+        /// `num / den` rounded to a whole unit by the rule — computed here
+        /// independently of `domain::entitlement_rounding`.
+        fn round(self, num: i64, den: i64) -> i64 {
+            let floor = num.div_euclid(den);
+            let rem = num.rem_euclid(den);
+            match self {
+                Rule::Down | Rule::CashInLieu => floor,
+                Rule::Up => floor + i64::from(rem > 0),
+                Rule::Nearest => floor + i64::from(2 * rem >= den),
+            }
+        }
+
+        /// A settlement obligation's rounding: cash in lieu is the
+        /// registered holder's, so the obligation rounds down.
+        fn obligation(self) -> Self {
+            if self == Rule::CashInLieu {
+                Rule::Down
+            } else {
+                self
+            }
+        }
+    }
+
+    /// One generated history: Buys (trade-day index, quantity, settlement
+    /// lag in calendar days) and Sells traded before the split (parcel,
+    /// trade-day index, quantity, settlement lag).
+    #[derive(Debug, Clone)]
+    struct World {
+        buys: Vec<(usize, i64, i64)>,
+        sells: Vec<(usize, usize, i64, i64)>,
+    }
+
+    /// Every invariant the register-by-settlement rounding promises, checked
+    /// against an independent model of the register: each straddling Buy is
+    /// converted on its own by the rule; the registered parcels' counts sum
+    /// to the register's rounded total less each straddling Sell's own
+    /// rounded count, each within a unit of its pro-rata share; every count is
+    /// whole and positive; and the re-base agrees — each parcel traded before
+    /// the split holds exactly its stored count at the split, each one traded
+    /// after it its own quantity.
+    async fn check(
+        pool: &SqlitePool,
+        world: &World,
+        settled: &[NaiveDate],
+        sold_settled: &[NaiveDate],
+        record: Option<NaiveDate>,
+        (new, old): (i64, i64),
+        rule: Rule,
+    ) -> Result<(), TestCaseError> {
+        let ex = day(EX);
+        let registered = |s: NaiveDate| record.is_none_or(|r| s <= r);
+        let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT trade_id, units_before, units_after, in_lieu_units \
+             FROM corporate_action_parcel_counts WHERE corporate_action_id = 7",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let stored: HashMap<i64, (Decimal, Decimal)> = rows
+            .into_iter()
+            .map(|(t, _, after, in_lieu)| (t, (dec(&after), dec(&in_lieu))))
+            .collect();
+
+        let mut register = 0i64;
+        let mut pending: Vec<i64> = Vec::new();
+        let mut held: Vec<(i64, i64)> = Vec::new(); // (trade id, units before)
+        for (i, (buy_day, qty, _)) in world.buys.iter().enumerate() {
+            let id = i64::try_from(i).unwrap() + 1;
+            if *buy_day >= EX {
+                prop_assert!(
+                    !stored.contains_key(&id),
+                    "post-ex parcel {id} was converted"
+                );
+                continue;
+            }
+            let sold: i64 = world.sells.iter().filter(|s| s.0 == i).map(|s| s.2).sum();
+            let units = qty - sold;
+            if !registered(settled[i]) {
+                if units > 0 {
+                    let (after, in_lieu) = stored[&id];
+                    prop_assert_eq!(in_lieu, Decimal::ZERO);
+                    prop_assert_eq!(
+                        after,
+                        Decimal::from(rule.obligation().round(units * new, old)),
+                        "straddling Buy {} converted alone",
+                        id
+                    );
+                }
+                continue;
+            }
+            register += units;
+            for (s, sale) in world.sells.iter().enumerate().filter(|(_, s)| s.0 == i) {
+                if !registered(sold_settled[s]) {
+                    register += sale.2;
+                    pending.push(sale.2);
+                }
+            }
+            if units > 0 {
+                held.push((id, units));
+            }
+        }
+        let rounded = rule.round(register * new, old);
+        let target = if pending.is_empty() {
+            rounded
+        } else {
+            rounded
+                - pending
+                    .iter()
+                    .map(|p| rule.obligation().round(p * new, old))
+                    .sum::<i64>()
+        };
+        let sum_units: i64 = held.iter().map(|h| h.1).sum();
+        let mut on_grid_total = Decimal::ZERO;
+        for (id, units) in &held {
+            let (after, in_lieu) = stored[id];
+            let on_grid = after - in_lieu;
+            prop_assert!(on_grid > Decimal::ZERO || after > Decimal::ZERO);
+            prop_assert_eq!(on_grid, on_grid.trunc(), "parcel {} off the grid", id);
+            on_grid_total += on_grid;
+            // Within a unit of its share: `units × new / old`, or its
+            // pro-rata part of what the straddling Sells leave.
+            let (num, den) = if pending.is_empty() {
+                (units * new, old)
+            } else {
+                (units * target, sum_units)
+            };
+            let scaled = on_grid * Decimal::from(den) - Decimal::from(num);
+            prop_assert!(
+                scaled.abs() < Decimal::from(den),
+                "parcel {id}: {on_grid} vs {num}/{den}"
+            );
+        }
+        if !held.is_empty() {
+            prop_assert_eq!(on_grid_total, Decimal::from(target));
+        }
+
+        // The re-base reads the same counts.
+        let at_ex = open_parcels::load(&mut pool.acquire().await.unwrap(), Some(ex))
+            .await
+            .unwrap();
+        for p in at_ex {
+            let id = p.parcel.id.0;
+            let expected = match stored.get(&id) {
+                Some((after, _)) => *after,
+                None => {
+                    let i = usize::try_from(id - 1).unwrap();
+                    prop_assert!(world.buys[i].0 >= EX, "parcel {id} has no count");
+                    Decimal::from(world.buys[i].1)
+                }
+            };
+            prop_assert_eq!(p.remaining_as_of.quantity(), expected);
+        }
+        Ok(())
+    }
+
+    fn world() -> impl Strategy<Value = World> {
+        prop::collection::vec((0usize..=7, 5i64..=200, 0i64..=6), 1..=4).prop_flat_map(|buys| {
+            let n = buys.len();
+            let sells = prop::collection::vec((0..n, 0usize..EX, 1i64..=60, 0i64..=6), 0..=3);
+            (Just(buys), sells).prop_map(|(buys, sells)| World { buys, sells })
+        })
+    }
+
+    async fn straddling(
+        world: World,
+        record: Option<i64>,
+        (new, old): (i64, i64),
+        rule: Rule,
+        edit: (usize, i64),
+    ) -> Result<(), TestCaseError> {
+        let pool = test_pool().await;
+        let app = whole_unit_holding(&pool, &[]).await;
+        let ex = day(EX);
+        let record = record.map(|r| ex + chrono::Duration::days(r));
+        let mut settled = Vec::new();
+        for (i, (buy_day, qty, lag)) in world.buys.iter().enumerate() {
+            let date = day(*buy_day);
+            let settlement = date + chrono::Duration::days(*lag);
+            test_support::buy(i64::try_from(i).unwrap() + 1, 1)
+                .qty(Decimal::from(*qty))
+                .date(date)
+                .settlement(settlement)
+                .insert(&pool)
+                .await;
+            settled.push(settlement);
+        }
+        // Each Sell traded before the split, after its parcel, for what is
+        // left of it; one that would sell nothing is dropped.
+        let mut left: Vec<i64> = world.buys.iter().map(|b| b.1).collect();
+        let mut kept = World {
+            buys: world.buys.clone(),
+            sells: Vec::new(),
+        };
+        let mut sold_settled = Vec::new();
+        for (parcel, sale_day, qty, lag) in world.sells {
+            let buy_day = world.buys[parcel].0;
+            let qty = qty.min(left[parcel]);
+            if buy_day >= EX || qty == 0 {
+                continue;
+            }
+            let sale_day = sale_day.max(buy_day);
+            let date = day(sale_day);
+            let settlement = date + chrono::Duration::days(lag);
+            let mut body = sell_json(
+                &date.to_string(),
+                &[(i64::try_from(parcel).unwrap() + 1, &qty.to_string())],
+            );
+            body["settlement_date"] = json!(settlement.to_string());
+            app.post("/sells", &body)
+                .await
+                .expect_status(StatusCode::CREATED);
+            left[parcel] -= qty;
+            kept.sells.push((parcel, sale_day, qty, lag));
+            sold_settled.push(settlement);
+        }
+
+        let mut action = split_json(rule.name(), &new.to_string(), &old.to_string());
+        if let Some(r) = record {
+            action["record_date"] = json!(r.to_string());
+        }
+        let resp = app.put("/corporate_actions/7", &action).await;
+        if resp.status == StatusCode::UNPROCESSABLE_ENTITY {
+            // Only the documented refusal: a parcel rounded to nothing.
+            prop_assert!(resp.text().contains("with no units"), "{}", resp.text());
+            return Ok(());
+        }
+        prop_assert!(resp.status.is_success(), "{}", resp.text());
+        check(
+            &pool,
+            &kept,
+            &settled,
+            &sold_settled,
+            record,
+            (new, old),
+            rule,
+        )
+        .await?;
+
+        // Move one parcel's settlement date — across the record date or not —
+        // and the write recomputes the counts, which hold up the same way.
+        let (which, lag) = edit;
+        let which = which % kept.buys.len();
+        let settlement = day(kept.buys[which].0) + chrono::Duration::days(lag);
+        let mut tx = write_tx(&pool).await.unwrap();
+        sqlx::query("UPDATE trades SET settlement_date = ? WHERE id = ?")
+            .bind(settlement)
+            .bind(i64::try_from(which).unwrap() + 1)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        if let Err(refused) = db_settle(&mut tx).await {
+            // A recount that empties a parcel (or no longer fits a sale —
+            // there are none after the split here) is refused, storing
+            // nothing.
+            prop_assert!(refused.to_string().contains("no units"), "{refused}");
+            return Ok(());
+        }
+        tx.commit().await.unwrap();
+        settled[which] = settlement;
+        check(
+            &pool,
+            &kept,
+            &settled,
+            &sold_settled,
+            record,
+            (new, old),
+            rule,
+        )
+        .await
+    }
 
     proptest! {
         #![proptest_config(test_support::db_proptest_config())]
@@ -632,6 +1139,29 @@ mod properties {
             price_cents in (1i64..=9_000, 1i64..=9_000),
         ) {
             test_support::block_on(realise_everything(amit, facts, gap_days, price_cents, true))?;
+        }
+
+        /// Trades straddling a rounded split — traded before its ex-date and
+        /// settled after its record date, or the reverse — against an
+        /// independent model of the register (see [`check`]), after the
+        /// split is recorded and again after a parcel's settlement date
+        /// moves. The record date falls up to three days either side of the
+        /// ex-date, or is absent (the timetable's register).
+        #[test]
+        fn a_rounded_split_rounds_the_register_at_its_record_date(
+            world in world(),
+            record in prop::option::of(-3i64..=3),
+            new in 1i64..=4,
+            old in 1i64..=4,
+            rule in prop_oneof![
+                Just(Rule::Down),
+                Just(Rule::Up),
+                Just(Rule::Nearest),
+                Just(Rule::CashInLieu),
+            ],
+            edit in (0usize..4, 0i64..=6),
+        ) {
+            test_support::block_on(straddling(world, record, (new, old), rule, edit))?;
         }
     }
 }

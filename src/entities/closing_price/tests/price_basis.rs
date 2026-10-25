@@ -137,6 +137,7 @@ async fn db_a_bonus_issue_rebases_stored_prices_like_a_split() {
                 fraction_rule: FractionRule::Exact,
                 bonus_units: Decimal::ONE,
                 bonus_held_units: Decimal::ONE,
+                record_date: None,
             },
         },
     )

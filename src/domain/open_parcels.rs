@@ -420,6 +420,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: dec(ratio),
                     split_old_units: Decimal::ONE,
+                    record_date: None,
                 },
             },
         )

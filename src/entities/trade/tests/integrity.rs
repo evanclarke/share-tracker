@@ -205,6 +205,7 @@ async fn db_shrink_check_rebases_post_split_allocations() {
                 fraction_rule: FractionRule::Exact,
                 split_new_units: Decimal::from(2),
                 split_old_units: Decimal::ONE,
+                record_date: None,
             },
         },
     )

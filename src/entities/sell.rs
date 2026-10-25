@@ -1360,6 +1360,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     bonus_units: Decimal::ONE,
                     bonus_held_units: Decimal::from(3),
+                    record_date: None,
                 },
             },
         )
@@ -1422,6 +1423,7 @@ mod tests {
                 fraction_rule: FractionRule::Exact,
                 bonus_units: Decimal::from(units),
                 bonus_held_units: Decimal::ONE,
+                record_date: None,
             },
         };
         corporate_action::db_upsert(
@@ -1918,6 +1920,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: Decimal::from(2),
                     split_old_units: Decimal::ONE,
+                    record_date: None,
                 },
             },
         )

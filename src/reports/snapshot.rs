@@ -3629,6 +3629,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: "2".parse().unwrap(),
                     split_old_units: "1".parse().unwrap(),
+                    record_date: None,
                 },
             },
         )
@@ -3682,6 +3683,7 @@ mod tests {
                     fraction_rule: FractionRule::Exact,
                     split_new_units: "10".parse().unwrap(),
                     split_old_units: "1".parse().unwrap(),
+                    record_date: None,
                 },
             },
         )
@@ -4147,6 +4149,7 @@ mod tests {
                                 fraction_rule: FractionRule::Exact,
                                 split_new_units: Decimal::from(2),
                                 split_old_units: Decimal::ONE,
+                                record_date: None,
                             },
                         },
                     )

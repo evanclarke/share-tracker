@@ -57,6 +57,7 @@ async fn api_share_split_round_trip() {
             fraction_rule: FractionRule::Exact,
             split_new_units: Decimal::from(2),
             split_old_units: Decimal::ONE,
+            record_date: None,
         }
     );
 }
@@ -85,6 +86,7 @@ async fn api_bonus_issue_round_trip() {
             fraction_rule: FractionRule::Exact,
             bonus_units: Decimal::ONE,
             bonus_held_units: Decimal::from(10),
+            record_date: None,
         }
     );
 }
@@ -966,7 +968,8 @@ async fn api_return_of_capital_record_date_round_trip() {
 }
 
 /// A record date after the payment it entitles the holder to is a
-/// contradiction, and no other action type has one at all — both rejected
+/// contradiction, and an action type outside `ReturnOfCapital`, `ShareSplit`
+/// and `BonusIssue` has none at all — both rejected
 /// rather than silently dropped.
 #[tokio::test]
 async fn api_invalid_record_dates_return_422() {
@@ -980,15 +983,6 @@ async fn api_invalid_record_dates_return_422() {
             "amount_per_unit": "0.50",
             "currency": "AUD",
             "record_date": "2025-03-02",
-        }),
-        serde_json::json!({
-            "action_type": "ShareSplit",
-            "fraction_rule": "Exact",
-            "listing_id": 1,
-            "date": "2025-03-01",
-            "split_new_units": "2",
-            "split_old_units": "1",
-            "record_date": "2025-02-10",
         }),
         serde_json::json!({
             "action_type": "RightsIssue",

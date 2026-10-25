@@ -26,14 +26,38 @@
 //! rows are then reconciled with what is stored: a row that would not change
 //! is not rewritten, so recomputing after an unrelated edit writes nothing.
 //!
-//! The units an action converts are those its own re-base converts: the
-//! parcels acquired (traded) before its date, less the sales dated before it
-//! — a trade dated on or after it is stated in the post-action basis, which is
-//! the convention every quantity re-base in the application keys on
-//! (`domain::adjustments::split_ratio`). A share split or bonus issue carries
-//! no record date of its own here, and its `date` is what decides which basis
-//! a trade's quantity is in, so that is also what decides which units the
-//! registry rounded.
+//! **Which units are rounded — the register at the record date.** A share
+//! split's or bonus issue's `date` is its ex-date: a trade dated before it is
+//! stated in the pre-action basis and is converted by the re-base, a trade on
+//! or after it is already in the post-action basis (the convention every
+//! quantity re-base keys on, `domain::adjustments::split_ratio`). The registry
+//! rounds something else — each holding as its **register** stood at the
+//! action's record date, read off settlement dates (a Buy settled on or before
+//! it, a Sell settled after it; CLAUDE.md, Financial correctness). Under the
+//! market timetable the two sets are the same for every normally settled trade
+//! (ASX: the record date is the business day after the ex-date, and post-ex
+//! trades settle on a deferred basis after the register is reconstructed;
+//! NYSE: a due bill carries the new shares to a buyer between the record date
+//! and the ex-date), so they differ only by a trade that **straddles** them —
+//! traded before the ex-date, settled after the record date. Such a trade is a
+//! settlement obligation the clearing house converts on its own, and that is
+//! how it is rounded here:
+//!
+//! - a **straddling Buy** is not on its buyer's register at the record date: its
+//!   parcel is rounded alone (`Rounding::for_obligation` — the action's rule,
+//!   with a cash-in-lieu fraction left to the registered seller);
+//! - a **straddling Sell** was still on its seller's register: its units are
+//!   rounded with the holding, and its own converted count is delivered out of
+//!   the rounded total, the holding's remaining parcels sharing what is left
+//!   (`entitlement_rounding::round_registered_holding`).
+//!
+//! Every per-parcel count is still stored against the parcels the re-base
+//! converts — the ones traded before the action — so the re-base and the
+//! rounding always describe the same units. A trade traded on or after the
+//! ex-date is in the post-action basis whenever it settles, and takes no part.
+//! With no record date recorded the register is the timetable's: every trade
+//! dated before the action, which is what every action recorded before the
+//! column existed has always rounded.
 
 use crate::domain::adjustments::{
     AcquiredUnits, SplitEvent, StoredCount, UnitsAt, sold_in_acquired_units,
@@ -41,7 +65,6 @@ use crate::domain::adjustments::{
 };
 use crate::domain::cost_base::UnrepresentableQuantity;
 use crate::domain::entitlement_rounding::{self, ParcelBefore, ParcelCount, Prior, RoundingError};
-use crate::domain::open_parcels;
 use crate::entities::corporate_action::model::FractionRule;
 use crate::entities::holding_unit_scale;
 use crate::infra::decimal::{Money, parse_dec};
@@ -83,9 +106,10 @@ impl RoundError {
             RoundingError::ParcelEmptied(trade) => format!(
                 "corporate action #{action_id}'s rounding leaves parcel (trade #{trade}) in \
                  holding account {account} with no units: the holding's rounded count is too \
-                 small to give every parcel a unit on its grid, and a parcel with no units would \
-                 strand its cost base where no sale can reach it. Record the action with \
-                 fraction_rule Exact, or a units-received override for that account, instead"
+                 small to give every parcel a unit on its grid (or the parcel, settled after the \
+                 action's record date, is converted on its own and is too small for a unit), \
+                 and a parcel with no units would strand its cost base where no sale can reach \
+                 it. Record the action with fraction_rule Exact, or a units-received override for that account, instead"
             ),
             RoundingError::ReceivedNotPositive(received) => format!(
                 "the units received by holding account {account} from corporate action \
@@ -107,6 +131,8 @@ impl RoundError {
 struct Action {
     id: i64,
     date: NaiveDate,
+    /// The register's record date, if one is recorded.
+    record_date: Option<NaiveDate>,
     event: SplitEvent,
     rule: FractionRule,
 }
@@ -115,8 +141,30 @@ struct Action {
 struct Parcel {
     id: TradeId,
     date: NaiveDate,
+    /// Its settlement date — when it joined the register.
+    settled: NaiveDate,
     quantity: AcquiredUnits,
     account: HoldingAccountId,
+}
+
+/// One sale's allocation from a parcel of the listing, as the pass reads it.
+struct Sale {
+    /// The Sell.
+    sale: TradeId,
+    /// The units allocated, in the basis of the sale's own (trade) date.
+    units: UnitsAt,
+    /// The Sell's settlement date — when its units left the register.
+    settled: NaiveDate,
+}
+
+/// What one holding's register held at a rounded action's record date: its
+/// registered parcels' units before the action, plus the units of each Sell
+/// traded before the action that had not yet settled (by Sell, in the basis
+/// immediately before the action).
+#[derive(Default)]
+struct Registered {
+    units: Decimal,
+    pending: BTreeMap<TradeId, Decimal>,
 }
 
 /// Why a write's recomputed counts could not stand. Each is answered `422`
@@ -307,8 +355,8 @@ async fn db_recompute_listing(
     listing_id: ListingId,
 ) -> Result<(), RoundError> {
     let action_rows = sqlx::query(
-        "SELECT id, action_type, date, split_new_units, split_old_units, bonus_units, \
-                bonus_held_units, fraction_rule FROM corporate_actions \
+        "SELECT id, action_type, date, rebase_record_date, split_new_units, split_old_units, \
+                bonus_units, bonus_held_units, fraction_rule FROM corporate_actions \
          WHERE listing_id = ? AND (action_type = 'ShareSplit' OR action_type = 'BonusIssue') \
          ORDER BY date, id",
     )
@@ -337,6 +385,7 @@ async fn db_recompute_listing(
         actions.push(Action {
             id: row.try_get("id")?,
             date,
+            record_date: row.try_get("rebase_record_date")?,
             event,
             rule,
         });
@@ -346,7 +395,7 @@ async fn db_recompute_listing(
     let mut desired: BTreeMap<(i64, TradeId), ParcelCount> = BTreeMap::new();
     if actions.iter().any(|a| a.rule.rounding().is_some()) {
         let parcels = db_parcels(&mut *conn, listing_id).await?;
-        let sales = open_parcels::db_sales_by_parcel(&mut *conn, Some(listing_id)).await?;
+        let sales = db_sales(&mut *conn, listing_id).await?;
         let overrides = db_overrides(&mut *conn, listing_id).await?;
         let priors = db_priors(&mut *conn, listing_id).await?;
         let mut scales: HashMap<HoldingAccountId, Option<u32>> = HashMap::new();
@@ -358,9 +407,17 @@ async fn db_recompute_listing(
             let Some(rounding) = action.rule.rounding() else {
                 continue;
             };
-            // Each account's parcels as they stood immediately before the
-            // action, in the basis then in force.
-            let mut holdings: BTreeMap<HoldingAccountId, Vec<ParcelBefore>> = BTreeMap::new();
+            // Each account's registered parcels as they stood immediately
+            // before the action, in the basis then in force, with what its
+            // register held at the record date; and the parcels that joined
+            // no register by then, each its own settlement obligation.
+            let mut holdings: BTreeMap<HoldingAccountId, (Vec<ParcelBefore>, Registered)> =
+                BTreeMap::new();
+            let mut obligations: Vec<(HoldingAccountId, ParcelBefore)> = Vec::new();
+            // Registered at the record date: settled on or before it. With
+            // none recorded, the timetable's register — every trade dated
+            // before the action.
+            let registered = |settled: NaiveDate| action.record_date.is_none_or(|d| settled <= d);
             for parcel in parcels.iter().filter(|p| p.date < action.date) {
                 let prior: Vec<SplitEvent> = actions[..index]
                     .iter()
@@ -373,61 +430,55 @@ async fn db_recompute_listing(
                         event
                     })
                     .collect();
-                let sold_before: Vec<UnitsAt> = sales
+                // The sales traded before the action, which its basis
+                // already deducts from the parcel.
+                let sold_before: Vec<&Sale> = sales
                     .get(&parcel.id)
                     .map_or(&[][..], |v| v)
                     .iter()
-                    .copied()
-                    .filter(|s| s.basis().is_some_and(|d| d < action.date))
+                    .filter(|s| s.units.basis().is_some_and(|d| d < action.date))
                     .collect();
                 let remaining = parcel.quantity
-                    - sold_in_acquired_units(parcel.quantity, sold_before, &prior, parcel.date);
-                if remaining <= AcquiredUnits::ZERO {
+                    - sold_in_acquired_units(
+                        parcel.quantity,
+                        sold_before.iter().map(|s| s.units),
+                        &prior,
+                        parcel.date,
+                    );
+                let units = if remaining > AcquiredUnits::ZERO {
+                    split_adjusted_quantity(remaining, &prior, parcel.date, None).quantity()
+                } else {
+                    Decimal::ZERO
+                };
+                let before = ParcelBefore {
+                    trade_id: parcel.id,
+                    acquired: parcel.date,
+                    units,
+                    prior: priors.get(&(action.id, parcel.id)).copied(),
+                };
+                if !registered(parcel.settled) {
+                    if units > Decimal::ZERO {
+                        obligations.push((parcel.account, before));
+                    }
                     continue;
                 }
-                let units =
-                    split_adjusted_quantity(remaining, &prior, parcel.date, None).quantity();
-                holdings
-                    .entry(parcel.account)
-                    .or_default()
-                    .push(ParcelBefore {
-                        trade_id: parcel.id,
-                        acquired: parcel.date,
-                        units,
-                        prior: priors.get(&(action.id, parcel.id)).copied(),
-                    });
+                let (held, register) = holdings.entry(parcel.account).or_default();
+                register.units += units;
+                // A sale traded before the action but settled after the
+                // record date: its units were still on the register, and
+                // leave it afterwards as an obligation of their own.
+                for sale in sold_before.iter().filter(|s| !registered(s.settled)) {
+                    let pending = sale.units.rebased(&prior, None).quantity();
+                    register.units += pending;
+                    *register.pending.entry(sale.sale).or_default() += pending;
+                }
+                if units > Decimal::ZERO {
+                    held.push(before);
+                }
             }
 
             let mut stored = HashMap::new();
-            for (account, before) in holdings {
-                let scale = match scales.get(&account) {
-                    Some(scale) => *scale,
-                    None => {
-                        let scale =
-                            holding_unit_scale::db_unit_scale(&mut *conn, account, listing_id)
-                                .await?;
-                        scales.insert(account, scale);
-                        scale
-                    }
-                };
-                // An unconstrained holding has no grid to round onto: the
-                // registry holds what the ratio produces, as for `Exact`.
-                let Some(scale) = scale else {
-                    continue;
-                };
-                let counts = entitlement_rounding::round_holding(
-                    &before,
-                    action.event.new_units,
-                    action.event.old_units,
-                    scale,
-                    rounding,
-                    overrides.get(&(action.id, account)).copied(),
-                )
-                .map_err(|source| RoundError::Holding {
-                    action_id: action.id,
-                    account,
-                    source,
-                })?;
+            let mut store = |counts: Vec<ParcelCount>| {
                 for count in counts {
                     stored.insert(
                         count.trade_id,
@@ -438,6 +489,67 @@ async fn db_recompute_listing(
                     );
                     desired.insert((action.id, count.trade_id), count);
                 }
+            };
+            for (account, (before, register)) in holdings {
+                // An unconstrained holding has no grid to round onto: the
+                // registry holds what the ratio produces, as for `Exact`.
+                let Some(scale) = scale_of(&mut *conn, &mut scales, account, listing_id).await?
+                else {
+                    continue;
+                };
+                let received = overrides.get(&(action.id, account)).copied();
+                let counts = if register.pending.is_empty() {
+                    entitlement_rounding::round_holding(
+                        &before,
+                        action.event.new_units,
+                        action.event.old_units,
+                        scale,
+                        rounding,
+                        received,
+                    )
+                } else {
+                    entitlement_rounding::round_registered_holding(
+                        &before,
+                        &entitlement_rounding::Register {
+                            units: register.units,
+                            delivered: register.pending.into_values().collect(),
+                        },
+                        action.event.new_units,
+                        action.event.old_units,
+                        scale,
+                        rounding,
+                        received,
+                    )
+                }
+                .map_err(|source| RoundError::Holding {
+                    action_id: action.id,
+                    account,
+                    source,
+                })?;
+                store(counts);
+            }
+            // A parcel traded before the action but registered after the
+            // record date: the seller's holding was rounded with its units,
+            // and the clearing house converts the obligation on its own.
+            for (account, before) in obligations {
+                let Some(scale) = scale_of(&mut *conn, &mut scales, account, listing_id).await?
+                else {
+                    continue;
+                };
+                let counts = entitlement_rounding::round_holding(
+                    &[before],
+                    action.event.new_units,
+                    action.event.old_units,
+                    scale,
+                    rounding.for_obligation(),
+                    None,
+                )
+                .map_err(|source| RoundError::Holding {
+                    action_id: action.id,
+                    account,
+                    source,
+                })?;
+                store(counts);
             }
             computed.insert(action.id, stored);
         }
@@ -611,7 +723,7 @@ async fn db_parcels(
     listing_id: ListingId,
 ) -> Result<Vec<Parcel>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, date, quantity, holding_account_id FROM trades \
+        "SELECT id, date, settlement_date, quantity, holding_account_id FROM trades \
          WHERE listing_id = ? AND trade_type IN ('Buy', 'DRP') ORDER BY date, id",
     )
     .bind(listing_id)
@@ -622,11 +734,60 @@ async fn db_parcels(
             Ok(Parcel {
                 id: row.try_get("id")?,
                 date: row.try_get("date")?,
+                settled: row.try_get("settlement_date")?,
                 quantity: AcquiredUnits::new(parse_dec("quantity", row.try_get("quantity")?)?),
                 account: row.try_get("holding_account_id")?,
             })
         })
         .collect()
+}
+
+/// Every allocation from a parcel of the listing, by parcel.
+async fn db_sales(
+    conn: &mut sqlx::SqliteConnection,
+    listing_id: ListingId,
+) -> Result<HashMap<TradeId, Vec<Sale>>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT pa.purchase_trade_id, pa.sale_trade_id, s.date, s.settlement_date, \
+                pa.quantity_allocated \
+         FROM parcel_allocations pa \
+         JOIN trades s ON s.id = pa.sale_trade_id \
+         JOIN trades p ON p.id = pa.purchase_trade_id \
+         WHERE p.listing_id = ? ORDER BY pa.sale_trade_id, pa.purchase_trade_id",
+    )
+    .bind(listing_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut sales: HashMap<TradeId, Vec<Sale>> = HashMap::new();
+    for row in &rows {
+        sales
+            .entry(row.try_get("purchase_trade_id")?)
+            .or_default()
+            .push(Sale {
+                sale: row.try_get("sale_trade_id")?,
+                units: UnitsAt::new(
+                    parse_dec("quantity_allocated", row.try_get("quantity_allocated")?)?,
+                    row.try_get("date")?,
+                ),
+                settled: row.try_get("settlement_date")?,
+            });
+    }
+    Ok(sales)
+}
+
+/// The unit scale of `account`'s holding of `listing_id`, read once per pass.
+async fn scale_of(
+    conn: &mut sqlx::SqliteConnection,
+    scales: &mut HashMap<HoldingAccountId, Option<u32>>,
+    account: HoldingAccountId,
+    listing_id: ListingId,
+) -> Result<Option<u32>, sqlx::Error> {
+    if let Some(scale) = scales.get(&account) {
+        return Ok(*scale);
+    }
+    let scale = holding_unit_scale::db_unit_scale(&mut *conn, account, listing_id).await?;
+    scales.insert(account, scale);
+    Ok(scale)
 }
 
 /// The "units received" overrides of the listing's actions, by (action,

@@ -198,7 +198,6 @@ pub fn round_holding(
     rule: Rounding,
     units_received: Option<Decimal>,
 ) -> Result<Vec<ParcelCount>, RoundingError> {
-    let step = Decimal::new(1, scale);
     let overflow = || RoundingError::Unrepresentable;
     let held = parcels
         .iter()
@@ -207,46 +206,193 @@ pub fn round_holding(
     if parcels.is_empty() || held <= Decimal::ZERO {
         return Ok(vec![]);
     }
-    // The holding's exact count, `held × new / old`, as a floor and remainder
-    // over the divisor `old`.
-    let exact_num = held.checked_mul(new).ok_or_else(overflow)?;
-    let (exact_floor, exact_rem) = floor_on_grid(exact_num, old, scale).ok_or_else(overflow)?;
-
     let total = match units_received {
-        Some(received) => {
-            if received <= Decimal::ZERO {
-                return Err(RoundingError::ReceivedNotPositive(received));
-            }
-            if received.normalize().scale() > scale {
-                return Err(RoundingError::ReceivedOffGrid { received, scale });
-            }
-            received
-        }
-        None => match rule {
-            Rounding::Down | Rounding::CashInLieu => exact_floor,
-            Rounding::Up if exact_rem > Decimal::ZERO => {
-                exact_floor.checked_add(step).ok_or_else(overflow)?
-            }
-            Rounding::Up => exact_floor,
-            Rounding::Nearest => {
-                // The remainder is over the divisor `old`, and a step is
-                // `step × old` of it: half a step or more rounds up.
-                let doubled = exact_rem.checked_mul(Decimal::TWO).ok_or_else(overflow)?;
-                if doubled >= step.checked_mul(old).ok_or_else(overflow)? {
-                    exact_floor.checked_add(step).ok_or_else(overflow)?
-                } else {
-                    exact_floor
-                }
-            }
-        },
+        Some(received) => checked_received(received, scale)?,
+        None => rounded_total(held, new, old, scale, rule)?,
     };
-
+    let in_lieu = in_lieu_fraction(held, total, new, old, scale, rule)?;
     // Each parcel's share as (numerator, divisor): its exact count, or its
     // pro-rata part of an override.
-    let (multiplier, divisor) = match units_received {
+    let share_of = match units_received {
         Some(received) => (received, held),
         None => (new, old),
     };
+    distribute(parcels, total, share_of, scale, in_lieu)
+}
+
+/// What the register held for one holding at a share split's or bonus issue's
+/// **record date**, where that differs from its parcels' units before the
+/// action — the input [`round_registered_holding`] rounds.
+///
+/// The parcels a re-base converts are the ones **traded** before the action's
+/// date (a trade on or after it is stated in the post-action basis), net of
+/// the sales traded before it. The register at the record date is read off
+/// **settlement** dates instead (CLAUDE.md, Financial correctness). The two
+/// differ only by a trade that straddles them; a Sell traded before the
+/// action's date but settling after the record date still had its units on
+/// the register when the holding was rounded, and delivers its own count out
+/// of the rounded holding afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Register {
+    /// Units of the holding on the register at the record date, in the basis
+    /// in force immediately before the action: its registered parcels' units
+    /// before the action plus every straddling Sell's below.
+    pub units: Decimal,
+    /// Each straddling Sell's units, in the same basis — a settlement
+    /// obligation the clearing house converts on its own, delivered out of
+    /// the holding's rounded count ([`Rounding::for_obligation`]).
+    pub delivered: Vec<Decimal>,
+}
+
+/// [`round_holding`] for a holding whose register at the record date differs
+/// from its parcels' units before the action, because Sells traded before the
+/// action settled after the record date ([`Register`]).
+///
+/// The **register** is what the issuer's rule rounds: the holding's total is
+/// `register.units × new / old` rounded onto the grid by `rule` — or
+/// `units_received`, which states the register's figure. Each straddling Sell
+/// is a settlement obligation converted on its own, `units × new / old`
+/// rounded by [`Rounding::for_obligation`], and delivered out of that total;
+/// what is left is the parcels' count after the action, distributed across
+/// them as [`round_holding`] distributes an override — each parcel's share its
+/// pro-rata part of it, every count within a step of its share, with the same
+/// stability and the same tie-breaks. A cash-in-lieu fraction is the
+/// register's (the registry pays the registered holder for the whole
+/// holding's fraction), carried on one parcel as for [`round_holding`].
+///
+/// A total the deliveries leave with nothing for a parcel that still holds
+/// units is refused [`RoundingError::ParcelEmptied`], as any rounding that
+/// would empty a parcel is.
+pub fn round_registered_holding(
+    parcels: &[ParcelBefore],
+    register: &Register,
+    new: Decimal,
+    old: Decimal,
+    scale: u32,
+    rule: Rounding,
+    units_received: Option<Decimal>,
+) -> Result<Vec<ParcelCount>, RoundingError> {
+    let overflow = || RoundingError::Unrepresentable;
+    let held = parcels
+        .iter()
+        .try_fold(Decimal::ZERO, |acc, p| acc.checked_add(p.units))
+        .ok_or_else(overflow)?;
+    if parcels.is_empty() || held <= Decimal::ZERO {
+        return Ok(vec![]);
+    }
+    let registered = match units_received {
+        Some(received) => checked_received(received, scale)?,
+        None => rounded_total(register.units, new, old, scale, rule)?,
+    };
+    let mut total = registered;
+    for &units in &register.delivered {
+        let delivered = rounded_total(units, new, old, scale, rule.for_obligation())?;
+        total = total.checked_sub(delivered).ok_or_else(overflow)?;
+    }
+    if total <= Decimal::ZERO {
+        return Err(RoundingError::ParcelEmptied(parcels[0].trade_id));
+    }
+    let in_lieu = in_lieu_fraction(register.units, registered, new, old, scale, rule)?;
+    distribute(parcels, total, (total, held), scale, in_lieu)
+}
+
+impl Rounding {
+    /// The rounding a **settlement obligation** straddling the action is
+    /// converted by: the action's own, except that a cash-in-lieu fraction
+    /// belongs to the holder registered at the record date (the registry pays
+    /// it for the whole registered holding), so an obligation is rounded down
+    /// and carries none.
+    pub fn for_obligation(self) -> Self {
+        match self {
+            Rounding::CashInLieu | Rounding::Down => Rounding::Down,
+            Rounding::Up => Rounding::Up,
+            Rounding::Nearest => Rounding::Nearest,
+        }
+    }
+}
+
+/// A "units received" override, checked: positive and on the grid.
+fn checked_received(received: Decimal, scale: u32) -> Result<Decimal, RoundingError> {
+    if received <= Decimal::ZERO {
+        return Err(RoundingError::ReceivedNotPositive(received));
+    }
+    if received.normalize().scale() > scale {
+        return Err(RoundingError::ReceivedOffGrid { received, scale });
+    }
+    Ok(received)
+}
+
+/// `units × new / old` rounded onto the grid of `scale` places by `rule`.
+fn rounded_total(
+    units: Decimal,
+    new: Decimal,
+    old: Decimal,
+    scale: u32,
+    rule: Rounding,
+) -> Result<Decimal, RoundingError> {
+    let step = Decimal::new(1, scale);
+    let overflow = || RoundingError::Unrepresentable;
+    // The exact count, `units × new / old`, as a floor and remainder over the
+    // divisor `old`.
+    let exact_num = units.checked_mul(new).ok_or_else(overflow)?;
+    let (exact_floor, exact_rem) = floor_on_grid(exact_num, old, scale).ok_or_else(overflow)?;
+    Ok(match rule {
+        Rounding::Down | Rounding::CashInLieu => exact_floor,
+        Rounding::Up if exact_rem > Decimal::ZERO => {
+            exact_floor.checked_add(step).ok_or_else(overflow)?
+        }
+        Rounding::Up => exact_floor,
+        Rounding::Nearest => {
+            // The remainder is over the divisor `old`, and a step is
+            // `step × old` of it: half a step or more rounds up.
+            let doubled = exact_rem.checked_mul(Decimal::TWO).ok_or_else(overflow)?;
+            if doubled >= step.checked_mul(old).ok_or_else(overflow)? {
+                exact_floor.checked_add(step).ok_or_else(overflow)?
+            } else {
+                exact_floor
+            }
+        }
+    })
+}
+
+/// Under [`Rounding::CashInLieu`], the fraction of `units × new / old` that
+/// `total` leaves — to [`IN_LIEU_PLACES`] places beyond the grid, rounded
+/// down; `None` under any other rule.
+fn in_lieu_fraction(
+    units: Decimal,
+    total: Decimal,
+    new: Decimal,
+    old: Decimal,
+    scale: u32,
+    rule: Rounding,
+) -> Result<Option<Decimal>, RoundingError> {
+    if rule != Rounding::CashInLieu {
+        return Ok(None);
+    }
+    let overflow = || RoundingError::Unrepresentable;
+    let exact_num = units.checked_mul(new).ok_or_else(overflow)?;
+    Ok(Some(
+        exact_num
+            .checked_sub(total.checked_mul(old).ok_or_else(overflow)?)
+            .ok_or_else(overflow)?
+            .checked_div(old)
+            .ok_or_else(overflow)?
+            .round_dp_with_strategy(scale + IN_LIEU_PLACES, RoundingStrategy::ToZero),
+    ))
+}
+
+/// Distribute `total` across `parcels` — each parcel's share `units ×
+/// share_of.0 / share_of.1` — by [`round_holding`]'s steps (1)–(4), carrying
+/// `in_lieu` (a cash-in-lieu fraction) on one parcel.
+fn distribute(
+    parcels: &[ParcelBefore],
+    total: Decimal,
+    (multiplier, divisor): (Decimal, Decimal),
+    scale: u32,
+    in_lieu: Option<Decimal>,
+) -> Result<Vec<ParcelCount>, RoundingError> {
+    let step = Decimal::new(1, scale);
+    let overflow = || RoundingError::Unrepresentable;
     let mut shares: Vec<(Decimal, Decimal)> = Vec::with_capacity(parcels.len());
     for p in parcels {
         let num = p.units.checked_mul(multiplier).ok_or_else(overflow)?;
@@ -353,25 +499,17 @@ pub fn round_holding(
     }
 
     // Cash in lieu: the exact count less the rounded-down total, carried on
-    // the first parcel in the distribution's order whose count is its floor —
-    // to [`IN_LIEU_PLACES`] places beyond the grid, rounded down.
-    if rule == Rounding::CashInLieu {
-        let fraction = exact_num
-            .checked_sub(total.checked_mul(old).ok_or_else(overflow)?)
-            .ok_or_else(overflow)?
-            .checked_div(old)
-            .ok_or_else(overflow)?
-            .round_dp_with_strategy(scale + IN_LIEU_PLACES, RoundingStrategy::ToZero);
-        if fraction > Decimal::ZERO
-            && let Some(&i) = order.iter().find(|&&i| counts[i].after == shares[i].0)
-        {
-            let carried = counts[i].after;
-            let after = carried.checked_add(fraction).ok_or_else(overflow)?;
-            counts[i].after = after;
-            // Recomputed from the stored figure, so the two always reconcile
-            // to the grid count exactly.
-            counts[i].in_lieu = after - carried;
-        }
+    // the first parcel in the distribution's order whose count is its floor.
+    if let Some(fraction) = in_lieu
+        && fraction > Decimal::ZERO
+        && let Some(&i) = order.iter().find(|&&i| counts[i].after == shares[i].0)
+    {
+        let carried = counts[i].after;
+        let after = carried.checked_add(fraction).ok_or_else(overflow)?;
+        counts[i].after = after;
+        // Recomputed from the stored figure, so the two always reconcile
+        // to the grid count exactly.
+        counts[i].in_lieu = after - carried;
     }
 
     if let Some(emptied) = counts.iter().find(|c| c.after.is_zero()) {
@@ -687,6 +825,76 @@ mod tests {
     /// The band of the distribution's step (2): whether the parcels without a
     /// kept count can absorb `rest`, each taking its floor or (where its
     /// share is off the grid) one step more, every zero floor taking the step.
+    #[test]
+    fn a_straddling_sale_is_rounded_with_the_register_and_delivered_out_of_it() {
+        // Parcels of 48 and 50 by trade date; 2 more units were sold before
+        // the action but settled after the record date, so the register held
+        // 100. 1-for-3, rounded down: the register is 33, the 2-unit
+        // obligation delivers 0, and the parcels share 33 pro rata.
+        let register = Register {
+            units: d("100"),
+            delivered: vec![d("2")],
+        };
+        let counts = round_registered_holding(
+            &[parcel(1, 1, "48"), parcel(2, 2, "50")],
+            &register,
+            d("1"),
+            d("3"),
+            0,
+            Rounding::Down,
+            None,
+        )
+        .unwrap();
+        assert_eq!(afters(&counts), [d("16"), d("17")]);
+        // Rounded up, the register is 34 and the obligation delivers 1.
+        let counts = round_registered_holding(
+            &[parcel(1, 1, "48"), parcel(2, 2, "50")],
+            &register,
+            d("1"),
+            d("3"),
+            0,
+            Rounding::Up,
+            None,
+        )
+        .unwrap();
+        assert_eq!(afters(&counts).iter().sum::<Decimal>(), d("33"));
+        // Under cash in lieu the obligation is rounded down and the fraction
+        // is the register's: 100/3 − 33 = 1/3, on one parcel.
+        let counts = round_registered_holding(
+            &[parcel(1, 1, "48"), parcel(2, 2, "50")],
+            &register,
+            d("1"),
+            d("3"),
+            0,
+            Rounding::CashInLieu,
+            None,
+        )
+        .unwrap();
+        let in_lieu: Decimal = counts.iter().map(|c| c.in_lieu).sum();
+        assert_eq!(in_lieu, d("0.333333333333"));
+    }
+
+    #[test]
+    fn deliveries_that_leave_nothing_for_a_parcel_are_refused() {
+        // A register of 7 rounds to 2; two 3-unit obligations deliver 1 each.
+        let register = Register {
+            units: d("7"),
+            delivered: vec![d("3"), d("3")],
+        };
+        assert_eq!(
+            round_registered_holding(
+                &[parcel(1, 1, "1")],
+                &register,
+                d("1"),
+                d("3"),
+                0,
+                Rounding::Down,
+                None,
+            ),
+            Err(RoundingError::ParcelEmptied(TradeId(1)))
+        );
+    }
+
     fn absorbable(free: &[(Decimal, bool)], rest: Decimal, step: Decimal) -> bool {
         let lower: Decimal = free.iter().map(|(f, _)| *f).sum();
         let must = Decimal::from(free.iter().filter(|(f, _)| f.is_zero()).count()) * step;
@@ -864,6 +1072,72 @@ mod tests {
                 );
             } else {
                 prop_assert_eq!(in_lieu, Decimal::ZERO);
+            }
+        }
+
+        /// The register's rounding: whatever the straddling Sells deliver,
+        /// the parcels' counts sum to the register's rounded total less each
+        /// delivery's own rounded count, on the grid, each within a step of its
+        /// pro-rata share of that — or the holding is refused because that
+        /// leaves too little to give every parcel a step.
+        #[test]
+        fn a_registered_holding_delivers_its_obligations_and_shares_the_rest(
+            units in prop::collection::vec(1i64..=500, 1..=4),
+            delivered in prop::collection::vec(1i64..=200, 0..=3),
+            new in 1i64..=6,
+            old in 1i64..=6,
+            rule in prop_oneof![
+                Just(Rounding::Down),
+                Just(Rounding::Up),
+                Just(Rounding::Nearest),
+                Just(Rounding::CashInLieu),
+            ],
+        ) {
+            let parcels: Vec<ParcelBefore> = units
+                .iter()
+                .enumerate()
+                .map(|(i, u)| parcel(i64::try_from(i).unwrap() + 1, 1, &u.to_string()))
+                .collect();
+            let held: Decimal = parcels.iter().map(|p| p.units).sum();
+            let register = Register {
+                units: held + delivered.iter().map(|d| Decimal::from(*d)).sum::<Decimal>(),
+                delivered: delivered.iter().map(|d| Decimal::from(*d)).collect(),
+            };
+            let (new, old) = (Decimal::from(new), Decimal::from(old));
+            let round = |x: Decimal, rule: Rounding| match rule {
+                Rounding::Down | Rounding::CashInLieu => x.floor(),
+                Rounding::Up => x.ceil(),
+                Rounding::Nearest => {
+                    x.round_dp_with_strategy(0, RoundingStrategy::MidpointAwayFromZero)
+                }
+            };
+            let target = round(register.units * new / old, rule)
+                - register
+                    .delivered
+                    .iter()
+                    .map(|d| round(*d * new / old, rule.for_obligation()))
+                    .sum::<Decimal>();
+            let result = round_registered_holding(&parcels, &register, new, old, 0, rule, None);
+            let Ok(counts) = result else {
+                // Refused only where the shares rounded down leave more
+                // parcels at nothing than the leftover steps can reach.
+                prop_assert!(matches!(result, Err(RoundingError::ParcelEmptied(_))));
+                if target > Decimal::ZERO {
+                    let floors: Vec<Decimal> =
+                        parcels.iter().map(|p| (p.units * target / held).floor()).collect();
+                    let zeros = floors.iter().filter(|f| f.is_zero()).count();
+                    let spare = target - floors.iter().copied().sum::<Decimal>();
+                    prop_assert!(Decimal::from(zeros) > spare);
+                }
+                return Ok(());
+            };
+            let on_grid: Vec<Decimal> = counts.iter().map(|c| c.after - c.in_lieu).collect();
+            prop_assert_eq!(on_grid.iter().copied().sum::<Decimal>(), target);
+            for (count, p) in on_grid.iter().zip(&parcels) {
+                prop_assert_eq!(*count, count.trunc());
+                prop_assert!(*count > Decimal::ZERO);
+                let scaled = *count * held - p.units * target;
+                prop_assert!(scaled.abs() < held, "{count} vs {} × {target} / {held}", p.units);
             }
         }
     }

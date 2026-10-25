@@ -32,6 +32,7 @@ async fn db_a_consolidation_that_does_not_divide_still_sells_out_exactly() {
                 fraction_rule: FractionRule::Exact,
                 split_new_units: "3".parse().unwrap(),
                 split_old_units: "7".parse().unwrap(),
+                record_date: None,
             },
         },
     )
