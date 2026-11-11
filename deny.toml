@@ -22,4 +22,5 @@
 [advisories]
 version = 2
 ignore = [
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite < 3.54.0 (stale page-cache bytes from a crafted db + -wal pair); fixed in libsqlite3-sys 0.39, but sqlx-sqlite 0.9.0 (latest) caps it below 0.38. The server opens only its own database and the backups it just wrote, never a file a less trusted party supplied. Remove when sqlx releases with libsqlite3-sys >= 0.39" }, # expires: 2027-01-31
 ]
