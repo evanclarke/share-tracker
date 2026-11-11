@@ -196,3 +196,13 @@ is the layer Phase 3 needs.
   support exemption is likewise not modelled.
 - [ ] The new AMMA statement components (deferred / indexed gains) and the new return labels on
   the annual tax report, once published.
+
+## Remove the RUSTSEC-2026-0459 advisory ignore (raised 2026-11-11)
+The advisory (bundled SQLite < 3.54.0) failed CI's `cargo deny` gate on 2026-11-11 and went on
+`deny.toml`'s ignore list (expires 2027-01-31): the fix is `libsqlite3-sys` 0.39, which
+`sqlx-sqlite` 0.9.0 caps below 0.38.
+- [ ] When a sqlx release allows `libsqlite3-sys` >= 0.39 (watch Dependabot's cargo group PRs):
+  upgrade sqlx, bump the `libsqlite3-sys` dev-dependency in `Cargo.toml` in step with it (its raw
+  handle backs the busy-probe FFI), remove the ignore entry from `deny.toml`, and confirm
+  `cargo deny check advisories` passes without it. If no release lands by 2027-01-31,
+  `doc_checks::advisory_ignores_expire` fails the suite: re-justify the entry with a new expiry.
